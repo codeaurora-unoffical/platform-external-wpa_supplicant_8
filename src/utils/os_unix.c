@@ -415,10 +415,10 @@ int os_file_exists(const char *fname)
 }
 
 
-int os_fsync(FILE *stream)
+int os_fdatasync(FILE *stream)
 {
 	if (!fflush(stream))
-		return fsync(fileno(stream));
+		return fdatasync(fileno(stream));
 	return -1;
 }
 

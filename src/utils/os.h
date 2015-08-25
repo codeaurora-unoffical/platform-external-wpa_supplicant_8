@@ -247,11 +247,11 @@ char * os_readfile(const char *name, size_t *len);
 int os_file_exists(const char *fname);
 
 /**
- * os_fsync - Sync a file's (for a given stream) state with storage device
+ * os_fdatasync - Sync a file's (for a given stream) state with storage device
  * @stream: the stream to be flushed
  * Returns: 0 if the operation succeeded or -1 on failure
  */
-int os_fsync(FILE *stream);
+int os_fdatasync(FILE *stream);
 
 /**
  * os_zalloc - Allocate and zero memory
