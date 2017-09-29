@@ -199,6 +199,7 @@ struct wpa_ptk {
 	u8 kck[16]; /* EAPOL-Key Key Confirmation Key (KCK) */
 	u8 kek[16]; /* EAPOL-Key Key Encryption Key (KEK) */
 	u8 tk1[16]; /* Temporal Key 1 (TK1) */
+	int installed; /* 1 if key has already been installed to driver */
 	union {
 		u8 tk2[16]; /* Temporal Key 2 (TK2) */
 		struct {
