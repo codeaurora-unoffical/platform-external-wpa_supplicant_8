@@ -135,6 +135,8 @@ int ieee802_11_send_wnmsleep_req(struct wpa_supplicant *wpa_s,
 	if (res < 0)
 		wpa_printf(MSG_DEBUG, "Failed to send WNM-Sleep Request "
 			   "(action=%d, intval=%d)", action, intval);
+	else
+		wpa_s->wnmsleep_used = 1;
 
 	os_free(wnmsleep_ie);
 	os_free(wnmtfs_ie);
@@ -250,6 +252,12 @@ static void ieee802_11_rx_wnmsleep_resp(struct wpa_supplicant *wpa_s,
 	u8 *tfsresp_ie_start = NULL;
 	u8 *tfsresp_ie_end = NULL;
 
+	if (!wpa_s->wnmsleep_used) {
+		wpa_printf(MSG_DEBUG,
+			   "WNM: Ignore WNM-Sleep Mode Response frame since WNM-Sleep Mode operation has not been requested");
+		return;
+	}
+
 	wpa_printf(MSG_DEBUG, "action=%d token = %d key_len_total = %d",
 		   frm[0], frm[1], key_len_total);
 	pos += 4 + key_len_total;
@@ -279,6 +287,8 @@ static void ieee802_11_rx_wnmsleep_resp(struct wpa_supplicant *wpa_s,
 		wpa_printf(MSG_DEBUG, "No WNM-Sleep IE found");
 		return;
 	}
+
+	wpa_s->wnmsleep_used = 0;
 
 	if (wnmsleep_ie->status == WNM_STATUS_SLEEP_ACCEPT ||
 	    wnmsleep_ie->status == WNM_STATUS_SLEEP_EXIT_ACCEPT_GTK_UPDATE) {
