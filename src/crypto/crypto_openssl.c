@@ -1201,6 +1201,12 @@ int crypto_bignum_to_bin(const struct crypto_bignum *a,
 }
 
 
+int crypto_bignum_rand(struct crypto_bignum *r, const struct crypto_bignum *m)
+{
+	return BN_rand_range((BIGNUM *) r, (const BIGNUM *) m) == 1 ? 0 : -1;
+}
+
+
 int crypto_bignum_add(const struct crypto_bignum *a,
 		      const struct crypto_bignum *b,
 		      struct crypto_bignum *c)
@@ -1335,6 +1341,15 @@ int crypto_bignum_mulmod(const struct crypto_bignum *a,
 }
 
 
+int crypto_bignum_rshift(const struct crypto_bignum *a, int n,
+			 struct crypto_bignum *r)
+{
+	/* Note: BN_rshift() does not modify the first argument even though it
+	 * has not been marked const. */
+	return BN_rshift((BIGNUM *) a, (BIGNUM *) r, n) == 1 ? 0 : -1;
+}
+
+
 int crypto_bignum_cmp(const struct crypto_bignum *a,
 		      const struct crypto_bignum *b)
 {
@@ -1357,6 +1372,12 @@ int crypto_bignum_is_zero(const struct crypto_bignum *a)
 int crypto_bignum_is_one(const struct crypto_bignum *a)
 {
 	return BN_is_one((const BIGNUM *) a);
+}
+
+
+int crypto_bignum_is_odd(const struct crypto_bignum *a)
+{
+	return BN_is_odd((const BIGNUM *) a);
 }
 
 
@@ -1496,6 +1517,13 @@ void crypto_ec_deinit(struct crypto_ec *e)
 }
 
 
+int crypto_ec_cofactor(struct crypto_ec *e, struct crypto_bignum *cofactor)
+{
+	return EC_GROUP_get_cofactor(e->group, (BIGNUM *) cofactor,
+				     e->bnctx) == 0 ? -1 : 0;
+}
+
+
 struct crypto_ec_point * crypto_ec_point_init(struct crypto_ec *e)
 {
 	if (TEST_FAIL())
@@ -1518,6 +1546,12 @@ size_t crypto_ec_prime_len_bits(struct crypto_ec *e)
 }
 
 
+size_t crypto_ec_order_len(struct crypto_ec *e)
+{
+	return BN_num_bytes(e->order);
+}
+
+
 const struct crypto_bignum * crypto_ec_get_prime(struct crypto_ec *e)
 {
 	return (const struct crypto_bignum *) e->prime;
@@ -1536,6 +1570,16 @@ void crypto_ec_point_deinit(struct crypto_ec_point *p, int clear)
 		EC_POINT_clear_free((EC_POINT *) p);
 	else
 		EC_POINT_free((EC_POINT *) p);
+}
+
+
+int crypto_ec_point_x(struct crypto_ec *e, const struct crypto_ec_point *p,
+		      struct crypto_bignum *x)
+{
+	return EC_POINT_get_affine_coordinates_GFp(e->group,
+						   (const EC_POINT *) p,
+						   (BIGNUM *) x, NULL,
+						   e->bnctx) == 1 ? 0 : -1;
 }
 
 
