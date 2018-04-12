@@ -3111,7 +3111,7 @@ static void wpa_supplicant_update_channel_list(
 	wpa_s->hw.modes = wpa_drv_get_hw_feature_data(
 		wpa_s, &wpa_s->hw.num_modes, &wpa_s->hw.flags);
 
-	wpas_p2p_update_channel_list(wpa_s);
+	wpas_p2p_update_channel_list(wpa_s, WPAS_P2P_CHANNEL_UPDATE_DRIVER);
 
 	/*
 	 * Check other interfaces to see if they share the same radio. If
@@ -3271,7 +3271,8 @@ static void wpa_supplicant_notify_avoid_freq(struct wpa_supplicant *wpa_s,
 			__func__);
 	} else {
 		wpa_dbg(wpa_s, MSG_DEBUG, "P2P: Update channel list based on frequency avoid event");
-		wpas_p2p_update_channel_list(wpa_s);
+		wpas_p2p_update_channel_list(wpa_s,
+					     WPAS_P2P_CHANNEL_UPDATE_AVOID);
 	}
 
 	for (ifs = wpa_s->global->ifaces; ifs; ifs = ifs->next) {
