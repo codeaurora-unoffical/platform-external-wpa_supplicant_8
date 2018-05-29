@@ -626,12 +626,17 @@ CONFIG_EAP_SIM_COMMON=y
 NEED_AES_CBC=y
 endif
 
+ifndef DISABLE_EAP_PROXY
+ifneq ($(wildcard vendor/qcom/proprietary/mdm-helper/libmdmdetect),)
+CONFIG_EAP_PROXY_MDM_DETECT := true
+endif
 ifdef CONFIG_EAP_PROXY
 L_CFLAGS += -DCONFIG_EAP_PROXY
 OBJS += src/eap_peer/eap_proxy_$(CONFIG_EAP_PROXY).c
 include $(LOCAL_PATH)/eap_proxy_$(CONFIG_EAP_PROXY).mk
 CONFIG_IEEE8021X_EAPOL=y
-endif
+endif # CONFIG_EAP_PROXY
+endif # DISABLE_EAP_PROXY
 
 ifdef CONFIG_EAP_AKA_PRIME
 # EAP-AKA'
@@ -1494,6 +1499,12 @@ WPA_SUPPLICANT_USE_HIDL=y
 L_CFLAGS += -DCONFIG_HIDL -DCONFIG_CTRL_IFACE_HIDL
 endif
 
+ifdef CONFIG_SUPPLICANT_VENDOR_HIDL
+SUPPLICANT_VENDOR_HIDL=y
+SUPPLICANT_VENDOR_HIDL_VERSION=2.0
+L_CFLAGS += -DSUPPLICANT_VENDOR_HIDL
+endif
+
 ifdef CONFIG_READLINE
 OBJS_c += src/utils/edit_readline.c
 LIBS_c += -lncurses -lreadline
@@ -1721,6 +1732,7 @@ LOCAL_SHARED_LIBRARIES := libc libcutils liblog
 ifdef CONFIG_EAP_PROXY
 LOCAL_STATIC_LIBRARIES += $(LIB_STATIC_EAP_PROXY)
 LOCAL_SHARED_LIBRARIES += $(LIB_SHARED_EAP_PROXY)
+LOCAL_HEADER_LIBRARIES += $(LIB_HEADER_EAP_PROXY)
 endif
 ifeq ($(CONFIG_TLS), openssl)
 LOCAL_SHARED_LIBRARIES += libcrypto libssl libkeystore-wifi-hidl
@@ -1746,6 +1758,9 @@ endif
 ifeq ($(WPA_SUPPLICANT_USE_HIDL), y)
 LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.0
 LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.1
+ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
+LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.0
+endif
 LOCAL_SHARED_LIBRARIES += libhidlbase libhidltransport libhwbinder libutils libbase
 LOCAL_STATIC_LIBRARIES += libwpa_hidl
 endif
@@ -1808,6 +1823,14 @@ LOCAL_SRC_FILES := \
     hidl/$(HIDL_INTERFACE_VERSION)/sta_iface.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/sta_network.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/supplicant.cpp
+
+ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
+LOCAL_SRC_FILES += \
+    hidl/$(HIDL_INTERFACE_VERSION)/vendorsta_iface.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/vendorsta_network.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/supplicantvendor.cpp
+endif
+
 LOCAL_SHARED_LIBRARIES := \
     android.hardware.wifi.supplicant@1.0 \
     android.hardware.wifi.supplicant@1.1 \
@@ -1816,6 +1839,10 @@ LOCAL_SHARED_LIBRARIES := \
     libhidltransport \
     libutils \
     liblog
+ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
+LOCAL_SHARED_LIBRARIES += \
+    vendor.qti.hardware.wifi.supplicant@2.0
+endif
 LOCAL_EXPORT_C_INCLUDE_DIRS := \
     $(LOCAL_PATH)/hidl/$(HIDL_INTERFACE_VERSION)
 include $(BUILD_STATIC_LIBRARY)
