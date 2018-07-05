@@ -5745,7 +5745,7 @@ static int p2p_ctrl_disallow_freq(struct wpa_supplicant *wpa_s,
 			   freq->min, freq->max);
 	}
 
-	wpas_p2p_update_channel_list(wpa_s);
+	wpas_p2p_update_channel_list(wpa_s, WPAS_P2P_CHANNEL_UPDATE_DISALLOW);
 	return 0;
 }
 
