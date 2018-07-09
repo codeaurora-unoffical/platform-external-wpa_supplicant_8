@@ -885,8 +885,8 @@ static void handle_qmi_eap_reply(
 		void *userData, qmi_client_error_type sysErrCode)
 {
 	struct eap_proxy_sm *eap_proxy = (struct eap_proxy_sm *)userData;
+	auth_send_eap_packet_ext_resp_msg_v01* rspDataExt = (auth_send_eap_packet_ext_resp_msg_v01*)resp_c_struct;
 	auth_send_eap_packet_resp_msg_v01* rspData = (auth_send_eap_packet_resp_msg_v01*)resp_c_struct;
-
 	u8 *resp_data;
 	u32 length;
 
@@ -909,7 +909,7 @@ static void handle_qmi_eap_reply(
 			return;
 		}
 
-		if (NULL == rspData) {
+		if (NULL == resp_c_struct) {
 			wpa_printf(MSG_ERROR, "eap_proxy: Response data is NULL\n");
 			eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
 			return;
@@ -923,8 +923,9 @@ static void handle_qmi_eap_reply(
 		}
 
 		/* ensure the reply packet exists  */
-		if (rspData->eap_response_pkt_len <= 0 ||
-		    rspData->eap_response_pkt_len > QMI_AUTH_EAP_RESP_PACKET_EXT_MAX_V01) {
+		if (QMI_AUTH_SEND_EAP_PACKET_REQ_V01 == msg_id &&
+		    (rspData->eap_response_pkt_len > QMI_AUTH_EAP_RESP_PACKET_MAX_V01 ||
+		    rspData->eap_response_pkt_len <= 0 )){
 			wpa_printf(MSG_ERROR, "eap_proxy: Reply packet is of"
 				"invalid length %d error %d result %d\n",
 				rspData->eap_response_pkt_len, rspData->resp.error, rspData->resp.result);
@@ -932,11 +933,21 @@ static void handle_qmi_eap_reply(
 			return;
 		}
 
-		length = rspData->eap_response_pkt_len;
+		if (QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 == msg_id &&
+		    (rspDataExt->eap_response_ext_pkt_len > QMI_AUTH_EAP_RESP_PACKET_EXT_MAX_V01 ||
+		    rspDataExt->eap_response_ext_pkt_len <= 0 )) {
+			wpa_printf(MSG_ERROR, "eap_proxy: Reply packet is of"
+				"invalid length %d error %d result %d\n",
+				rspDataExt->eap_response_ext_pkt_len, rspDataExt->resp.error, rspDataExt->resp.result);
+			eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
+			return;
+		}
+
+		length = QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 == msg_id ? rspDataExt->eap_response_ext_pkt_len : rspData->eap_response_pkt_len;
 		eap_proxy->qmi_resp_data.eap_send_pkt_resp.length = length;
 		/* allocate a buffer to store the response data; size is EAP resp len field */
 		eap_proxy->qmi_resp_data.eap_send_pkt_resp.resp_data =
-			os_malloc(rspData->eap_response_pkt_len);
+			os_malloc(length);
 
 		resp_data =
 			(u8 *)eap_proxy->qmi_resp_data.eap_send_pkt_resp.resp_data;
@@ -950,8 +961,12 @@ static void handle_qmi_eap_reply(
 		}
 
 		/* copy the response data to the allocated buffer */
-		os_memcpy(resp_data,
-				rspData->eap_response_pkt, length);
+		if (QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 == msg_id)
+			os_memcpy(resp_data,
+					rspDataExt->eap_response_ext_pkt, length);
+		else
+			os_memcpy(resp_data,
+					rspData->eap_response_pkt, length);
 		eap_proxy->qmi_state = QMI_STATE_RESP_RECEIVED;
 		wpa_printf(MSG_ERROR, "eap_proxy: **HANDLE_QMI_EAP_REPLY CALLBACK ENDDED **");
 
