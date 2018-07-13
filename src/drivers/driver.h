@@ -4520,6 +4520,15 @@ enum wpa_event_type {
 	 * performed before start operating on this channel.
 	 */
 	EVENT_DFS_PRE_CAC_EXPIRED,
+
+	/**
+	 * EVENT_INTERFACE_MAC_CHANGED - Notify that interface MAC changed
+	 *
+	 * This event is emitted when the MAC changes while the interface is
+	 * enabled. When an interface was disabled and becomes enabled, it
+	 * must be always assumed that the MAC possibly changed.
+	 */
+	EVENT_INTERFACE_MAC_CHANGED,
 };
 
 
