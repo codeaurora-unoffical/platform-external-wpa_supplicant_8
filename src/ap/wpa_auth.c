@@ -828,6 +828,7 @@ static int wpa_try_alt_snonce(struct wpa_state_machine *sm, u8 *data,
 	int ok = 0;
 	const u8 *pmk = NULL;
 
+	os_memset(&PTK, 0, sizeof(PTK));
 	for (;;) {
 		if (wpa_key_mgmt_wpa_psk(sm->wpa_key_mgmt)) {
 			pmk = wpa_auth_get_psk(sm->wpa_auth, sm->addr,
@@ -2029,6 +2030,7 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 	int ok = 0, psk_found = 0;
 	const u8 *pmk = NULL;
 
+	os_memset(&PTK, 0, sizeof(PTK));
 	SM_ENTRY_MA(WPA_PTK, PTKCALCNEGOTIATING, wpa_ptk);
 	sm->EAPOLKeyReceived = FALSE;
 	sm->update_snonce = FALSE;
