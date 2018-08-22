@@ -327,6 +327,10 @@ static DBusMessage * msg_method_handler(DBusMessage *message,
 	method = dbus_message_get_member(message);
 	msg_interface = dbus_message_get_interface(message);
 
+	if (!msg_interface)
+		return dbus_message_new_error(message, DBUS_ERROR_INVALID_ARGS,
+					      NULL);
+
 	/* try match call to any registered method */
 	while (method_dsc && method_dsc->dbus_method) {
 		/* compare method names and interfaces */

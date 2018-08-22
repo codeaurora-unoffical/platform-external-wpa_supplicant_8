@@ -4088,11 +4088,12 @@ DBusMessage * wpas_dbus_handler_subscribe_preq(
 	DBusMessage *message, struct wpa_supplicant *wpa_s)
 {
 	struct wpas_dbus_priv *priv = wpa_s->global->dbus;
-	char *name;
+	char *name = NULL;
+	const char *sender;
 
-	if (wpa_s->preq_notify_peer != NULL) {
-		if (os_strcmp(dbus_message_get_sender(message),
-			      wpa_s->preq_notify_peer) == 0)
+	sender = dbus_message_get_sender(message);
+	if (wpa_s->preq_notify_peer != NULL && sender != NULL) {
+		if (os_strcmp(sender, wpa_s->preq_notify_peer) == 0)
 			return NULL;
 
 		return dbus_message_new_error(message,
@@ -4100,7 +4101,9 @@ DBusMessage * wpas_dbus_handler_subscribe_preq(
 			"Another application is already subscribed");
 	}
 
-	name = os_strdup(dbus_message_get_sender(message));
+	if (sender)
+		name = os_strdup(sender);
+
 	if (!name)
 		return wpas_dbus_error_no_memory(message);
 
@@ -4138,14 +4141,15 @@ DBusMessage * wpas_dbus_handler_unsubscribe_preq(
 	DBusMessage *message, struct wpa_supplicant *wpa_s)
 {
 	struct wpas_dbus_priv *priv = wpa_s->global->dbus;
+	const char *sender;
 
 	if (!wpa_s->preq_notify_peer)
 		return dbus_message_new_error(message,
 			WPAS_DBUS_ERROR_NO_SUBSCRIPTION,
 			"Not subscribed");
 
-	if (os_strcmp(wpa_s->preq_notify_peer,
-		      dbus_message_get_sender(message)))
+	sender = dbus_message_get_sender(message);
+	if (!sender || os_strcmp(wpa_s->preq_notify_peer, sender))
 		return dbus_message_new_error(message,
 			WPAS_DBUS_ERROR_SUBSCRIPTION_EPERM,
 			"Can't unsubscribe others");
