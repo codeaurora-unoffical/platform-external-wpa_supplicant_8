@@ -716,7 +716,7 @@ static void eap_proxy_schedule_thread(void *eloop_ctx, void *timeout_ctx)
 
 
 struct eap_proxy_sm *
-eap_proxy_init(void *eapol_ctx, struct eapol_callbacks *eapol_cb,
+eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
 	       void *msg_ctx)
 {
 	int qmiErrorCode;
