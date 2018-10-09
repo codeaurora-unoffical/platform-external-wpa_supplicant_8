@@ -1008,6 +1008,7 @@ endif
 
 ifndef CONFIG_TLS
 CONFIG_TLS=openssl
+L_CFLAGS += -DCONFIG_USE_OPENSSL_RNG
 endif
 
 ifdef CONFIG_TLSV11
