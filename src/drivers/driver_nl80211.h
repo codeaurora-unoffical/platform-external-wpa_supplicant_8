@@ -60,6 +60,7 @@ struct i802_bss {
 	char brname[IFNAMSIZ];
 	unsigned int beacon_set:1;
 	unsigned int added_if_into_bridge:1;
+	unsigned int already_in_bridge:1;
 	unsigned int added_bridge:1;
 	unsigned int in_deinit:1;
 	unsigned int wdev_id_set:1;
@@ -73,7 +74,7 @@ struct i802_bss {
 	int if_dynamic;
 
 	void *ctx;
-	struct nl_handle *nl_preq, *nl_mgmt;
+	struct nl_handle *nl_preq, *nl_mgmt, *nl_connect;
 	struct nl_cb *nl_cb;
 
 	struct nl80211_wiphy_data *wiphy_data;

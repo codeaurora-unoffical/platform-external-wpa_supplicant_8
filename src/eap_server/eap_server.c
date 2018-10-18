@@ -326,6 +326,9 @@ SM_STATE(EAP, RETRANSMIT)
 		if (eap_copy_buf(&sm->eap_if.eapReqData, sm->lastReqData) == 0)
 			sm->eap_if.eapReq = TRUE;
 	}
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_RETRANSMIT MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -634,6 +637,9 @@ SM_STATE(EAP, TIMEOUT_FAILURE)
 	SM_ENTRY(EAP, TIMEOUT_FAILURE);
 
 	sm->eap_if.eapTimeout = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_TIMEOUT_FAILURE MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1011,6 +1017,9 @@ SM_STATE(EAP, RETRANSMIT2)
 		if (eap_copy_buf(&sm->eap_if.eapReqData, sm->lastReqData) == 0)
 			sm->eap_if.eapReq = TRUE;
 	}
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_RETRANSMIT2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1101,6 +1110,9 @@ SM_STATE(EAP, TIMEOUT_FAILURE2)
 	SM_ENTRY(EAP, TIMEOUT_FAILURE2);
 
 	sm->eap_if.eapTimeout = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_TIMEOUT_FAILURE2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1110,6 +1122,9 @@ SM_STATE(EAP, FAILURE2)
 
 	eap_copy_buf(&sm->eap_if.eapReqData, sm->eap_if.aaaEapReqData);
 	sm->eap_if.eapFail = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_FAILURE2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1136,6 +1151,9 @@ SM_STATE(EAP, SUCCESS2)
 	 * started properly.
 	 */
 	sm->start_reauth = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_SUCCESS2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1802,6 +1820,8 @@ static void eap_user_free(struct eap_user *user)
 		return;
 	bin_clear_free(user->password, user->password_len);
 	user->password = NULL;
+	bin_clear_free(user->salt, user->salt_len);
+	user->salt = NULL;
 	os_free(user);
 }
 
@@ -1900,6 +1920,7 @@ void eap_server_sm_deinit(struct eap_sm *sm)
 	wpabuf_free(sm->lastReqData);
 	wpabuf_free(sm->eap_if.eapRespData);
 	os_free(sm->identity);
+	os_free(sm->serial_num);
 	os_free(sm->pac_opaque_encr_key);
 	os_free(sm->eap_fast_a_id);
 	os_free(sm->eap_fast_a_id_info);
@@ -1968,6 +1989,17 @@ const u8 * eap_get_identity(struct eap_sm *sm, size_t *len)
 {
 	*len = sm->identity_len;
 	return sm->identity;
+}
+
+
+/**
+ * eap_get_serial_num - Get the serial number of user certificate
+ * @sm: Pointer to EAP state machine allocated with eap_server_sm_init()
+ * Returns: Pointer to the serial number or %NULL if not available
+ */
+const char * eap_get_serial_num(struct eap_sm *sm)
+{
+	return sm->serial_num;
 }
 
 

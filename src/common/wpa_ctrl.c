@@ -107,6 +107,7 @@ struct wpa_ctrl * wpa_ctrl_open2(const char *ctrl_path,
 	uid_t uid_system;
 #endif
 
+
 	if (ctrl_path == NULL)
 		return NULL;
 

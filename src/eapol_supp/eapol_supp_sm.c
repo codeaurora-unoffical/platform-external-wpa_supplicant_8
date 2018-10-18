@@ -503,10 +503,14 @@ SM_STATE(SUPP_BE, SUCCESS)
 			session_id = eap_proxy_get_eap_session_id(
 				sm->eap_proxy, &session_id_len);
 			emsk = eap_proxy_get_emsk(sm->eap_proxy, &emsk_len);
-			if (sm->config->erp && session_id && emsk)
+			if (sm->config->erp && session_id && emsk) {
 				eap_peer_erp_init(sm->eap, session_id,
 						  session_id_len, emsk,
 						  emsk_len);
+			} else {
+				os_free(session_id);
+				bin_clear_free(emsk, emsk_len);
+			}
 		}
 		return;
 	}
@@ -2014,6 +2018,7 @@ static void eapol_sm_notify_status(void *ctx, const char *status,
 		sm->ctx->status_cb(sm->ctx->ctx, status, parameter);
 }
 
+
 static void eapol_sm_notify_eap_error(void *ctx, int error_code)
 {
 	struct eapol_sm *sm = ctx;
@@ -2021,6 +2026,7 @@ static void eapol_sm_notify_eap_error(void *ctx, int error_code)
 	if (sm->ctx->eap_error_cb)
 		sm->ctx->eap_error_cb(sm->ctx->ctx, error_code);
 }
+
 
 #ifdef CONFIG_EAP_PROXY
 
