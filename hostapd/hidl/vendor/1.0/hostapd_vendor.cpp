@@ -35,6 +35,7 @@
 #include <vector>
 #include <set>
 #include <iostream>
+#include <net/if.h>
 
 #include <android-base/file.h>
 #include <android-base/stringprintf.h>
@@ -59,13 +60,20 @@ extern "C"
 namespace {
 constexpr char kConfFileNameFmt[] = "/data/vendor/wifi/hostapd/hostapd%s.conf";
 constexpr char kQsapSetFmt[] = "softap qccmd set%s %s=%s";
+#ifdef CONFIG_OWE
+constexpr char kOweSuffixFmt[] = "%s.owe";
+#endif
 
 using android::hardware::hidl_array;
 using android::base::StringPrintf;
 using android::hardware::wifi::hostapd::V1_0::IHostapd;
 using vendor::qti::hardware::wifi::hostapd::V1_0::IHostapdVendor;
 
+using namespace vendor::qti::hardware::wifi::hostapd::V1_0::implementation;
 using namespace vendor::qti::hardware::wifi::hostapd::V1_0::implementation::qsap_handler;
+
+typedef HostapdVendor::VendorEncryptionType VendorEncryptionType;
+typedef HostapdVendor::VendorNetworkParams VendorNetworkParams;
 
 // wrapper to call qsap command.
 int qsap_cmd(std::string cmd) {
@@ -98,10 +106,54 @@ int qsap_cmd(std::string cmd) {
 	return 0;
 }
 
+#ifdef CONFIG_OWE
+extern "C" int linux_get_ifhwaddr(int sock, const char *ifname, u8 *addr);
+
+int hostapd_vendor_get_ifhwaddr(const char *ifname, uint8_t *addr) {
+	int sock;
+	int ret;
+
+	if (ifname == NULL || addr == NULL) {
+		return -1;
+	}
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0) {
+		return -1;
+	}
+
+	ret = linux_get_ifhwaddr(sock, ifname, addr);
+	close(sock);
+
+	return ret;
+}
+
+std::vector<uint8_t> GenerateOweTransSSID(std::string ifname, uint8_t *macaddr)
+{
+	int ret;
+	char mac_str[18] = {};
+
+	// TODO: check ret
+	ret = snprintf(mac_str, sizeof(mac_str),
+		    "%02x:%02x:%02x:%02x:%02x:%02x",
+		    macaddr[0], macaddr[1], macaddr[2],
+		    macaddr[3], macaddr[4], macaddr[5]);
+
+	std::string ssid = StringPrintf("owe.%s", mac_str);
+
+	wpa_printf(MSG_INFO, "Generated OWE SSID: %s", ssid.c_str());
+	std::vector<uint8_t> vssid(ssid.begin(), ssid.end());
+
+	return vssid;
+}
+#endif
+
 std::string AddOrUpdateHostapdConfig(
     const IHostapdVendor::VendorIfaceParams& v_iface_params,
-    const IHostapd::NetworkParams& nw_params)
+    const VendorNetworkParams& v_nw_params)
 {
+	const IHostapd::NetworkParams nw_params = v_nw_params.nwParams;
+	uint32_t encryption = static_cast<uint32_t>(nw_params.encryptionType);
 	IHostapd::IfaceParams iface_params = v_iface_params.ifaceParams;
 	if (nw_params.ssid.size() >
 	    static_cast<uint32_t>(
@@ -110,7 +162,10 @@ std::string AddOrUpdateHostapdConfig(
 		    MSG_ERROR, "Invalid SSID size: %zu", nw_params.ssid.size());
 		return "";
 	}
-	if ((nw_params.encryptionType != IHostapd::EncryptionType::NONE) &&
+	if ((encryption != static_cast<uint32_t>(IHostapd::EncryptionType::NONE)) &&
+#ifdef CONFIG_OWE
+	    (encryption != static_cast<uint32_t>(VendorEncryptionType::OWE)) &&
+#endif
 	    (nw_params.pskPassphrase.size() <
 		 static_cast<uint32_t>(
 		     IHostapd::ParamSizeLimits::
@@ -133,6 +188,14 @@ std::string AddOrUpdateHostapdConfig(
 	if (v_iface_params.bridgeIfaceName.empty()) {
 		file_path = StringPrintf(kConfFileNameFmt, "");
 		dual_str = "";
+#ifdef CONFIG_OWE
+	} else if (!v_nw_params.oweTransIfaceName.empty()) {
+		// QSAP can't clear owe_transition_ifname and bridge fields
+		// when switching from OWE to SAE/WPA2-PSK,
+		// so create a new file which is shared by OWE-transition BSSes
+		file_path = StringPrintf(kConfFileNameFmt, "_owe");
+		dual_str = " owe";
+#endif
 	} else if (iface_params.channelParams.band == IHostapd::Band::BAND_2_4_GHZ) {
 		file_path = StringPrintf(kConfFileNameFmt, "_dual2g");
 		dual_mode = true;
@@ -154,24 +217,54 @@ std::string AddOrUpdateHostapdConfig(
 	const std::string ssid_as_string = ss.str();
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ssid2", ssid_as_string.c_str()));
 
-	switch (nw_params.encryptionType) {
-	case IHostapd::EncryptionType::NONE:
+	switch (encryption) {
+	case static_cast<uint32_t>(IHostapd::EncryptionType::NONE):
 		// no security params
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "0"));
 		break;
-	case IHostapd::EncryptionType::WPA:
+	case static_cast<uint32_t>(IHostapd::EncryptionType::WPA):
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "4"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "WPA-PSK"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_passphrase", nw_params.pskPassphrase.c_str()));
 		break;
-	case IHostapd::EncryptionType::WPA2:
+	case static_cast<uint32_t>(IHostapd::EncryptionType::WPA2):
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "3"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "WPA-PSK"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_passphrase", nw_params.pskPassphrase.c_str()));
 		break;
+#ifdef CONFIG_SAE
+	case static_cast<uint32_t>(VendorEncryptionType::SAE):
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "3"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "SAE"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_passphrase", nw_params.pskPassphrase.c_str()));
+		break;
+#endif
+#ifdef CONFIG_OWE
+	case static_cast<uint32_t>(VendorEncryptionType::OWE):
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "3"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "OWE"));
+		break;
+#endif
 	default:
 		wpa_printf(MSG_ERROR, "Unknown encryption type");
 		return "";
 	}
 
+#ifdef CONFIG_OWE
+	if (!v_nw_params.oweTransIfaceName.empty()) {
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "owe_transition_ifname",
+			    v_nw_params.oweTransIfaceName.c_str()));
+	}
+#endif
+
+#if defined(CONFIG_OWE) || defined(CONFIG_SAE)
+	if (encryption == static_cast<uint32_t>(VendorEncryptionType::SAE)
+		|| encryption == static_cast<uint32_t>(VendorEncryptionType::OWE)) {
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "2"));
+	} else {
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "0"));
+	}
+#endif
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "acs_exclude_dfs", "0"));
 	if (iface_params.channelParams.enableAcs) {
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "channel", "0"));
@@ -213,7 +306,11 @@ std::string AddOrUpdateHostapdConfig(
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ignore_broadcast_ssid", nw_params.isHidden ? "1" : "0"));
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wowlan_triggers", "any"));
 
+#ifdef CONFIG_OWE
+	if (dual_mode || !v_nw_params.oweTransIfaceName.empty())
+#else
 	if (dual_mode)
+#endif
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "bridge", v_iface_params.bridgeIfaceName.c_str()));
 
 	if (!v_iface_params.countryCode.empty())
@@ -253,7 +350,23 @@ void callWithEachIfaceCallback(
 	if (ifname.empty())
 		return;
 
-	auto iface_callback_map_iter = callbacks_map.find(ifname);
+	auto iface_callback_map_iter = callbacks_map.begin();
+	while (iface_callback_map_iter != callbacks_map.end()) {
+		std::string ifaceName = iface_callback_map_iter->first;
+		if (!ifname.compare(ifaceName)) {
+			wpa_printf(MSG_INFO, "%s - matched iface %s", __FUNCTION__, ifaceName.c_str());
+			break;
+		}
+#ifdef CONFIG_OWE
+		std::string ifaceNameOwe = StringPrintf(kOweSuffixFmt, ifaceName.c_str());
+		if (!ifname.compare(ifaceNameOwe)) {
+			wpa_printf(MSG_INFO, "%s - matched owe iface %s", __FUNCTION__, ifaceNameOwe.c_str());
+			break;
+		}
+#endif
+		iface_callback_map_iter ++;
+	}
+
 	if (iface_callback_map_iter == callbacks_map.end())
 		return;
 
@@ -280,6 +393,7 @@ namespace implementation {
 using namespace android::hardware;
 using namespace android::hardware::wifi::hostapd::V1_0;
 using namespace android::hardware::wifi::hostapd::V1_0::implementation::hidl_return_util;
+using namespace vendor::qti::hardware::wifi::hostapd::V1_0::implementation::qsap_handler;
 
 using android::base::StringPrintf;
 using qsap_handler::run_qsap_cmd;
@@ -323,6 +437,74 @@ Return<void> HostapdVendor::registerVendorCallback(
 HostapdStatus HostapdVendor::addVendorAccessPointInternal(
     const VendorIfaceParams& v_iface_params, const NetworkParams& nw_params)
 {
+	VendorNetworkParams v_nw_params;
+	memset(&v_nw_params, 0, sizeof(v_nw_params));
+	v_nw_params.nwParams = nw_params;
+
+	std::string ifaceName = v_iface_params.ifaceParams.ifaceName;
+	if (ifaceName.empty()) {
+		return {HostapdStatusCode::FAILURE_UNKNOWN, "null iface"};
+	}
+
+	uint32_t encryption = static_cast<uint32_t>(nw_params.encryptionType);
+	if (encryption != static_cast<uint32_t>(VendorEncryptionType::OWE)) {
+		return addVendorAccessPointInternal2(v_iface_params, v_nw_params);
+	}
+
+#ifdef CONFIG_OWE
+	// OWE transition mode
+	HostapdStatus status;
+
+	// Create OWE Iface.
+	std::string ifaceNameOwe = StringPrintf(kOweSuffixFmt, ifaceName.c_str());
+	char ifaceNameOwe_str[32] = {0};
+	strncpy(ifaceNameOwe_str, ifaceNameOwe.c_str(),
+		sizeof(ifaceNameOwe_str)-1); // -1 to null terminated
+	qsap_cmd(StringPrintf("softap create %s", ifaceNameOwe_str));
+
+	// Get OWE Iface Mac address.
+	uint8_t macOwe[6] = {};
+	if (hostapd_vendor_get_ifhwaddr(ifaceNameOwe_str, macOwe)) {
+		return {HostapdStatusCode::FAILURE_UNKNOWN, "get ifhwaddr"};
+	}
+
+	// OWE BSS - security=OWE ssid=owe.<MacAddr> isHidden=true
+	// TODO: modify SSID with suffix
+	VendorIfaceParams v_iface_params2 = v_iface_params;
+	VendorNetworkParams v_nw_params2 = v_nw_params;
+
+	v_nw_params2.nwParams.ssid = GenerateOweTransSSID(ifaceName, macOwe);
+	v_nw_params2.nwParams.isHidden = true;
+	v_nw_params2.oweTransIfaceName = v_iface_params.ifaceParams.ifaceName;
+	v_iface_params2.ifaceParams.ifaceName = ifaceNameOwe;
+
+	status = addVendorAccessPointInternal2(v_iface_params2, v_nw_params2);
+	if (status.code != HostapdStatusCode::SUCCESS) {
+		wpa_printf(MSG_ERROR, "OWE: Add OWE BSS failed");
+		qsap_cmd(StringPrintf("softap remove %s", ifaceNameOwe_str));
+		return status;
+	}
+
+	// open BSS - security=open ssid=AndroidAPXXXX isHidden=false
+	v_nw_params.nwParams.encryptionType = IHostapd::EncryptionType::NONE;
+	v_nw_params.nwParams.isHidden = false;
+	v_nw_params.oweTransIfaceName = ifaceNameOwe;
+
+	status = addVendorAccessPointInternal2(v_iface_params, v_nw_params);
+	if (status.code != HostapdStatusCode::SUCCESS) {
+		wpa_printf(MSG_ERROR, "OWE: Add open BSS failed");
+		removeVendorAccessPointInternal(
+		     v_iface_params.ifaceParams.ifaceName.c_str());
+		return status;
+	}
+#endif
+
+	return {HostapdStatusCode::SUCCESS, ""};
+}
+
+HostapdStatus HostapdVendor::addVendorAccessPointInternal2(
+    const VendorIfaceParams& v_iface_params, const VendorNetworkParams& nw_params)
+{
 	IfaceParams iface_params = v_iface_params.ifaceParams;
 	if (hostapd_get_iface(interfaces_, iface_params.ifaceName.c_str())) {
 		wpa_printf(
@@ -364,6 +546,21 @@ HostapdStatus HostapdVendor::removeVendorAccessPointInternal(const std::string& 
 {
 	std::vector<char> remove_iface_param_vec(
 	    iface_name.begin(), iface_name.end() + 1);
+
+#ifdef CONFIG_OWE
+	std::string ifaceNameOwe = StringPrintf(kOweSuffixFmt, iface_name.c_str());
+	char ifaceNameOwe_str[32] = {0};
+	strncpy(ifaceNameOwe_str, ifaceNameOwe.c_str(),
+		sizeof(ifaceNameOwe_str)-1); // -1 to null terminated
+	if (if_nametoindex(ifaceNameOwe_str)) {
+		wpa_printf(MSG_DEBUG, "removed OWE-trans iface=%s", ifaceNameOwe_str);
+		qsap_cmd(StringPrintf("softap remove %s", ifaceNameOwe.c_str()));
+		if (hostapd_remove_iface(interfaces_, (char*)ifaceNameOwe.c_str()) < 0) {
+			wpa_printf(MSG_INFO, "Removing OWE-trans iface %s failed",
+			    ifaceNameOwe.c_str());
+		}
+	}
+#endif
 	if (hostapd_remove_iface(interfaces_, remove_iface_param_vec.data()) <
 	    0) {
 		wpa_printf(
