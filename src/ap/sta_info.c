@@ -38,6 +38,10 @@
 #include "sta_info.h"
 #include "vlan.h"
 #include "wps_hostapd.h"
+#ifdef CONFIG_USE_VENDOR_HIDL
+#include "hidl.h"
+#endif
+
 
 static void ap_sta_remove_in_other_bss(struct hostapd_data *hapd,
 				       struct sta_info *sta);
@@ -1217,6 +1221,10 @@ void ap_sta_set_authorized(struct hostapd_data *hapd, struct sta_info *sta,
 		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_CONNECTED "%s%s",
 			buf, ip_addr);
 
+#ifdef CONFIG_USE_VENDOR_HIDL
+		notify_hidl_sta_connected(hapd->num_sta, sta->addr, hapd->conf->iface);
+#endif
+
 		if (hapd->msg_ctx_parent &&
 		    hapd->msg_ctx_parent != hapd->msg_ctx)
 			wpa_msg_no_global(hapd->msg_ctx_parent, MSG_INFO,
@@ -1224,6 +1232,9 @@ void ap_sta_set_authorized(struct hostapd_data *hapd, struct sta_info *sta,
 					  buf, ip_addr);
 	} else {
 		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_DISCONNECTED "%s", buf);
+#ifdef CONFIG_USE_VENDOR_HIDL
+		notify_hidl_sta_disconnected(sta->addr, hapd->conf->iface);
+#endif
 
 		if (hapd->msg_ctx_parent &&
 		    hapd->msg_ctx_parent != hapd->msg_ctx)
