@@ -1522,6 +1522,54 @@ static void hostapd_event_wds_sta_interface_status(struct hostapd_data *hapd,
 		ifname, MAC2STR(addr));
 }
 
+static int hostapd_notif_update_dh_ie(struct hostapd_data *hapd,
+				       const u8 *peer,
+				       const u8 *ie, size_t ie_len)
+{
+	u16 status;
+	struct sta_info *sta;
+	struct ieee802_11_elems elems;
+
+	if (ieee802_11_parse_elems(ie, ie_len, &elems, 1) == ParseFailed) {
+		wpa_printf(MSG_DEBUG, "update owe ie for " MACSTR
+			   ": invalid ie,len %zu ", MAC2STR(peer), ie_len);
+		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto err;
+	}
+
+	sta = ap_get_sta(hapd, peer);
+	if (sta) {
+		ap_sta_no_session_timeout(hapd, sta);
+		accounting_sta_stop(hapd, sta);
+
+		/*
+		 * Make sure that the previously registered inactivity timer
+		 * will not remove the STA immediately.
+		 */
+		sta->timeout_next = STA_NULLFUNC;
+	} else {
+		sta = ap_sta_add(hapd, peer);
+		if (sta == NULL) {
+			status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+			goto err;
+		}
+	}
+	sta->flags &= ~(WLAN_STA_WPS | WLAN_STA_MAYBE_WPS | WLAN_STA_WPS2);
+
+	status = owe_process_owe_info(hapd, sta, elems.rsn_ie,
+				elems.rsn_ie_len, elems.owe_dh,
+				elems.owe_dh_len);
+
+	wpa_printf(MSG_DEBUG, "update dh ie for " MACSTR
+		   " status %u", MAC2STR(peer), status);
+	if (status != WLAN_STATUS_SUCCESS)
+		ap_free_sta(hapd, sta);
+
+	return 0;
+err:
+	hostapd_drv_update_dh_ie(hapd, peer, status, NULL, 0);
+	return 0;
+}
 
 void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 			  union wpa_event_data *data)
@@ -1627,6 +1675,12 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 				    data->assoc_info.req_ies,
 				    data->assoc_info.req_ies_len,
 				    data->assoc_info.reassoc);
+		break;
+	case EVENT_UPDATE_DH:
+		if (!data)
+			return;
+		hostapd_notif_update_dh_ie(hapd, data->update_dh.peer,
+			data->update_dh.ie, data->update_dh.ie_len);
 		break;
 	case EVENT_DISASSOC:
 		if (data)

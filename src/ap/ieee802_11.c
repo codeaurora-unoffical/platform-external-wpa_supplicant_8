@@ -2461,8 +2461,133 @@ static u16 owe_process_assoc_req(struct hostapd_data *hapd,
 	return WLAN_STATUS_SUCCESS;
 }
 
-#endif /* CONFIG_OWE */
+static u16 owe_process_rsn_ie(struct hostapd_data *hapd,
+			     struct sta_info *sta,
+			     const u8 *rsn_ie, size_t rsn_ie_len,
+			     const u8 *owe_dh, size_t owe_dh_len)
+{
+	u16 status;
+	u8 *p;
+	u8 ie[1024];
+	size_t ie_len = 0;
+	int res;
 
+	if (!rsn_ie || !rsn_ie_len) {
+		wpa_printf(MSG_DEBUG, "NO RSN IE in (Re)AssocReq");
+		status = WLAN_STATUS_INVALID_IE;
+		goto end;
+	}
+
+	if (sta->wpa_sm == NULL)
+		sta->wpa_sm = wpa_auth_sta_init(hapd->wpa_auth,
+						sta->addr,
+						NULL);
+	if (sta->wpa_sm == NULL) {
+		wpa_printf(MSG_WARNING, "Failed to initialize WPA "
+			   "state machine");
+		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto end;
+	}
+	rsn_ie -= 2;
+	rsn_ie_len += 2;
+	res = wpa_validate_wpa_ie(hapd->wpa_auth, sta->wpa_sm,
+				  rsn_ie, rsn_ie_len,
+				  NULL, 0,
+				  owe_dh, owe_dh_len);
+	status = wpa_res_to_status_code(res);
+	if (status != WLAN_STATUS_SUCCESS)
+		goto end;
+
+	if (!wpa_auth_sta_get_pmksa(sta->wpa_sm))
+		return status;
+
+	p = wpa_auth_write_assoc_resp_owe(sta->wpa_sm, ie,
+					  sizeof(ie), NULL, 0);
+	ie_len = p - ie;
+	wpa_printf(MSG_DEBUG, "OWE: Using PMKSA cache, update rsn ielen %zu",
+		ie_len);
+
+end:
+	hostapd_drv_update_dh_ie(hapd, sta->addr, status, ie, ie_len);
+	return status;
+}
+
+static u16 owe_process_dh_ie_update(struct hostapd_data *hapd,
+			     struct sta_info *sta,
+			     const u8 *owe_dh, u8 owe_dh_len)
+{
+	u16 status = WLAN_STATUS_SUCCESS;
+	u8 *owe_buf = NULL, *dh_ie = NULL;
+	u8 owe_buf_len = 0;
+	struct wpabuf *pub = NULL;
+
+	if (!owe_dh || !owe_dh_len) {
+		wpa_printf(MSG_DEBUG, "NO DH IE in (Re)AssocReq");
+		status = WLAN_STATUS_INVALID_IE;
+		goto end;
+	}
+
+	status = owe_process_assoc_req(hapd, sta, owe_dh, owe_dh_len);
+	if (status != WLAN_STATUS_SUCCESS)
+		goto end;
+	if (!sta->owe_ecdh) {
+		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto end;
+	}
+
+	pub = crypto_ecdh_get_pubkey(sta->owe_ecdh, 0);
+	if (!pub) {
+		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto end;
+	}
+
+	/* construct dh ie */
+	owe_buf_len = 2 + 1 + 2 + wpabuf_len(pub);
+	owe_buf = dh_ie = os_malloc(owe_buf_len);
+	if (!owe_buf) {
+		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+		owe_buf_len = 0;
+		goto end;
+	}
+
+	/* OWE Diffie-Hellman Parameter element */
+	*owe_buf++ = WLAN_EID_EXTENSION; /* Element ID */
+	*owe_buf++ = 1 + 2 + wpabuf_len(pub); /* Length */
+	*owe_buf++ = WLAN_EID_EXT_OWE_DH_PARAM; /* Element ID Extension
+						 */
+	WPA_PUT_LE16(owe_buf, sta->owe_group);
+	owe_buf += 2;
+	os_memcpy(owe_buf, wpabuf_head(pub), wpabuf_len(pub));
+	owe_buf += wpabuf_len(pub);
+
+	sta->external_dh_updated = 1;
+end:
+	wpabuf_free(pub);
+	hostapd_drv_update_dh_ie(hapd, sta->addr, status, dh_ie, owe_buf_len);
+	if (dh_ie)
+		os_free(dh_ie);
+
+	return status;
+}
+
+u16 owe_process_owe_info(struct hostapd_data *hapd,
+			     struct sta_info *sta,
+			     const u8 *rsn, size_t rsn_len,
+			     const u8 *owe, size_t owe_len)
+{
+	u16 status;
+
+	status = owe_process_rsn_ie(hapd, sta, rsn, rsn_len, owe, owe_len);
+
+	if (status != WLAN_STATUS_SUCCESS)
+		return status;
+
+	if (!wpa_auth_sta_get_pmksa(sta->wpa_sm))
+		status = owe_process_dh_ie_update(hapd, sta, owe, owe_len);
+
+	return status;
+}
+#endif /* CONFIG_OWE */
 
 static u16 check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 			   const u8 *ies, size_t ies_len, int reassoc)
@@ -3142,11 +3267,14 @@ u8 * owe_assoc_req_process(struct hostapd_data *hapd, struct sta_info *sta,
 						     owe_buf_len, NULL, 0);
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
-
 	if (wpa_auth_sta_get_pmksa(sta->wpa_sm)) {
 		wpa_printf(MSG_DEBUG, "OWE: Using PMKSA caching");
 		owe_buf = wpa_auth_write_assoc_resp_owe(sta->wpa_sm, owe_buf,
 							owe_buf_len, NULL, 0);
+		*reason = WLAN_STATUS_SUCCESS;
+		return owe_buf;
+	} else if (sta->owe_pmk && sta->external_dh_updated) {
+		wpa_printf(MSG_DEBUG, "OWE: Using Prev PMK");
 		*reason = WLAN_STATUS_SUCCESS;
 		return owe_buf;
 	}

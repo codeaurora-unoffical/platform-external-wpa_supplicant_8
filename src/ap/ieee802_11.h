@@ -147,6 +147,10 @@ void ieee802_11_finish_fils_auth(struct hostapd_data *hapd,
 u8 * owe_assoc_req_process(struct hostapd_data *hapd, struct sta_info *sta,
 			   const u8 *owe_dh, u8 owe_dh_len,
 			   u8 *owe_buf, size_t owe_buf_len, u16 *reason);
+u16 owe_process_owe_info(struct hostapd_data *hapd,
+			     struct sta_info *sta,
+			     const u8 *rsn, size_t rsn_len,
+			     const u8 *owe, size_t owe_len);
 void fils_hlp_timeout(void *eloop_ctx, void *eloop_data);
 void fils_hlp_finish_assoc(struct hostapd_data *hapd, struct sta_info *sta);
 void handle_auth_fils(struct hostapd_data *hapd, struct sta_info *sta,

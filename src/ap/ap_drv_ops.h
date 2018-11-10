@@ -365,4 +365,7 @@ hostapd_drv_send_external_auth_status(struct hostapd_data *hapd,
 		return -1;
 	return hapd->driver->send_external_auth_status(hapd->drv_priv, params);
 }
+
+int hostapd_drv_update_dh_ie(struct hostapd_data *hapd, const u8 *peer,
+			     u16 reason_code, const u8 *ie, size_t ielen);
 #endif /* AP_DRV_OPS */

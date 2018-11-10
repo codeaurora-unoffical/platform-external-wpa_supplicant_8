@@ -136,6 +136,7 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_EXTERNAL_AUTH)
 	C2S(NL80211_CMD_STA_OPMODE_CHANGED)
 	C2S(NL80211_CMD_CONTROL_PORT_FRAME)
+	C2S(NL80211_CMD_UPDATE_OWE_INFO)
 	default:
 		return "NL80211_CMD_UNKNOWN";
 	}
@@ -1091,6 +1092,30 @@ static void mlme_event_ft_event(struct wpa_driver_nl80211_data *drv,
 	wpa_supplicant_event(drv->ctx, EVENT_FT_RESPONSE, &data);
 }
 
+static void mlme_event_dh_event(struct wpa_driver_nl80211_data *drv,
+				struct i802_bss *bss,
+				struct nlattr *tb[])
+{
+	union wpa_event_data data;
+
+	if (!is_ap_interface(drv->nlmode))
+		return;
+
+	os_memset(&data, 0, sizeof(data));
+
+	if (tb[NL80211_ATTR_MAC])
+		os_memcpy(data.update_dh.peer,
+			  nla_data(tb[NL80211_ATTR_MAC]), ETH_ALEN);
+	if (tb[NL80211_ATTR_IE]) {
+		data.update_dh.ie = nla_data(tb[NL80211_ATTR_IE]);
+		data.update_dh.ie_len = nla_len(tb[NL80211_ATTR_IE]);
+	}
+
+	wpa_printf(MSG_DEBUG, "nl80211: DH event peer " MACSTR,
+		   MAC2STR(data.update_dh.peer));
+
+	wpa_supplicant_event(bss->ctx, EVENT_UPDATE_DH, &data);
+}
 
 static void send_scan_event(struct wpa_driver_nl80211_data *drv, int aborted,
 			    struct nlattr *tb[], int external_scan)
@@ -2527,6 +2552,9 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 		break;
 	case NL80211_CMD_STA_OPMODE_CHANGED:
 		nl80211_sta_opmode_change_event(drv, tb);
+		break;
+	case NL80211_CMD_UPDATE_OWE_INFO:
+		mlme_event_dh_event(drv, bss, tb);
 		break;
 	default:
 		wpa_dbg(drv->ctx, MSG_DEBUG, "nl80211: Ignored unknown event "
