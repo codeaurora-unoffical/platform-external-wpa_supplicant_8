@@ -49,6 +49,7 @@
 #include "wmm_ac.h"
 #include "dpp_supplicant.h"
 
+#define MAX_OWE_TRANSITION_BSS_SELECT_COUNT 5
 
 #ifndef CONFIG_NO_SCAN_PROCESSING
 static int wpas_select_network_from_last_scan(struct wpa_supplicant *wpa_s,
@@ -703,6 +704,16 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_OWE
 	if ((ssid->key_mgmt & WPA_KEY_MGMT_OWE) && !ssid->owe_only &&
 	    !wpa_ie && !rsn_ie) {
+		ssid->owe_transition_bss_select_count++;
+		if (ssid->owe_transition_bss_select_count <= MAX_OWE_TRANSITION_BSS_SELECT_COUNT) {
+			if (debug_print)
+				wpa_dbg(wpa_s, MSG_DEBUG,
+					"   skip owe transition bss select count %d"
+					" does not exceed %d",
+					ssid->owe_transition_bss_select_count,
+					MAX_OWE_TRANSITION_BSS_SELECT_COUNT);
+			return 0;
+		}
 		if (debug_print)
 			wpa_dbg(wpa_s, MSG_DEBUG,
 				"   allow in OWE transition mode");
@@ -3972,10 +3983,12 @@ static void wpas_event_assoc_reject(struct wpa_supplicant *wpa_s,
 
 #ifdef CONFIG_FILS
 	/* Update ERP next sequence number */
-	if (wpa_s->auth_alg == WPA_AUTH_ALG_FILS)
+	if (wpa_s->auth_alg == WPA_AUTH_ALG_FILS) {
 		eapol_sm_update_erp_next_seq_num(
 			wpa_s->eapol,
 			data->assoc_reject.fils_erp_next_seq_num);
+		fils_connection_failure(wpa_s);
+	}
 #endif /* CONFIG_FILS */
 
 	wpas_connection_failed(wpa_s, bssid);
