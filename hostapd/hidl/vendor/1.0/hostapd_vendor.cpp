@@ -185,6 +185,7 @@ std::string AddOrUpdateHostapdConfig(
 	switch (iface_params.channelParams.band) {
 	case IHostapd::Band::BAND_2_4_GHZ:
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "hw_mode", "g"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ht_capab", "[SHORT-GI-20] [GF] [DSSS_CCK-40] [LSIG-TXOP-PROT]"));
 		break;
 	case IHostapd::Band::BAND_5_GHZ:
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "hw_mode", "a"));
@@ -212,6 +213,8 @@ std::string AddOrUpdateHostapdConfig(
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211ac", iface_params.hwModeParams.enable80211AC ? "1" : "0"));
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ignore_broadcast_ssid", nw_params.isHidden ? "1" : "0"));
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wowlan_triggers", "any"));
+	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "accept_mac_file", "/data/vendor/wifi/hostapd/hostapd.accept"));
+	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "deny_mac_file", "/data/vendor/wifi/hostapd/hostapd.deny"));
 
 	if (dual_mode)
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "bridge", v_iface_params.bridgeIfaceName.c_str()));

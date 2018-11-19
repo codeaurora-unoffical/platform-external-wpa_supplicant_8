@@ -540,6 +540,8 @@ struct wpa_supplicant {
 	struct wpa_bss *current_bss;
 	int ap_ies_from_associnfo;
 	unsigned int assoc_freq;
+	u8 *last_con_fail_realm;
+	size_t last_con_fail_realm_len;
 
 	/* Selected configuration (based on Beacon/ProbeResp WPA IE) */
 	int pairwise_cipher;
@@ -749,6 +751,7 @@ struct wpa_supplicant {
 	unsigned int mac_addr_changed:1;
 	unsigned int added_vif:1;
 	unsigned int wnmsleep_used:1;
+	unsigned int owe_transition_select:1;
 
 	struct os_reltime last_mac_addr_change;
 	int last_mac_addr_style;
@@ -1322,6 +1325,7 @@ void wpa_supplicant_rx_eapol(void *ctx, const u8 *src_addr,
 void wpa_supplicant_update_config(struct wpa_supplicant *wpa_s);
 void wpa_supplicant_clear_status(struct wpa_supplicant *wpa_s);
 void wpas_connection_failed(struct wpa_supplicant *wpa_s, const u8 *bssid);
+void fils_connection_failure(struct wpa_supplicant *wpa_s);
 int wpas_driver_bss_selection(struct wpa_supplicant *wpa_s);
 int wpas_is_p2p_prioritized(struct wpa_supplicant *wpa_s);
 void wpas_auth_failed(struct wpa_supplicant *wpa_s, char *reason);
