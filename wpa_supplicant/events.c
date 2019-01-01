@@ -3582,8 +3582,8 @@ static const char * reg_type_str(enum reg_type type)
 }
 
 
-static void wpa_supplicant_update_channel_list(
-	struct wpa_supplicant *wpa_s, struct channel_list_changed *info)
+void wpa_supplicant_update_channel_list(struct wpa_supplicant *wpa_s,
+					struct channel_list_changed *info)
 {
 	struct wpa_supplicant *ifs;
 	u8 dfs_domain;
@@ -3597,10 +3597,13 @@ static void wpa_supplicant_update_channel_list(
 	for (ifs = wpa_s; ifs->parent && ifs != ifs->parent; ifs = ifs->parent)
 		;
 
-	wpa_msg(ifs, MSG_INFO, WPA_EVENT_REGDOM_CHANGE "init=%s type=%s%s%s",
-		reg_init_str(info->initiator), reg_type_str(info->type),
-		info->alpha2[0] ? " alpha2=" : "",
-		info->alpha2[0] ? info->alpha2 : "");
+	if (info) {
+		wpa_msg(ifs, MSG_INFO,
+			WPA_EVENT_REGDOM_CHANGE "init=%s type=%s%s%s",
+			reg_init_str(info->initiator), reg_type_str(info->type),
+			info->alpha2[0] ? " alpha2=" : "",
+			info->alpha2[0] ? info->alpha2 : "");
+	}
 
 	if (wpa_s->drv_priv == NULL)
 		return; /* Ignore event during drv initialization */
