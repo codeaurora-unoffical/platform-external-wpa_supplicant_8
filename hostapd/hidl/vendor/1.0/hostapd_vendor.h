@@ -70,6 +70,17 @@ typedef IHostapd::NetworkParams NetworkParams;
 class HostapdVendor : public V1_0::IHostapdVendor
 {
 public:
+	struct VendorNetworkParams {
+		/** Network Param @IHostapd  */
+		NetworkParams nwParams;
+		std::string oweTransIfaceName;
+	};
+
+	enum class VendorEncryptionType {
+		SAE = 6,
+		OWE = 7, // owe transition mode enabled by default
+	};
+
 	HostapdVendor(hapd_interfaces* interfaces);
 	HostapdVendor() = default;
 	~HostapdVendor() override = default;
@@ -99,6 +110,8 @@ private:
 	// Corresponding worker functions for the HIDL methods.
 	HostapdStatus addVendorAccessPointInternal(
 	    const VendorIfaceParams& iface_params, const NetworkParams& nw_params);
+	HostapdStatus addVendorAccessPointInternal2(
+	    const VendorIfaceParams& iface_params, const VendorNetworkParams& nw_params);
 	HostapdStatus removeVendorAccessPointInternal(const std::string& iface_name);
 	HostapdStatus setHostapdParamsInternal(const std::string& cmd);
 	HostapdStatus registerCallbackInternal(
