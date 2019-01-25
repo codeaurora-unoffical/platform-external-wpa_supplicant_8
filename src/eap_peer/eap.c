@@ -95,6 +95,14 @@ static void eap_notify_status(struct eap_sm *sm, const char *status,
 }
 
 
+static void eap_report_error(struct eap_sm *sm, int error_code)
+{
+	wpa_printf(MSG_DEBUG, "EAP: Error notification: %d", error_code);
+	if (sm->eapol_cb->notify_eap_error)
+		sm->eapol_cb->notify_eap_error(sm->eapol_ctx, error_code);
+}
+
+
 static void eap_sm_free_key(struct eap_sm *sm)
 {
 	if (sm->eapKeyData) {
@@ -662,7 +670,12 @@ void eap_peer_erp_free_keys(struct eap_sm *sm)
 }
 
 
-static void eap_peer_erp_init(struct eap_sm *sm)
+/* Note: If ext_session and/or ext_emsk are passed to this function, they are
+ * expected to point to allocated memory and those allocations will be freed
+ * unconditionally. */
+void eap_peer_erp_init(struct eap_sm *sm, u8 *ext_session_id,
+		       size_t ext_session_id_len, u8 *ext_emsk,
+		       size_t ext_emsk_len)
 {
 #ifdef CONFIG_ERP
 	u8 *emsk = NULL;
@@ -676,7 +689,7 @@ static void eap_peer_erp_init(struct eap_sm *sm)
 
 	realm = eap_home_realm(sm);
 	if (!realm)
-		return;
+		goto fail;
 	realm_len = os_strlen(realm);
 	wpa_printf(MSG_DEBUG, "EAP: Realm for ERP keyName-NAI: %s", realm);
 	eap_erp_remove_keys_realm(sm, realm);
@@ -744,7 +757,11 @@ static void eap_peer_erp_init(struct eap_sm *sm)
 	dl_list_add(&sm->erp_keys, &erp->list);
 	erp = NULL;
 fail:
-	bin_clear_free(emsk, emsk_len);
+	if (ext_emsk)
+		bin_clear_free(ext_emsk, ext_emsk_len);
+	else
+		bin_clear_free(emsk, emsk_len);
+	bin_clear_free(ext_session_id, ext_session_id_len);
 	bin_clear_free(erp, sizeof(*erp));
 	os_free(realm);
 #endif /* CONFIG_ERP */
@@ -886,8 +903,6 @@ SM_STATE(EAP, METHOD)
 
 	if (sm->m->isKeyAvailable && sm->m->getKey &&
 	    sm->m->isKeyAvailable(sm, sm->eap_method_priv)) {
-		struct eap_peer_config *config = eap_get_config(sm);
-
 		eap_sm_free_key(sm);
 		sm->eapKeyData = sm->m->getKey(sm, sm->eap_method_priv,
 					       &sm->eapKeyDataLen);
@@ -900,8 +915,6 @@ SM_STATE(EAP, METHOD)
 			wpa_hexdump(MSG_DEBUG, "EAP: Session-Id",
 				    sm->eapSessionId, sm->eapSessionIdLen);
 		}
-		if (config->erp && sm->m->get_emsk && sm->eapSessionId)
-			eap_peer_erp_init(sm);
 	}
 }
 
@@ -999,6 +1012,8 @@ SM_STATE(EAP, RETRANSMIT)
  */
 SM_STATE(EAP, SUCCESS)
 {
+	struct eap_peer_config *config = eap_get_config(sm);
+
 	SM_ENTRY(EAP, SUCCESS);
 	if (sm->eapKeyData != NULL)
 		sm->eapKeyAvailable = TRUE;
@@ -1021,6 +1036,11 @@ SM_STATE(EAP, SUCCESS)
 
 	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_SUCCESS
 		"EAP authentication completed successfully");
+
+	if (config->erp && sm->m->get_emsk && sm->eapSessionId &&
+	    sm->m->isKeyAvailable &&
+	    sm->m->isKeyAvailable(sm, sm->eap_method_priv))
+		eap_peer_erp_init(sm, NULL, 0, NULL, 0);
 }
 
 
@@ -1991,6 +2011,15 @@ static void eap_sm_parseEapReq(struct eap_sm *sm, const struct wpabuf *req)
 	case EAP_CODE_FAILURE:
 		wpa_printf(MSG_DEBUG, "EAP: Received EAP-Failure");
 		eap_notify_status(sm, "completion", "failure");
+
+		/* Get the error code from method */
+		if (sm->m && sm->m->get_error_code) {
+			int error_code;
+
+			error_code = sm->m->get_error_code(sm->eap_method_priv);
+			if (error_code != NO_EAP_METHOD_ERROR)
+				eap_report_error(sm, error_code);
+		}
 		sm->rxFailure = TRUE;
 		break;
 	case EAP_CODE_INITIATE:

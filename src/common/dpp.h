@@ -153,6 +153,7 @@ struct dpp_configuration {
 	os_time_t netaccesskey_expiry;
 
 	/* TODO: groups */
+	char *group_id;
 
 	/* For legacy configuration */
 	char *passphrase;
@@ -187,8 +188,11 @@ struct dpp_authentication {
 	unsigned int num_freq_iters;
 	size_t secret_len;
 	u8 Mx[DPP_MAX_SHARED_SECRET_LEN];
+	size_t Mx_len;
 	u8 Nx[DPP_MAX_SHARED_SECRET_LEN];
+	size_t Nx_len;
 	u8 Lx[DPP_MAX_SHARED_SECRET_LEN];
+	size_t Lx_len;
 	u8 k1[DPP_MAX_HASH_LEN];
 	u8 k2[DPP_MAX_HASH_LEN];
 	u8 ke[DPP_MAX_HASH_LEN];
@@ -339,6 +343,10 @@ extern u8 dpp_pkex_own_mac_override[ETH_ALEN];
 extern u8 dpp_pkex_peer_mac_override[ETH_ALEN];
 extern u8 dpp_pkex_ephemeral_key_override[600];
 extern size_t dpp_pkex_ephemeral_key_override_len;
+extern u8 dpp_protocol_key_override[600];
+extern size_t dpp_protocol_key_override_len;
+extern u8 dpp_nonce_override[DPP_MAX_NONCE_LEN];
+extern size_t dpp_nonce_override_len;
 #endif /* CONFIG_TESTING_OPTIONS */
 
 void dpp_bootstrap_info_free(struct dpp_bootstrap_info *info);
@@ -387,6 +395,8 @@ const u8 * dpp_get_attr(const u8 *buf, size_t len, u16 req_id, u16 *ret_len);
 int dpp_check_attrs(const u8 *buf, size_t len);
 int dpp_key_expired(const char *timestamp, os_time_t *expiry);
 const char * dpp_akm_str(enum dpp_akm akm);
+int dpp_configurator_get_key(const struct dpp_configurator *conf, char *buf,
+			     size_t buflen);
 void dpp_configurator_free(struct dpp_configurator *conf);
 struct dpp_configurator *
 dpp_keygen_configurator(const char *curve, const u8 *privkey,

@@ -45,6 +45,13 @@ def test_ssid_32_octets(dev, apdev):
     dev[0].connect("1234567890abcdef1234567890ABCDEF", key_mgmt="NONE",
                    scan_freq="2412")
 
+def test_ssid_32_octets_nul_term(dev, apdev):
+    """SSID with 32 octets with nul at the end"""
+    ssid = 'P"1234567890abcdef1234567890ABCDE\\x00"'
+    hostapd.add_ap(apdev[0],
+                   { "ssid2": ssid })
+    dev[0].connect(ssid2=ssid, key_mgmt="NONE", scan_freq="2412")
+
 @remote_compatible
 def test_ssid_utf8(dev, apdev):
     """SSID with UTF8 encoding"""
@@ -64,6 +71,11 @@ def test_ssid_utf8(dev, apdev):
     sta3 = hapd.get_sta(sta2['addr'], next=True)
     if len(sta3) != 0:
         raise Exception("Unexpected STA iteration result (did not stop)")
+
+    if "[UTF-8]" not in dev[0].get_bss(hapd.own_addr())['flags']:
+        raise Exception("[UTF-8] flag not included in BSS")
+    if "[UTF-8]" not in dev[0].request("SCAN_RESULTS"):
+        raise Exception("[UTF-8] flag not included in SCAN_RESULTS")
 
 def clear_scan_cache(hapd, dev):
     # clear BSS table to avoid issues in following test cases

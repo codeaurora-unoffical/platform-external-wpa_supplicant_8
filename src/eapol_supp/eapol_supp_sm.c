@@ -492,9 +492,24 @@ SM_STATE(SUPP_BE, SUCCESS)
 #ifdef CONFIG_EAP_PROXY
 	if (sm->use_eap_proxy) {
 		if (eap_proxy_key_available(sm->eap_proxy)) {
+			u8 *session_id, *emsk;
+			size_t session_id_len, emsk_len;
+
 			/* New key received - clear IEEE 802.1X EAPOL-Key replay
 			 * counter */
 			sm->replay_counter_valid = FALSE;
+
+			session_id = eap_proxy_get_eap_session_id(
+				sm->eap_proxy, &session_id_len);
+			emsk = eap_proxy_get_emsk(sm->eap_proxy, &emsk_len);
+			if (sm->config->erp && session_id && emsk) {
+				eap_peer_erp_init(sm->eap, session_id,
+						  session_id_len, emsk,
+						  emsk_len);
+			} else {
+				os_free(session_id);
+				bin_clear_free(emsk, emsk_len);
+			}
 		}
 		return;
 	}
@@ -2000,6 +2015,15 @@ static void eapol_sm_notify_status(void *ctx, const char *status,
 }
 
 
+static void eapol_sm_notify_eap_error(void *ctx, int error_code)
+{
+	struct eapol_sm *sm = ctx;
+
+	if (sm->ctx->eap_error_cb)
+		sm->ctx->eap_error_cb(sm->ctx->ctx, error_code);
+}
+
+
 #ifdef CONFIG_EAP_PROXY
 
 static void eapol_sm_eap_proxy_cb(void *ctx)
@@ -2047,6 +2071,7 @@ static const struct eapol_callbacks eapol_cb =
 	eapol_sm_eap_param_needed,
 	eapol_sm_notify_cert,
 	eapol_sm_notify_status,
+	eapol_sm_notify_eap_error,
 #ifdef CONFIG_EAP_PROXY
 	eapol_sm_eap_proxy_cb,
 	eapol_sm_eap_proxy_notify_sim_status,

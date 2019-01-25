@@ -1,5 +1,5 @@
 # Python class for controlling wpa_supplicant
-# Copyright (c) 2013-2014, Jouni Malinen <j@w1.fi>
+# Copyright (c) 2013-2019, Jouni Malinen <j@w1.fi>
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
@@ -379,7 +379,8 @@ class WpaSupplicant:
         quoted = [ "realm", "username", "password", "domain", "imsi",
                    "excluded_ssid", "milenage", "ca_cert", "client_cert",
                    "private_key", "domain_suffix_match", "provisioning_sp",
-                   "roaming_partner", "phase1", "phase2", "private_key_passwd" ]
+                   "roaming_partner", "phase1", "phase2", "private_key_passwd",
+                   "roaming_consortiums" ]
         for field in quoted:
             if field in params:
                 self.set_cred_quoted(id, field, params[field])
@@ -645,7 +646,7 @@ class WpaSupplicant:
             res['passphrase'] = p.group(1)
         res['go_dev_addr'] = s[7]
 
-        if len(s) > 8 and len(s[8]) > 0:
+        if len(s) > 8 and len(s[8]) > 0 and "[PERSISTENT]" not in s[8]:
             res['ip_addr'] = s[8]
         if len(s) > 9:
             res['ip_mask'] = s[9]
@@ -1010,7 +1011,8 @@ class WpaSupplicant:
                    "private_key2", "phase1", "phase2", "domain_suffix_match",
                    "altsubject_match", "subject_match", "pac_file", "dh_file",
                    "bgscan", "ht_mcs", "id_str", "openssl_ciphers",
-                   "domain_match", "dpp_connector", "sae_password" ]
+                   "domain_match", "dpp_connector", "sae_password",
+                   "sae_password_id" ]
         for field in quoted:
             if field in kwargs and kwargs[field]:
                 self.set_network_quoted(id, field, kwargs[field])
@@ -1028,7 +1030,9 @@ class WpaSupplicant:
                        "engine", "fils_dh_group", "bssid_hint",
                        "dpp_csign", "dpp_csign_expiry",
                        "dpp_netaccesskey", "dpp_netaccesskey_expiry",
-                       "group_mgmt", "owe_group" ]
+                       "group_mgmt", "owe_group",
+                       "roaming_consortium_selection", "ocv",
+                       "multi_ap_backhaul_sta", "rx_stbc", "tx_stbc" ]
         for field in not_quoted:
             if field in kwargs and kwargs[field]:
                 self.set_network(id, field, kwargs[field])
@@ -1102,17 +1106,26 @@ class WpaSupplicant:
             if len(res.splitlines()) > 1:
                 logger.info("flush_scan_cache: Could not clear all BSS entries. These remain:\n" + res)
 
-    def roam(self, bssid, fail_test=False):
+    def roam(self, bssid, fail_test=False, assoc_reject_ok=False):
         self.dump_monitor()
         if "OK" not in self.request("ROAM " + bssid):
             raise Exception("ROAM failed")
         if fail_test:
-            ev = self.wait_event(["CTRL-EVENT-CONNECTED"], timeout=1)
-            if ev is not None:
+            if assoc_reject_ok:
+                ev = self.wait_event(["CTRL-EVENT-CONNECTED",
+                                      "CTRL-EVENT-ASSOC-REJECT"], timeout=1)
+            else:
+                ev = self.wait_event(["CTRL-EVENT-CONNECTED"], timeout=1)
+            if ev is not None and "CTRL-EVENT-ASSOC-REJECT" not in ev:
                 raise Exception("Unexpected connection")
             self.dump_monitor()
             return
-        self.wait_connected(timeout=10, error="Roaming with the AP timed out")
+        ev = self.wait_event(["CTRL-EVENT-CONNECTED",
+                              "CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+        if ev is None:
+            raise Exception("Roaming with the AP timed out")
+        if "CTRL-EVENT-ASSOC-REJECT" in ev:
+            raise Exception("Roaming association rejected")
         self.dump_monitor()
 
     def roam_over_ds(self, bssid, fail_test=False):
@@ -1125,7 +1138,12 @@ class WpaSupplicant:
                 raise Exception("Unexpected connection")
             self.dump_monitor()
             return
-        self.wait_connected(timeout=10, error="Roaming with the AP timed out")
+        ev = self.wait_event(["CTRL-EVENT-CONNECTED",
+                              "CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+        if ev is None:
+            raise Exception("Roaming with the AP timed out")
+        if "CTRL-EVENT-ASSOC-REJECT" in ev:
+            raise Exception("Roaming association rejected")
         self.dump_monitor()
 
     def wps_reg(self, bssid, pin, new_ssid=None, key_mgmt=None, cipher=None,
@@ -1312,3 +1330,17 @@ class WpaSupplicant:
         if "OK" not in self.global_request("%s %s adv_id=%s adv_mac=%s session=%d session_mac=%s %s" %
                                            (cmd, peer, adv_id, adv_mac, session_id, session_mac, params)):
             raise Exception("%s request failed" % cmd)
+
+    def note(self, txt):
+        self.request("NOTE " + txt)
+
+    def wait_regdom(self, country_ie=False):
+        for i in range(5):
+            ev = self.wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=1)
+            if ev is None:
+                break
+            if country_ie:
+                if "init=COUNTRY_IE" in ev:
+                    break
+            else:
+                break

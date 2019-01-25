@@ -11,7 +11,7 @@ logger = logging.getLogger()
 
 import hwsim_utils
 import hostapd
-from utils import alloc_fail, fail_test, wait_fail_trigger
+from utils import alloc_fail, fail_test, wait_fail_trigger, HwsimSkip
 from wlantest import Wlantest
 from wpasupplicant import WpaSupplicant
 
@@ -56,6 +56,71 @@ def test_ap_pmf_required(dev, apdev):
     if wt.get_sta_counter("valid_saqueryresp_tx", apdev[0]['bssid'],
                           dev[1].p2p_interface_addr()) < 1:
         raise Exception("STA did not reply to SA Query")
+
+@remote_compatible
+def test_ocv_sa_query(dev, apdev):
+    """Test SA Query with OCV"""
+    ssid = "test-pmf-required"
+    params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
+    params["wpa_key_mgmt"] = "WPA-PSK-SHA256"
+    params["ieee80211w"] = "2"
+    params["ocv"] = "1"
+    try:
+        hapd = hostapd.add_ap(apdev[0], params)
+    except Exception, e:
+        if "Failed to set hostapd parameter ocv" in str(e):
+            raise HwsimSkip("OCV not supported")
+        raise
+    Wlantest.setup(hapd)
+    wt = Wlantest()
+    wt.flush()
+    wt.add_passphrase("12345678")
+    dev[0].connect(ssid, psk="12345678", ieee80211w="1", ocv="1",
+                   key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
+                   scan_freq="2412")
+
+    # Test that client can handle SA Query with OCI element
+    if "OK" not in hapd.request("SA_QUERY " + dev[0].own_addr()):
+        raise Exception("SA_QUERY failed")
+    time.sleep(0.1)
+    if wt.get_sta_counter("valid_saqueryresp_tx", apdev[0]['bssid'],
+                          dev[0].own_addr()) < 1:
+        raise Exception("STA did not reply to SA Query")
+
+    # Test that AP can handle SA Query with OCI element
+    if "OK" not in dev[0].request("UNPROT_DEAUTH"):
+        raise Exception("Triggering SA Query from the STA failed")
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=3)
+    if ev is not None:
+        raise Exception("SA Query from the STA failed")
+
+@remote_compatible
+def test_ocv_sa_query_csa(dev, apdev):
+    """Test SA Query with OCV after channel switch"""
+    ssid = "test-pmf-required"
+    params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
+    params["wpa_key_mgmt"] = "WPA-PSK-SHA256"
+    params["ieee80211w"] = "2"
+    params["ocv"] = "1"
+    try:
+        hapd = hostapd.add_ap(apdev[0], params)
+    except Exception, e:
+        if "Failed to set hostapd parameter ocv" in str(e):
+            raise HwsimSkip("OCV not supported")
+        raise
+    Wlantest.setup(hapd)
+    wt = Wlantest()
+    wt.flush()
+    wt.add_passphrase("12345678")
+    dev[0].connect(ssid, psk="12345678", ieee80211w="1", ocv="1",
+                   key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
+                   scan_freq="2412")
+
+    hapd.request("CHAN_SWITCH 5 2437")
+    time.sleep(1)
+    if wt.get_sta_counter("valid_saqueryreq_tx", apdev[0]['bssid'],
+                          dev[0].own_addr()) < 1:
+        raise Exception("STA did not start SA Query after channel switch")
 
 @remote_compatible
 def test_ap_pmf_optional(dev, apdev):
@@ -500,3 +565,33 @@ def test_ap_pmf_inject_auth(dev, apdev):
 
     # Verify that original association is still functional.
     hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_ap_pmf_tkip_reject(dev, apdev):
+    """Mixed mode BSS and MFP-enabled AP rejecting TKIP"""
+    params = hostapd.wpa2_params(ssid="test-pmf", passphrase="12345678")
+    params['wpa'] = '3'
+    params["ieee80211w"] = "1"
+    params["wpa_pairwise"] = "TKIP CCMP"
+    params["rsn_pairwise"] = "TKIP CCMP"
+    hostapd.add_ap(apdev[0], params)
+
+    dev[0].connect("test-pmf", psk="12345678", pairwise="CCMP", ieee80211w="2",
+                   scan_freq="2412")
+    dev[0].dump_monitor()
+
+    dev[1].connect("test-pmf", psk="12345678", proto="WPA", pairwise="TKIP",
+                   ieee80211w="0", scan_freq="2412")
+    dev[1].dump_monitor()
+
+    dev[2].connect("test-pmf", psk="12345678", pairwise="TKIP",
+                   ieee80211w="2", scan_freq="2412", wait_connect=False)
+    ev = dev[2].wait_event(["CTRL-EVENT-CONNECTED",
+                            "CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+    if ev is None:
+        raise Exception("No connection result reported")
+    if "CTRL-EVENT-ASSOC-REJECT" not in ev:
+        raise Exception("MFP + TKIP connection was not rejected")
+    if "status_code=31" not in ev:
+        raise Exception("Unexpected status code in rejection: " + ev)
+    dev[2].request("DISCONNECT")
+    dev[2].dump_monitor()

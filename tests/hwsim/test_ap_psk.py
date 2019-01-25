@@ -2660,12 +2660,16 @@ def test_rsn_ie_proto_psk_sta(dev, apdev):
                '30120100000fac040100000fac040100000fac02'),
               ('Reserved RSN Capabilities bits set',
                '30140100000fac040100000fac040100000fac023cff'),
+              ('Truncated RSN Capabilities field',
+               '30130100000fac040100000fac040100000fac023c'),
               ('Extra pairwise cipher suite (unsupported)',
                '30180100000fac040200ffffffff000fac040100000fac020c00'),
               ('Extra AKM suite (unsupported)',
                '30180100000fac040100000fac040200ffffffff000fac020c00'),
               ('PMKIDCount field included',
                '30160100000fac040100000fac040100000fac020c000000'),
+              ('Truncated PMKIDCount field',
+               '30150100000fac040100000fac040100000fac020c0000'),
               ('Unexpected Group Management Cipher Suite with PMF disabled',
                '301a0100000fac040100000fac040100000fac020c000000000fac06'),
               ('Extra octet after defined fields (future extensibility)',
@@ -2673,6 +2677,8 @@ def test_rsn_ie_proto_psk_sta(dev, apdev):
     for txt,ie in tests:
         dev[0].request("DISCONNECT")
         dev[0].wait_disconnected()
+        dev[0].dump_monitor()
+        dev[0].request("NOTE " + txt)
         logger.info(txt)
         hapd.disable()
         hapd.set('own_ie_override', ie)
@@ -2748,6 +2754,43 @@ def test_ap_wpa2_psk_assoc_rsn(dev, apdev):
             raise Exception("Unexpected status code: " + ev)
         dev[0].request("REMOVE_NETWORK all")
         dev[0].dump_monitor()
+
+def test_ap_wpa2_psk_ft_workaround(dev, apdev):
+    """WPA2-PSK+FT AP and workaround for incorrect STA behavior"""
+    ssid = "test-wpa2-psk-ft"
+    passphrase = 'qwertyuiop'
+
+    params = { "wpa": "2",
+               "wpa_key_mgmt": "FT-PSK WPA-PSK",
+               "rsn_pairwise": "CCMP",
+               "ssid": ssid,
+               "wpa_passphrase": passphrase }
+    params["mobility_domain"] = "a1b2"
+    params["r0_key_lifetime"] = "10000"
+    params["pmk_r1_push"] = "1"
+    params["reassociation_deadline"] = "1000"
+    params['nas_identifier'] = "nas1.w1.fi"
+    params['r1_key_holder'] = "000102030405"
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    # Include both WPA-PSK and FT-PSK AKMs in Association Request frame
+    set_test_assoc_ie(dev[0],
+                      "30180100000fac040100000fac040200000fac02000fac040000")
+    dev[0].connect(ssid, psk=passphrase, scan_freq="2412")
+    dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
+
+def test_ap_wpa2_psk_assoc_rsn_pmkid(dev, apdev):
+    """WPA2-PSK AP and association request RSN IE with PMKID"""
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=passphrase)
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    set_test_assoc_ie(dev[0], "30260100000fac040100000fac040100000fac0200000100" + 16*'00')
+    dev[0].connect(ssid, psk=passphrase, scan_freq="2412")
+    dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
 
 def test_ap_wpa_psk_rsn_pairwise(dev, apdev):
     """WPA-PSK AP and only rsn_pairwise set"""
@@ -2864,3 +2907,80 @@ def test_ap_wpa2_disable_eapol_retry_group(dev, apdev):
         raise Exception("Disconnection not reported")
     dev[0].request("REMOVE_NETWORK all")
     dev[0].dump_monitor()
+
+def test_ap_wpa2_psk_mic_0(dev, apdev):
+    """WPA2-PSK/TKIP and MIC=0 in EAPOL-Key msg 3/4"""
+    bssid = apdev[0]['bssid']
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=passphrase)
+    params['rsn_pairwise'] = "TKIP"
+    hapd = hostapd.add_ap(apdev[0], params)
+    hapd.request("SET ext_eapol_frame_io 1")
+    dev[0].request("SET ext_eapol_frame_io 1")
+    dev[0].connect(ssid, psk=passphrase, scan_freq="2412", wait_connect=False)
+    addr = dev[0].own_addr()
+
+    # EAPOL-Key msg 1/4
+    ev = hapd.wait_event(["EAPOL-TX"], timeout=15)
+    if ev is None:
+        raise Exception("Timeout on EAPOL-TX from hostapd")
+    res = dev[0].request("EAPOL_RX " + bssid + " " + ev.split(' ')[2])
+    if "OK" not in res:
+        raise Exception("EAPOL_RX to wpa_supplicant failed")
+
+    # EAPOL-Key msg 2/4
+    ev = dev[0].wait_event(["EAPOL-TX"], timeout=15)
+    if ev is None:
+        raise Exception("Timeout on EAPOL-TX from wpa_supplicant")
+    res = hapd.request("EAPOL_RX " + addr + " " + ev.split(' ')[2])
+    if "OK" not in res:
+        raise Exception("EAPOL_RX to hostapd failed")
+    dev[0].dump_monitor()
+
+    # EAPOL-Key msg 3/4
+    ev = hapd.wait_event(["EAPOL-TX"], timeout=15)
+    if ev is None:
+        raise Exception("Timeout on EAPOL-TX from hostapd")
+    msg3 = ev.split(' ')[2]
+    res = dev[0].request("EAPOL_RX " + bssid + " " + msg3)
+    if "OK" not in res:
+        raise Exception("EAPOL_RX to wpa_supplicant failed")
+
+    # EAPOL-Key msg 4/4
+    ev = dev[0].wait_event(["EAPOL-TX"], timeout=15)
+    if ev is None:
+        raise Exception("Timeout on EAPOL-TX from wpa_supplicant")
+    # Do not send to the AP
+
+    # EAPOL-Key msg 3/4 with MIC=0 and modifications
+    eapol_hdr = msg3[0:8]
+    key_type = msg3[8:10]
+    key_info = msg3[10:14]
+    key_length = msg3[14:18]
+    replay_counter = msg3[18:34]
+    key_nonce = msg3[34:98]
+    key_iv = msg3[98:130]
+    key_rsc = msg3[130:146]
+    key_id = msg3[146:162]
+    key_mic = msg3[162:194]
+    key_data_len = msg3[194:198]
+    key_data = msg3[198:]
+
+    msg3b = eapol_hdr + key_type
+    msg3b += "12c9" # Clear MIC bit from key_info (originally 13c9)
+    msg3b += key_length
+    msg3b += '0000000000000003'
+    msg3b += key_nonce + key_iv + key_rsc + key_id
+    msg3b += 32*'0' # Clear MIC value
+    msg3b += key_data_len + key_data
+    dev[0].dump_monitor()
+    res = dev[0].request("EAPOL_RX " + bssid + " " + msg3b)
+    if "OK" not in res:
+        raise Exception("EAPOL_RX to wpa_supplicant failed")
+    ev = dev[0].wait_event(["EAPOL-TX", "WPA: Ignore EAPOL-Key"], timeout=2)
+    if ev is None:
+        raise Exception("No event from wpa_supplicant")
+    if "EAPOL-TX" in ev:
+        raise Exception("Unexpected EAPOL-Key message from wpa_supplicant")
+    dev[0].request("DISCONNECT")

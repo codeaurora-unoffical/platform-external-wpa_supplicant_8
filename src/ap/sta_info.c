@@ -166,7 +166,7 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 	/* just in case */
 	ap_sta_set_authorized(hapd, sta, 0);
 
-	if (sta->flags & WLAN_STA_WDS)
+	if (sta->flags & (WLAN_STA_WDS | WLAN_STA_MULTI_AP))
 		hostapd_set_wds_sta(hapd, NULL, sta->addr, sta->aid, 0);
 
 	if (sta->ipaddr)
@@ -321,16 +321,19 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 	wpabuf_free(sta->wps_ie);
 	wpabuf_free(sta->p2p_ie);
 	wpabuf_free(sta->hs20_ie);
+	wpabuf_free(sta->roaming_consortium);
 #ifdef CONFIG_FST
 	wpabuf_free(sta->mb_ies);
 #endif /* CONFIG_FST */
 
 	os_free(sta->ht_capabilities);
 	os_free(sta->vht_capabilities);
+	os_free(sta->vht_operation);
 	hostapd_free_psk_list(sta->psk);
 	os_free(sta->identity);
 	os_free(sta->radius_cui);
 	os_free(sta->remediation_url);
+	os_free(sta->t_c_url);
 	wpabuf_free(sta->hs20_deauth_req);
 	os_free(sta->hs20_session_info_url);
 
@@ -360,6 +363,12 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 #endif /* CONFIG_OWE */
 
 	os_free(sta->ext_capability);
+
+#ifdef CONFIG_WNM_AP
+	eloop_cancel_timeout(ap_sta_reset_steer_flag_timer, hapd, sta);
+#endif /* CONFIG_WNM_AP */
+
+	os_free(sta->ifname_wds);
 
 	os_free(sta);
 }
@@ -888,9 +897,6 @@ int ap_sta_set_vlan(struct hostapd_data *hapd, struct sta_info *sta,
 	struct hostapd_vlan *vlan = NULL, *wildcard_vlan = NULL;
 	int old_vlan_id, vlan_id = 0, ret = 0;
 
-	if (hapd->conf->ssid.dynamic_vlan == DYNAMIC_VLAN_DISABLED)
-		vlan_desc = NULL;
-
 	/* Check if there is something to do */
 	if (hapd->conf->ssid.per_sta_vif && !sta->vlan_id) {
 		/* This sta is lacking its own vif */
@@ -1379,13 +1385,16 @@ static void ap_sta_delayed_1x_auth_fail_cb(void *eloop_ctx, void *timeout_ctx)
 {
 	struct hostapd_data *hapd = eloop_ctx;
 	struct sta_info *sta = timeout_ctx;
+	u16 reason;
 
 	wpa_dbg(hapd->msg_ctx, MSG_DEBUG,
 		"IEEE 802.1X: Scheduled disconnection of " MACSTR
 		" after EAP-Failure", MAC2STR(sta->addr));
 
-	ap_sta_disconnect(hapd, sta, sta->addr,
-			  WLAN_REASON_IEEE_802_1X_AUTH_FAILED);
+	reason = sta->disconnect_reason_code;
+	if (!reason)
+		reason = WLAN_REASON_IEEE_802_1X_AUTH_FAILED;
+	ap_sta_disconnect(hapd, sta, sta->addr, reason);
 	if (sta->flags & WLAN_STA_WPS)
 		hostapd_wps_eap_completed(hapd);
 }

@@ -8,9 +8,9 @@ HAPD_AS=$DIR/../../hostapd/hostapd
 HAPDCLI=$DIR/../../hostapd/hostapd_cli
 WLANTEST=$DIR/../../wlantest/wlantest
 HLR_AUC_GW=$DIR/../../hostapd/hlr_auc_gw
-DATE="$(date +%s)"
 
 if [ -z "$LOGDIR" ] ; then
+    DATE="$(date +%s)"
     LOGDIR="$DIR/logs/$DATE"
     mkdir -p $LOGDIR
 else
@@ -51,13 +51,16 @@ else
     fi
 fi
 
-if test -w "$DIR/logs" ; then
-    rm -rf $DIR/logs/current
-    ln -sf $DATE $DIR/logs/current
+LOGBASEDIR="$( cd "$(dirname "$LOGDIR")" && pwd )"
+if test "$LOGBASEDIR" = "$DIR/logs" -a -w "$LOGBASEDIR" ; then
+    rm -rf "$LOGBASEDIR/current"
+    ln -sf "$(basename "$LOGDIR")" "$LOGBASEDIR/current"
 fi
 
 if groups | tr ' ' "\n" | grep -q ^admin$; then
     GROUP=admin
+elif groups | tr ' ' "\n" | grep -q ^wheel$; then
+    GROUP=wheel
 else
     GROUP=adm
 fi
@@ -68,6 +71,12 @@ done
 
 sed "s/group=admin/group=$GROUP/;s%LOGDIR%$LOGDIR%g" "$DIR/auth_serv/as.conf" > "$LOGDIR/as.conf"
 sed "s/group=admin/group=$GROUP/;s%LOGDIR%$LOGDIR%g" "$DIR/auth_serv/as2.conf" > "$LOGDIR/as2.conf"
+
+unset VM
+if [ "$1" = "VM" ]; then
+    VM="y"
+    shift
+fi
 
 if [ "$1" = "valgrind" ]; then
     VALGRIND=y
@@ -119,7 +128,14 @@ sudo $(printf -- "$VALGRIND_WPAS" 5) $WPAS -g /tmp/wpas-wlan5 -G$GROUP \
     -ddKt$TRACE -f $LOGDIR/log5 &
 sudo $VALGRIND_HAPD $HAPD -ddKt$TRACE -g /var/run/hostapd-global -G $GROUP -f $LOGDIR/hostapd &
 HPID=$!
-echo $HPID > $LOGDIR/hostapd-test.pid
+
+if [ -z "$VM" ]; then
+    # Sleep a bit, otherwise pgrep may run before the child is forked
+    sleep 0.1
+    pgrep -P $HPID > $LOGDIR/hostapd-test.pid
+else
+    echo $HPID > $LOGDIR/hostapd-test.pid
+fi
 
 if [ -x $HLR_AUC_GW ]; then
     cp $DIR/auth_serv/hlr_auc_gw.milenage_db $LOGDIR/hlr_auc_gw.milenage_db
@@ -165,7 +181,7 @@ for i in unknown revoked; do
 done
 
 openssl ocsp -reqout $LOGDIR/ocsp-req.der -issuer $DIR/auth_serv/ca.pem \
-    -serial 0xD8D3E3A6CBE3CD12 -no_nonce -sha256 >> $LOGDIR/ocsp.log 2>&1
+    -sha256 -serial 0xD8D3E3A6CBE3CD17 -no_nonce >> $LOGDIR/ocsp.log 2>&1
 for i in "" "-unknown" "-revoked"; do
     openssl ocsp -index $DIR/auth_serv/index$i.txt \
 	-rsigner $DIR/auth_serv/ca.pem \

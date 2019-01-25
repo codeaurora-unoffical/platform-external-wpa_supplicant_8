@@ -19,8 +19,6 @@ int wpas_dpp_bootstrap_info(struct wpa_supplicant *wpa_s, int id,
 int wpas_dpp_auth_init(struct wpa_supplicant *wpa_s, const char *cmd);
 int wpas_dpp_listen(struct wpa_supplicant *wpa_s, const char *cmd);
 void wpas_dpp_listen_stop(struct wpa_supplicant *wpa_s);
-void wpas_dpp_remain_on_channel_cb(struct wpa_supplicant *wpa_s,
-				   unsigned int freq);
 void wpas_dpp_cancel_remain_on_channel_cb(struct wpa_supplicant *wpa_s,
 					  unsigned int freq);
 void wpas_dpp_rx_action(struct wpa_supplicant *wpa_s, const u8 *src,
@@ -28,6 +26,8 @@ void wpas_dpp_rx_action(struct wpa_supplicant *wpa_s, const u8 *src,
 int wpas_dpp_configurator_add(struct wpa_supplicant *wpa_s, const char *cmd);
 int wpas_dpp_configurator_remove(struct wpa_supplicant *wpa_s, const char *id);
 int wpas_dpp_configurator_sign(struct wpa_supplicant *wpa_s, const char *cmd);
+int wpas_dpp_configurator_get_key(struct wpa_supplicant *wpa_s, unsigned int id,
+				  char *buf, size_t buflen);
 int wpas_dpp_pkex_add(struct wpa_supplicant *wpa_s, const char *cmd);
 int wpas_dpp_pkex_remove(struct wpa_supplicant *wpa_s, const char *id);
 void wpas_dpp_stop(struct wpa_supplicant *wpa_s);

@@ -1608,8 +1608,8 @@ def test_gas_anqp_venue_url(dev, apdev):
 
     url1 = "http://example.com/venue"
     url2 = "https://example.org/venue-info/"
-    duple1 = struct.pack('BB', 1 + len(url1), 0)
-    duple2 = struct.pack('BB', 1 + len(url2), 1)
+    duple1 = struct.pack('BB', 1 + len(url1), 1) + url1
+    duple2 = struct.pack('BB', 1 + len(url2), 2) + url2
     venue_url = binascii.hexlify(duple1 + duple2)
 
     params = { "ssid": "gas/anqp",
@@ -1618,6 +1618,63 @@ def test_gas_anqp_venue_url(dev, apdev):
                "venue_type": str(venue_type),
                "venue_name": [ lang1 + ":" + name1, lang2 + ":" + name2 ],
                "anqp_elem": [ "277:" + venue_url ] }
+    hapd = hostapd.add_ap(apdev[0], params)
+    bssid = apdev[0]['bssid']
+
+    dev[0].scan_for_bss(bssid, freq="2412", force_scan=True)
+    if "OK" not in dev[0].request("ANQP_GET " + bssid + " 257,258,277"):
+        raise Exception("ANQP_GET command failed")
+
+    ev = dev[0].wait_event(["GAS-QUERY-DONE"], timeout=10)
+    if ev is None:
+        raise Exception("GAS query timed out")
+
+    ev = dev[0].wait_event(["RX-VENUE-URL"], timeout=0.1)
+    if ev is not None:
+        raise Exception("Unexpected Venue URL indication without PMF")
+
+    bss = dev[0].get_bss(bssid)
+
+    if 'anqp_venue_name' not in bss:
+        raise Exception("Venue Name ANQP-element not seen")
+    if bss['anqp_venue_name'] != venue_name:
+        raise Exception("Unexpected Venue Name ANQP-element value: " + bss['anqp_venue_name'])
+    if 'anqp[277]' not in bss:
+        raise Exception("Venue URL ANQP-element not seen")
+    if bss['anqp[277]'] != venue_url:
+        raise Exception("Unexpected Venue URL ANQP-element value: " + bss['anqp[277]'])
+
+    if 'anqp_capability_list' not in bss:
+        raise Exception("Capability List ANQP-element not seen")
+    ids = struct.pack('<HHH', 257, 258, 277)
+    if not bss['anqp_capability_list'].startswith(binascii.hexlify(ids)):
+        raise Exception("Unexpected Capability List ANQP-element value: " + bss['anqp_capability_list'])
+
+def test_gas_anqp_venue_url2(dev, apdev):
+    """GAS/ANQP and Venue URL (hostapd venue_url)"""
+    venue_group = 1
+    venue_type = 13
+    venue_info = struct.pack('BB', venue_group, venue_type)
+    lang1 = "eng"
+    name1= "Example venue"
+    lang2 = "fin"
+    name2 = "Esimerkkipaikka"
+    venue1 = struct.pack('B', len(lang1 + name1)) + lang1 + name1
+    venue2 = struct.pack('B', len(lang2 + name2)) + lang2 + name2
+    venue_name = binascii.hexlify(venue_info + venue1 + venue2)
+
+    url1 = "http://example.com/venue"
+    url2 = "https://example.org/venue-info/"
+    duple1 = struct.pack('BB', 1 + len(url1), 1) + url1
+    duple2 = struct.pack('BB', 1 + len(url2), 2) + url2
+    venue_url = binascii.hexlify(duple1 + duple2)
+
+    params = { "ssid": "gas/anqp",
+               "interworking": "1",
+               "venue_group": str(venue_group),
+               "venue_type": str(venue_type),
+               "venue_name": [ lang1 + ":" + name1, lang2 + ":" + name2 ],
+               "venue_url": [ "1:" + url1, "2:" + url2 ] }
     hapd = hostapd.add_ap(apdev[0], params)
     bssid = apdev[0]['bssid']
 
@@ -1638,6 +1695,7 @@ def test_gas_anqp_venue_url(dev, apdev):
     if 'anqp[277]' not in bss:
         raise Exception("Venue URL ANQP-element not seen")
     if bss['anqp[277]'] != venue_url:
+        print venue_url
         raise Exception("Unexpected Venue URL ANQP-element value: " + bss['anqp[277]'])
 
     if 'anqp_capability_list' not in bss:
@@ -1645,6 +1703,57 @@ def test_gas_anqp_venue_url(dev, apdev):
     ids = struct.pack('<HHH', 257, 258, 277)
     if not bss['anqp_capability_list'].startswith(binascii.hexlify(ids)):
         raise Exception("Unexpected Capability List ANQP-element value: " + bss['anqp_capability_list'])
+
+def test_gas_anqp_venue_url_pmf(dev, apdev):
+    """GAS/ANQP and Venue URL with PMF"""
+    venue_group = 1
+    venue_type = 13
+    venue_info = struct.pack('BB', venue_group, venue_type)
+    lang1 = "eng"
+    name1= "Example venue"
+    lang2 = "fin"
+    name2 = "Esimerkkipaikka"
+    venue1 = struct.pack('B', len(lang1 + name1)) + lang1 + name1
+    venue2 = struct.pack('B', len(lang2 + name2)) + lang2 + name2
+    venue_name = binascii.hexlify(venue_info + venue1 + venue2)
+
+    url1 = "http://example.com/venue"
+    url2 = "https://example.org/venue-info/"
+
+    params = { "ssid": "gas/anqp/pmf",
+               "wpa": "2",
+               "wpa_key_mgmt": "WPA-PSK",
+               "rsn_pairwise": "CCMP",
+               "wpa_passphrase": "12345678",
+               "ieee80211w": "2",
+               "interworking": "1",
+               "venue_group": str(venue_group),
+               "venue_type": str(venue_type),
+               "venue_name": [ lang1 + ":" + name1, lang2 + ":" + name2 ],
+               "venue_url": [ "1:" + url1, "2:" + url2 ] }
+    hapd = hostapd.add_ap(apdev[0], params)
+    bssid = apdev[0]['bssid']
+
+    dev[0].connect("gas/anqp/pmf", psk="12345678", ieee80211w="2",
+                   scan_freq="2412")
+    if "OK" not in dev[0].request("ANQP_GET " + bssid + " 277"):
+        raise Exception("ANQP_GET command failed")
+
+    ev = dev[0].wait_event(["GAS-QUERY-DONE"], timeout=10)
+    if ev is None:
+        raise Exception("GAS query timed out")
+
+    ev = dev[0].wait_event(["RX-VENUE-URL"], timeout=5)
+    if ev is None:
+        raise Exception("No Venue URL indication seen")
+    if "1 " + url1 not in ev:
+        raise Exception("Unexpected Venue URL information: " + ev)
+
+    ev = dev[0].wait_event(["RX-VENUE-URL"], timeout=5)
+    if ev is None:
+        raise Exception("No Venue URL indication seen (2)")
+    if "2 " + url2 not in ev:
+        raise Exception("Unexpected Venue URL information (2): " + ev)
 
 def test_gas_anqp_capab_list(dev, apdev):
     """GAS/ANQP and Capability List ANQP-element"""
@@ -1770,7 +1879,12 @@ def test_gas_anqp_overrides(dev, apdev):
     ev = dev[0].wait_event(["GAS-QUERY-DONE"], timeout=10)
     if ev is None:
         raise Exception("GAS query timed out")
-    for i in range(9):
+    elems = 9
+    capa = dev[0].get_capability("fils")
+    if capa is None or "FILS" not in capa:
+        # FILS Realm Info not supported in the build
+        elems -= 1
+    for i in range(elems):
         ev = dev[0].wait_event(["RX-ANQP"], timeout=5)
         if ev is None:
             raise Exception("ANQP response not seen")

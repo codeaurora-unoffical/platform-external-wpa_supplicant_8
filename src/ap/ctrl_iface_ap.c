@@ -153,6 +153,13 @@ static int hostapd_get_sta_tx_rx(struct hostapd_data *hapd,
 						   supported_mcs_set);
 	}
 
+	if (data.flags & STA_DRV_DATA_LAST_ACK_RSSI) {
+		ret = os_snprintf(buf + len, buflen - len,
+				  "last_ack_signal=%d\n", data.last_ack_rssi);
+		if (!os_snprintf_error(buflen - len, ret))
+			len += ret;
+	}
+
 	return len;
 }
 
@@ -325,6 +332,13 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 					sta->ext_capability + 1,
 					sta->ext_capability[0]);
 		len += os_snprintf(buf + len, buflen - len, "\n");
+	}
+
+	if (sta->flags & WLAN_STA_WDS && sta->ifname_wds) {
+		ret = os_snprintf(buf + len, buflen - len,
+				  "wds_sta_ifname=%s\n", sta->ifname_wds);
+		if (!os_snprintf_error(buflen - len, ret))
+			len += ret;
 	}
 
 	return len;
@@ -790,6 +804,15 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 				  wpa_ssid_txt(bss->conf->ssid.ssid,
 					       bss->conf->ssid.ssid_len),
 				  (int) i, bss->num_sta);
+		if (os_snprintf_error(buflen - len, ret))
+			return len;
+		len += ret;
+	}
+
+	if (hapd->conf->chan_util_avg_period) {
+		ret = os_snprintf(buf + len, buflen - len,
+				  "chan_util_avg=%u\n",
+				  iface->chan_util_average);
 		if (os_snprintf_error(buflen - len, ret))
 			return len;
 		len += ret;

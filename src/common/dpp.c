@@ -34,12 +34,18 @@ u8 dpp_pkex_own_mac_override[ETH_ALEN] = { 0, 0, 0, 0, 0, 0 };
 u8 dpp_pkex_peer_mac_override[ETH_ALEN] = { 0, 0, 0, 0, 0, 0 };
 u8 dpp_pkex_ephemeral_key_override[600];
 size_t dpp_pkex_ephemeral_key_override_len = 0;
+u8 dpp_protocol_key_override[600];
+size_t dpp_protocol_key_override_len = 0;
+u8 dpp_nonce_override[DPP_MAX_NONCE_LEN];
+size_t dpp_nonce_override_len = 0;
 
 static int dpp_test_gen_invalid_key(struct wpabuf *msg,
 				    const struct dpp_curve_params *curve);
 #endif /* CONFIG_TESTING_OPTIONS */
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || \
+	(defined(LIBRESSL_VERSION_NUMBER) && \
+	 LIBRESSL_VERSION_NUMBER < 0x20700000L)
 /* Compatibility wrappers for older versions. */
 
 static int ECDSA_SIG_set0(ECDSA_SIG *sig, BIGNUM *r, BIGNUM *s)
@@ -97,10 +103,10 @@ static const u8 pkex_resp_x_p256[32] = {
 	0x59, 0x91, 0x52, 0x33, 0xac, 0x19, 0x9d, 0x76
 };
 static const u8 pkex_resp_y_p256[32] = {
-	0x26, 0x04, 0x09, 0x45, 0x0a, 0x05, 0x20, 0xe7,
-	0xa7, 0x27, 0xc1, 0x36, 0x76, 0x85, 0xca, 0x3e,
-	0x42, 0x16, 0xf4, 0x89, 0x85, 0x34, 0x6e, 0xd5,
-	0x17, 0xde, 0xc0, 0xb8, 0xad, 0xfd, 0xb2, 0x98
+	0xd9, 0xfb, 0xf6, 0xb9, 0xf5, 0xfa, 0xdf, 0x19,
+	0x58, 0xd8, 0x3e, 0xc9, 0x89, 0x7a, 0x35, 0xc1,
+	0xbd, 0xe9, 0x0b, 0x77, 0x7a, 0xcb, 0x91, 0x2a,
+	0xe8, 0x21, 0x3f, 0x47, 0x52, 0x02, 0x4d, 0x67
 };
 
 /* NIST P-384 */
@@ -113,12 +119,12 @@ static const u8 pkex_init_x_p384[48] = {
 	0x81, 0xac, 0x38, 0x5d, 0x41, 0xe6, 0xb9, 0xa3
 };
 static const u8 pkex_init_y_p384[48] = {
-	0x89, 0xd0, 0x97, 0x7b, 0x59, 0x4f, 0xa6, 0xd6,
-	0x7c, 0x5d, 0x93, 0x5b, 0x93, 0xc4, 0x07, 0xa9,
-	0x89, 0xee, 0xd5, 0xcd, 0x6f, 0x42, 0xf8, 0x38,
-	0xc8, 0xc6, 0x62, 0x24, 0x69, 0x0c, 0xd4, 0x48,
-	0xd8, 0x44, 0xd6, 0xc2, 0xe8, 0xcc, 0x62, 0x6b,
-	0x3c, 0x25, 0x53, 0xba, 0x4f, 0x71, 0xf8, 0xe7
+	0x76, 0x2f, 0x68, 0x84, 0xa6, 0xb0, 0x59, 0x29,
+	0x83, 0xa2, 0x6c, 0xa4, 0x6c, 0x3b, 0xf8, 0x56,
+	0x76, 0x11, 0x2a, 0x32, 0x90, 0xbd, 0x07, 0xc7,
+	0x37, 0x39, 0x9d, 0xdb, 0x96, 0xf3, 0x2b, 0xb6,
+	0x27, 0xbb, 0x29, 0x3c, 0x17, 0x33, 0x9d, 0x94,
+	0xc3, 0xda, 0xac, 0x46, 0xb0, 0x8e, 0x07, 0x18
 };
 static const u8 pkex_resp_x_p384[48] = {
 	0xad, 0xbe, 0xd7, 0x1d, 0x3a, 0x71, 0x64, 0x98,
@@ -129,12 +135,12 @@ static const u8 pkex_resp_x_p384[48] = {
 	0xe0, 0xbb, 0xd7, 0xb1, 0x29, 0x20, 0x72, 0xdf
 };
 static const u8 pkex_resp_y_p384[48] = {
-	0x54, 0x58, 0x20, 0xad, 0x55, 0x1d, 0xca, 0xf3,
-	0x1c, 0x8a, 0xcd, 0x19, 0x40, 0xf9, 0x37, 0x83,
-	0xc7, 0xd6, 0xb3, 0x13, 0x7d, 0x53, 0x28, 0x5c,
-	0xf6, 0x2d, 0xf1, 0xdd, 0xa5, 0x8b, 0xad, 0x5d,
-	0x81, 0xab, 0xb1, 0x00, 0x39, 0xd6, 0xcc, 0x9c,
-	0xea, 0x1e, 0x84, 0x1d, 0xbf, 0xe3, 0x35, 0xf9
+	0xab, 0xa7, 0xdf, 0x52, 0xaa, 0xe2, 0x35, 0x0c,
+	0xe3, 0x75, 0x32, 0xe6, 0xbf, 0x06, 0xc8, 0x7c,
+	0x38, 0x29, 0x4c, 0xec, 0x82, 0xac, 0xd7, 0xa3,
+	0x09, 0xd2, 0x0e, 0x22, 0x5a, 0x74, 0x52, 0xa1,
+	0x7e, 0x54, 0x4e, 0xfe, 0xc6, 0x29, 0x33, 0x63,
+	0x15, 0xe1, 0x7b, 0xe3, 0x40, 0x1c, 0xca, 0x06
 };
 
 /* NIST P-521 */
@@ -150,15 +156,15 @@ static const u8 pkex_init_x_p521[66] = {
 	0x97, 0x76
 };
 static const u8 pkex_init_y_p521[66] = {
-	0x01, 0x4c, 0x71, 0xfd, 0x1b, 0xd5, 0x9c, 0xa6,
-	0xed, 0x39, 0xef, 0x45, 0xc5, 0x06, 0xfd, 0x66,
-	0xc0, 0xeb, 0x0f, 0xbf, 0x21, 0xa3, 0x36, 0x74,
-	0xfd, 0xaa, 0x05, 0x6e, 0x4e, 0x33, 0x95, 0x42,
-	0x1a, 0x9d, 0x3f, 0x3a, 0x1c, 0x5e, 0xa8, 0x60,
-	0xf7, 0xe5, 0x59, 0x1d, 0x07, 0xaa, 0x6f, 0x40,
-	0x0a, 0x59, 0x3c, 0x27, 0xad, 0xe0, 0x48, 0xfd,
-	0xd1, 0x83, 0x37, 0x4c, 0xdf, 0xe1, 0x86, 0x72,
-	0xfc, 0x57
+	0x00, 0xb3, 0x8e, 0x02, 0xe4, 0x2a, 0x63, 0x59,
+	0x12, 0xc6, 0x10, 0xba, 0x3a, 0xf9, 0x02, 0x99,
+	0x3f, 0x14, 0xf0, 0x40, 0xde, 0x5c, 0xc9, 0x8b,
+	0x02, 0x55, 0xfa, 0x91, 0xb1, 0xcc, 0x6a, 0xbd,
+	0xe5, 0x62, 0xc0, 0xc5, 0xe3, 0xa1, 0x57, 0x9f,
+	0x08, 0x1a, 0xa6, 0xe2, 0xf8, 0x55, 0x90, 0xbf,
+	0xf5, 0xa6, 0xc3, 0xd8, 0x52, 0x1f, 0xb7, 0x02,
+	0x2e, 0x7c, 0xc8, 0xb3, 0x20, 0x1e, 0x79, 0x8d,
+	0x03, 0xa8
 };
 static const u8 pkex_resp_x_p521[66] = {
 	0x00, 0x79, 0xe4, 0x4d, 0x6b, 0x5e, 0x12, 0x0a,
@@ -172,15 +178,15 @@ static const u8 pkex_resp_x_p521[66] = {
 	0x84, 0xb4
 };
 static const u8 pkex_resp_y_p521[66] = {
-	0x01, 0xb9, 0x9c, 0xc6, 0x41, 0x32, 0x5b, 0xd2,
-	0x35, 0xd8, 0x8b, 0x2b, 0xe4, 0x6e, 0xcc, 0xdf,
-	0x7c, 0x38, 0xc4, 0x5b, 0xf6, 0x74, 0x71, 0x5c,
-	0x77, 0x16, 0x8a, 0x80, 0xa9, 0x84, 0xc7, 0x7b,
-	0x9d, 0xfd, 0x83, 0x6f, 0xae, 0xf8, 0x24, 0x16,
-	0x2f, 0x21, 0x25, 0x65, 0xa2, 0x1a, 0x6b, 0x2d,
-	0x30, 0x62, 0xb3, 0xcc, 0x6e, 0x59, 0x3c, 0x7f,
-	0x58, 0x91, 0x81, 0x72, 0x07, 0x8c, 0x91, 0xac,
-	0x31, 0x1e
+	0x00, 0x46, 0x63, 0x39, 0xbe, 0xcd, 0xa4, 0x2d,
+	0xca, 0x27, 0x74, 0xd4, 0x1b, 0x91, 0x33, 0x20,
+	0x83, 0xc7, 0x3b, 0xa4, 0x09, 0x8b, 0x8e, 0xa3,
+	0x88, 0xe9, 0x75, 0x7f, 0x56, 0x7b, 0x38, 0x84,
+	0x62, 0x02, 0x7c, 0x90, 0x51, 0x07, 0xdb, 0xe9,
+	0xd0, 0xde, 0xda, 0x9a, 0x5d, 0xe5, 0x94, 0xd2,
+	0xcf, 0x9d, 0x4c, 0x33, 0x91, 0xa6, 0xc3, 0x80,
+	0xa7, 0x6e, 0x7e, 0x8d, 0xf8, 0x73, 0x6e, 0x53,
+	0xce, 0xe1
 };
 
 /* Brainpool P-256r1 */
@@ -191,10 +197,10 @@ static const u8 pkex_init_x_bp_p256r1[32] = {
 	0xac, 0xc7, 0xe9, 0x8d, 0xc2, 0x6f, 0xec, 0xd8
 };
 static const u8 pkex_init_y_bp_p256r1[32] = {
-	0x16, 0x30, 0x68, 0x32, 0x3b, 0xb0, 0x21, 0xee,
-	0xeb, 0xf7, 0xb6, 0x7c, 0xae, 0x52, 0x26, 0x42,
-	0x59, 0x28, 0x58, 0xb6, 0x14, 0x90, 0xed, 0x69,
-	0xd0, 0x67, 0xea, 0x25, 0x60, 0x0f, 0xa9, 0x6c
+	0x93, 0xca, 0xef, 0xa9, 0x66, 0x3e, 0x87, 0xcd,
+	0x52, 0x6e, 0x54, 0x13, 0xef, 0x31, 0x67, 0x30,
+	0x15, 0x13, 0x9d, 0x6d, 0xc0, 0x95, 0x32, 0xbe,
+	0x4f, 0xab, 0x5d, 0xf7, 0xbf, 0x5e, 0xaa, 0x0b
 };
 static const u8 pkex_resp_x_bp_p256r1[32] = {
 	0x90, 0x18, 0x84, 0xc9, 0xdc, 0xcc, 0xb5, 0x2f,
@@ -255,14 +261,14 @@ static const u8 pkex_init_x_bp_p512r1[64] = {
 	0x63, 0xe4, 0xd1, 0x0e, 0x75, 0x45, 0x69, 0x0f
 };
 static const u8 pkex_init_y_bp_p512r1[64] = {
-	0x5a, 0x28, 0x01, 0xbe, 0x96, 0x82, 0x4e, 0xf6,
-	0xfa, 0xed, 0x7d, 0xfd, 0x48, 0x8b, 0x48, 0x4e,
-	0xd1, 0x97, 0x87, 0xc4, 0x05, 0x5d, 0x15, 0x2a,
-	0xf4, 0x91, 0x4b, 0x75, 0x90, 0xd9, 0x34, 0x2c,
-	0x3c, 0x12, 0xf2, 0xf5, 0x25, 0x94, 0x24, 0x34,
-	0xa7, 0x6d, 0x66, 0xbc, 0x27, 0xa4, 0xa0, 0x8d,
-	0xd5, 0xe1, 0x54, 0xa3, 0x55, 0x26, 0xd4, 0x14,
-	0x17, 0x0f, 0xc1, 0xc7, 0x3d, 0x68, 0x7f, 0x5a
+	0x50, 0xb5, 0x9b, 0xfa, 0x45, 0x67, 0x75, 0x94,
+	0x44, 0xe7, 0x68, 0xb0, 0xeb, 0x3e, 0xb3, 0xb8,
+	0xf9, 0x99, 0x05, 0xef, 0xae, 0x6c, 0xbc, 0xe3,
+	0xe1, 0xd2, 0x51, 0x54, 0xdf, 0x59, 0xd4, 0x45,
+	0x41, 0x3a, 0xa8, 0x0b, 0x76, 0x32, 0x44, 0x0e,
+	0x07, 0x60, 0x3a, 0x6e, 0xbe, 0xfe, 0xe0, 0x58,
+	0x52, 0xa0, 0xaa, 0x8b, 0xd8, 0x5b, 0xf2, 0x71,
+	0x11, 0x9a, 0x9e, 0x8f, 0x1a, 0xd1, 0xc9, 0x99
 };
 static const u8 pkex_resp_x_bp_p512r1[64] = {
 	0x2a, 0x60, 0x32, 0x27, 0xa1, 0xe6, 0x94, 0x72,
@@ -275,14 +281,14 @@ static const u8 pkex_resp_x_bp_p512r1[64] = {
 	0x8e, 0x6e, 0x23, 0x47, 0xd4, 0x4b, 0x70, 0x3e
 };
 static const u8 pkex_resp_y_bp_p512r1[64] = {
-	0x2a, 0xbe, 0x59, 0xe6, 0xc4, 0xb3, 0xd8, 0x09,
-	0x66, 0x89, 0x0a, 0x2d, 0x19, 0xf0, 0x9c, 0x9f,
-	0xb4, 0xab, 0x8f, 0x50, 0x68, 0x3c, 0x74, 0x64,
-	0x4e, 0x19, 0x55, 0x81, 0x9b, 0x48, 0x5c, 0xf4,
-	0x12, 0x8d, 0xb9, 0xd8, 0x02, 0x5b, 0xe1, 0x26,
-	0x7e, 0x19, 0x5c, 0xfd, 0x70, 0xf7, 0x4b, 0xdc,
-	0xb5, 0x5d, 0xc1, 0x7a, 0xe9, 0xd1, 0x05, 0x2e,
-	0xd1, 0xfd, 0x2f, 0xce, 0x63, 0x77, 0x48, 0x2c
+	0x80, 0x1f, 0x43, 0xd2, 0x17, 0x35, 0xec, 0x81,
+	0xd9, 0x4b, 0xdc, 0x81, 0x19, 0xd9, 0x5f, 0x68,
+	0x16, 0x84, 0xfe, 0x63, 0x4b, 0x8d, 0x5d, 0xaa,
+	0x88, 0x4a, 0x47, 0x48, 0xd4, 0xea, 0xab, 0x7d,
+	0x6a, 0xbf, 0xe1, 0x28, 0x99, 0x6a, 0x87, 0x1c,
+	0x30, 0xb4, 0x44, 0x2d, 0x75, 0xac, 0x35, 0x09,
+	0x73, 0x24, 0x3d, 0xb4, 0x43, 0xb1, 0xc1, 0x56,
+	0x56, 0xad, 0x30, 0x87, 0xf4, 0xc3, 0x00, 0xc7
 };
 
 
@@ -807,7 +813,9 @@ static int dpp_parse_uri_pk(struct dpp_bootstrap_info *bi, const char *info)
 	const unsigned char *pk;
 	int ppklen;
 	X509_ALGOR *pa;
-#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || \
+	(defined(LIBRESSL_VERSION_NUMBER) && \
+	 LIBRESSL_VERSION_NUMBER < 0x20800000L)
 	ASN1_OBJECT *pa_oid;
 #else
 	const ASN1_OBJECT *pa_oid;
@@ -834,6 +842,7 @@ static int dpp_parse_uri_pk(struct dpp_bootstrap_info *bi, const char *info)
 	if (sha256_vector(1, (const u8 **) &data, &data_len,
 			  bi->pubkey_hash) < 0) {
 		wpa_printf(MSG_DEBUG, "DPP: Failed to hash public key");
+		os_free(data);
 		return -1;
 	}
 	wpa_hexdump(MSG_DEBUG, "DPP: Public key hash",
@@ -1062,13 +1071,8 @@ static void dpp_debug_print_key(const char *title, EVP_PKEY *key)
 
 static EVP_PKEY * dpp_gen_keypair(const struct dpp_curve_params *curve)
 {
-#ifdef OPENSSL_IS_BORINGSSL
 	EVP_PKEY_CTX *kctx = NULL;
-	const EC_GROUP *group;
 	EC_KEY *ec_params;
-#else
-	EVP_PKEY_CTX *pctx, *kctx = NULL;
-#endif
 	EVP_PKEY *params = NULL, *key = NULL;
 	int nid;
 
@@ -1079,10 +1083,9 @@ static EVP_PKEY * dpp_gen_keypair(const struct dpp_curve_params *curve)
 		wpa_printf(MSG_INFO, "DPP: Unsupported curve %s", curve->name);
 		return NULL;
 	}
-#ifdef OPENSSL_IS_BORINGSSL
-	group = EC_GROUP_new_by_curve_name(nid);
-	ec_params = EC_KEY_new();
-	if (!ec_params || EC_KEY_set_group(ec_params, group) != 1) {
+
+	ec_params = EC_KEY_new_by_curve_name(nid);
+	if (!ec_params) {
 		wpa_printf(MSG_ERROR,
 			   "DPP: Failed to generate EC_KEY parameters");
 		goto fail;
@@ -1094,22 +1097,6 @@ static EVP_PKEY * dpp_gen_keypair(const struct dpp_curve_params *curve)
 			   "DPP: Failed to generate EVP_PKEY parameters");
 		goto fail;
 	}
-#else
-	pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
-	if (!pctx ||
-	    EVP_PKEY_paramgen_init(pctx) != 1 ||
-	    EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, nid) != 1 ||
-#ifdef EVP_PKEY_CTX_set_ec_param_enc
-	    EVP_PKEY_CTX_set_ec_param_enc(pctx, OPENSSL_EC_NAMED_CURVE) != 1 ||
-#endif
-	    EVP_PKEY_paramgen(pctx, &params) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to generate EVP_PKEY parameters");
-		EVP_PKEY_CTX_free(pctx);
-		goto fail;
-	}
-	EVP_PKEY_CTX_free(pctx);
-#endif
 
 	kctx = EVP_PKEY_CTX_new(params, NULL);
 	if (!kctx ||
@@ -1449,6 +1436,12 @@ static int dpp_derive_ke(struct dpp_authentication *auth, u8 *ke,
 	size_t len[3];
 	size_t num_elem = 0;
 
+	if (!auth->Mx_len || !auth->Nx_len) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Mx/Nx not available - cannot derive ke");
+		return -1;
+	}
+
 	/* ke = HKDF(I-nonce | R-nonce, "DPP Key", M.x | N.x [| L.x]) */
 
 	/* HKDF-Extract(I-nonce | R-nonce, M.x | N.x [| L.x]) */
@@ -1456,12 +1449,17 @@ static int dpp_derive_ke(struct dpp_authentication *auth, u8 *ke,
 	os_memcpy(nonces, auth->i_nonce, nonce_len);
 	os_memcpy(&nonces[nonce_len], auth->r_nonce, nonce_len);
 	addr[num_elem] = auth->Mx;
-	len[num_elem] = auth->secret_len;
+	len[num_elem] = auth->Mx_len;
 	num_elem++;
 	addr[num_elem] = auth->Nx;
-	len[num_elem] = auth->secret_len;
+	len[num_elem] = auth->Nx_len;
 	num_elem++;
 	if (auth->peer_bi && auth->own_bi) {
+		if (!auth->Lx_len) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: Lx not available - cannot derive ke");
+			return -1;
+		}
 		addr[num_elem] = auth->Lx;
 		len[num_elem] = auth->secret_len;
 		num_elem++;
@@ -2084,14 +2082,43 @@ struct dpp_authentication * dpp_auth_init(void *msg_ctx,
 	    dpp_prepare_channel_list(auth, own_modes, num_modes) < 0)
 		goto fail;
 
+#ifdef CONFIG_TESTING_OPTIONS
+	if (dpp_nonce_override_len > 0) {
+		wpa_printf(MSG_INFO, "DPP: TESTING - override I-nonce");
+		nonce_len = dpp_nonce_override_len;
+		os_memcpy(auth->i_nonce, dpp_nonce_override, nonce_len);
+	} else {
+		nonce_len = auth->curve->nonce_len;
+		if (random_get_bytes(auth->i_nonce, nonce_len)) {
+			wpa_printf(MSG_ERROR,
+				   "DPP: Failed to generate I-nonce");
+			goto fail;
+		}
+	}
+#else /* CONFIG_TESTING_OPTIONS */
 	nonce_len = auth->curve->nonce_len;
 	if (random_get_bytes(auth->i_nonce, nonce_len)) {
 		wpa_printf(MSG_ERROR, "DPP: Failed to generate I-nonce");
 		goto fail;
 	}
+#endif /* CONFIG_TESTING_OPTIONS */
 	wpa_hexdump(MSG_DEBUG, "DPP: I-nonce", auth->i_nonce, nonce_len);
 
+#ifdef CONFIG_TESTING_OPTIONS
+	if (dpp_protocol_key_override_len) {
+		const struct dpp_curve_params *tmp_curve;
+
+		wpa_printf(MSG_INFO,
+			   "DPP: TESTING - override protocol key");
+		auth->own_protocol_key = dpp_set_keypair(
+			&tmp_curve, dpp_protocol_key_override,
+			dpp_protocol_key_override_len);
+	} else {
+		auth->own_protocol_key = dpp_gen_keypair(auth->curve);
+	}
+#else /* CONFIG_TESTING_OPTIONS */
 	auth->own_protocol_key = dpp_gen_keypair(auth->curve);
+#endif /* CONFIG_TESTING_OPTIONS */
 	if (!auth->own_protocol_key)
 		goto fail;
 
@@ -2118,6 +2145,7 @@ struct dpp_authentication * dpp_auth_init(void *msg_ctx,
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (M.x)",
 			auth->Mx, auth->secret_len);
+	auth->Mx_len = auth->secret_len;
 
 	if (dpp_derive_k1(auth->Mx, auth->secret_len, auth->k1,
 			  auth->curve->hash_len) < 0)
@@ -2284,8 +2312,11 @@ static void dpp_auth_success(struct dpp_authentication *auth)
 	wpa_printf(MSG_DEBUG,
 		   "DPP: Authentication success - clear temporary keys");
 	os_memset(auth->Mx, 0, sizeof(auth->Mx));
+	auth->Mx_len = 0;
 	os_memset(auth->Nx, 0, sizeof(auth->Nx));
+	auth->Nx_len = 0;
 	os_memset(auth->Lx, 0, sizeof(auth->Lx));
+	auth->Lx_len = 0;
 	os_memset(auth->k1, 0, sizeof(auth->k1));
 	os_memset(auth->k2, 0, sizeof(auth->k2));
 
@@ -2507,6 +2538,7 @@ static int dpp_auth_derive_l_responder(struct dpp_authentication *auth)
 	if (dpp_bn2bin_pad(lx, auth->Lx, auth->secret_len) < 0)
 		goto fail;
 	wpa_hexdump_key(MSG_DEBUG, "DPP: L.x", auth->Lx, auth->secret_len);
+	auth->Lx_len = auth->secret_len;
 	ret = 0;
 fail:
 	EC_POINT_clear_free(l);
@@ -2568,9 +2600,11 @@ static int dpp_auth_derive_l_initiator(struct dpp_authentication *auth)
 	if (dpp_bn2bin_pad(lx, auth->Lx, auth->secret_len) < 0)
 		goto fail;
 	wpa_hexdump_key(MSG_DEBUG, "DPP: L.x", auth->Lx, auth->secret_len);
+	auth->Lx_len = auth->secret_len;
 	ret = 0;
 fail:
 	EC_POINT_clear_free(l);
+	EC_POINT_clear_free(sum);
 	EC_KEY_free(bI);
 	EC_KEY_free(BR);
 	EC_KEY_free(PR);
@@ -2600,14 +2634,43 @@ static int dpp_auth_build_resp_ok(struct dpp_authentication *auth)
 	if (!auth->own_bi)
 		return -1;
 
+#ifdef CONFIG_TESTING_OPTIONS
+	if (dpp_nonce_override_len > 0) {
+		wpa_printf(MSG_INFO, "DPP: TESTING - override R-nonce");
+		nonce_len = dpp_nonce_override_len;
+		os_memcpy(auth->r_nonce, dpp_nonce_override, nonce_len);
+	} else {
+		nonce_len = auth->curve->nonce_len;
+		if (random_get_bytes(auth->r_nonce, nonce_len)) {
+			wpa_printf(MSG_ERROR,
+				   "DPP: Failed to generate R-nonce");
+			goto fail;
+		}
+	}
+#else /* CONFIG_TESTING_OPTIONS */
 	nonce_len = auth->curve->nonce_len;
 	if (random_get_bytes(auth->r_nonce, nonce_len)) {
 		wpa_printf(MSG_ERROR, "DPP: Failed to generate R-nonce");
 		goto fail;
 	}
+#endif /* CONFIG_TESTING_OPTIONS */
 	wpa_hexdump(MSG_DEBUG, "DPP: R-nonce", auth->r_nonce, nonce_len);
 
+#ifdef CONFIG_TESTING_OPTIONS
+	if (dpp_protocol_key_override_len) {
+		const struct dpp_curve_params *tmp_curve;
+
+		wpa_printf(MSG_INFO,
+			   "DPP: TESTING - override protocol key");
+		auth->own_protocol_key = dpp_set_keypair(
+			&tmp_curve, dpp_protocol_key_override,
+			dpp_protocol_key_override_len);
+	} else {
+		auth->own_protocol_key = dpp_gen_keypair(auth->curve);
+	}
+#else /* CONFIG_TESTING_OPTIONS */
 	auth->own_protocol_key = dpp_gen_keypair(auth->curve);
+#endif /* CONFIG_TESTING_OPTIONS */
 	if (!auth->own_protocol_key)
 		goto fail;
 
@@ -2633,6 +2696,7 @@ static int dpp_auth_build_resp_ok(struct dpp_authentication *auth)
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (N.x)",
 			auth->Nx, auth->secret_len);
+	auth->Nx_len = auth->secret_len;
 
 	if (dpp_derive_k2(auth->Nx, auth->secret_len, auth->k2,
 			  auth->curve->hash_len) < 0)
@@ -2792,7 +2856,7 @@ static int dpp_auth_build_resp_status(struct dpp_authentication *auth,
 		i_pubkey_hash = test_hash;
 	} else if (dpp_test == DPP_TEST_NO_STATUS_AUTH_RESP) {
 		wpa_printf(MSG_INFO, "DPP: TESTING - no Status");
-		status = -1;
+		status = 255;
 	} else if (dpp_test == DPP_TEST_NO_I_NONCE_AUTH_RESP) {
 		wpa_printf(MSG_INFO, "DPP: TESTING - no I-nonce");
 		i_nonce = NULL;
@@ -2923,6 +2987,7 @@ dpp_auth_req_rx(void *msg_ctx, u8 dpp_allowed_roles, int qr_mutual,
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (M.x)",
 			auth->Mx, auth->secret_len);
+	auth->Mx_len = auth->secret_len;
 
 	if (dpp_derive_k1(auth->Mx, auth->secret_len, auth->k1,
 			  auth->curve->hash_len) < 0)
@@ -3394,7 +3459,7 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	if (!auth->initiator) {
+	if (!auth->initiator || !auth->peer_bi) {
 		dpp_auth_fail(auth, "Unexpected Authentication Response");
 		return NULL;
 	}
@@ -3522,6 +3587,7 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (N.x)",
 			auth->Nx, auth->secret_len);
+	auth->Nx_len = auth->secret_len;
 
 	if (dpp_derive_k2(auth->Nx, auth->secret_len, auth->k2,
 			  auth->curve->hash_len) < 0)
@@ -3574,7 +3640,7 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 		goto fail;
 	}
 
-	if (auth->own_bi && auth->peer_bi) {
+	if (auth->own_bi) {
 		/* Mutual authentication */
 		if (dpp_auth_derive_l_initiator(auth) < 0)
 			goto fail;
@@ -3782,7 +3848,7 @@ int dpp_auth_conf_rx(struct dpp_authentication *auth, const u8 *hdr,
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	if (auth->initiator) {
+	if (auth->initiator || !auth->own_bi) {
 		dpp_auth_fail(auth, "Unexpected Authentication Confirm");
 		return -1;
 	}
@@ -3840,7 +3906,7 @@ int dpp_auth_conf_rx(struct dpp_authentication *auth, const u8 *hdr,
 				      "Initiator Bootstrapping Key Hash mismatch");
 			return -1;
 		}
-	} else if (auth->own_bi && auth->peer_bi) {
+	} else if (auth->peer_bi) {
 		/* Mutual authentication and peer did not include its
 		 * Bootstrapping Key Hash attribute. */
 		dpp_auth_fail(auth,
@@ -3926,6 +3992,7 @@ void dpp_configuration_free(struct dpp_configuration *conf)
 	if (!conf)
 		return;
 	str_clear_free(conf->passphrase);
+	os_free(conf->group_id);
 	bin_clear_free(conf, sizeof(*conf));
 }
 
@@ -4072,6 +4139,9 @@ dpp_build_conf_obj_dpp(struct dpp_authentication *auth, int ap,
 		extra_len += os_strlen(auth->groups_override);
 #endif /* CONFIG_TESTING_OPTIONS */
 
+	if (conf->group_id)
+		extra_len += os_strlen(conf->group_id);
+
 	/* Connector (JSON dppCon object) */
 	dppcon = wpabuf_alloc(extra_len + 2 * auth->curve->prime_len * 4 / 3);
 	if (!dppcon)
@@ -4090,7 +4160,8 @@ dpp_build_conf_obj_dpp(struct dpp_authentication *auth, int ap,
 		goto skip_groups;
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
-	wpabuf_put_str(dppcon, "{\"groups\":[{\"groupId\":\"*\",");
+	wpabuf_printf(dppcon, "{\"groups\":[{\"groupId\":\"%s\",",
+		      conf->group_id ? conf->group_id : "*");
 	wpabuf_printf(dppcon, "\"netRole\":\"%s\"}],", ap ? "ap" : "sta");
 #ifdef CONFIG_TESTING_OPTIONS
 skip_groups:
@@ -4688,7 +4759,7 @@ static EVP_PKEY * dpp_parse_jwk(struct json_token *jwk,
 		goto fail;
 	}
 	if (os_strcmp(token->string, "EC") != 0) {
-		wpa_printf(MSG_DEBUG, "DPP: Unexpected JWK kty '%s",
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected JWK kty '%s'",
 			   token->string);
 		goto fail;
 	}
@@ -5450,6 +5521,30 @@ void dpp_configurator_free(struct dpp_configurator *conf)
 }
 
 
+int dpp_configurator_get_key(const struct dpp_configurator *conf, char *buf,
+			     size_t buflen)
+{
+	EC_KEY *eckey;
+	int key_len, ret = -1;
+	unsigned char *key = NULL;
+
+	if (!conf->csign)
+		return -1;
+
+	eckey = EVP_PKEY_get1_EC_KEY(conf->csign);
+	if (!eckey)
+		return -1;
+
+	key_len = i2d_ECPrivateKey(eckey, &key);
+	if (key_len > 0)
+		ret = wpa_snprintf_hex(buf, buflen, key, key_len);
+
+	EC_KEY_free(eckey);
+	OPENSSL_free(key);
+	return ret;
+}
+
+
 struct dpp_configurator *
 dpp_keygen_configurator(const char *curve, const u8 *privkey,
 			size_t privkey_len)
@@ -5471,6 +5566,7 @@ dpp_keygen_configurator(const char *curve, const u8 *privkey,
 		if (!conf->curve) {
 			wpa_printf(MSG_INFO, "DPP: Unsupported curve: %s",
 				   curve);
+			os_free(conf);
 			return NULL;
 		}
 	}
@@ -6128,13 +6224,14 @@ static int dpp_test_gen_invalid_key(struct wpabuf *msg,
 
 		if (EC_POINT_set_affine_coordinates_GFp(group, point, x, y,
 							ctx) != 1) {
-#ifdef OPENSSL_IS_BORINGSSL
-		/* Unlike OpenSSL, BoringSSL returns an error from
-		 * EC_POINT_set_affine_coordinates_GFp() is not on the curve. */
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L || defined(OPENSSL_IS_BORINGSSL)
+		/* Unlike older OpenSSL versions, OpenSSL 1.1.1 and BoringSSL
+		 * return an error from EC_POINT_set_affine_coordinates_GFp()
+		 * when the point is not on the curve. */
 			break;
-#else /* OPENSSL_IS_BORINGSSL */
+#else /* >=1.1.0 or OPENSSL_IS_BORINGSSL */
 			goto fail;
-#endif /* OPENSSL_IS_BORINGSSL */
+#endif /* >= 1.1.0 or OPENSSL_IS_BORINGSSL */
 		}
 
 		if (!EC_POINT_is_on_curve(group, point, ctx))
@@ -6491,6 +6588,32 @@ static int dpp_pkex_derive_z(const u8 *mac_init, const u8 *mac_resp,
 }
 
 
+static int dpp_pkex_identifier_match(const u8 *attr_id, u16 attr_id_len,
+				     const char *identifier)
+{
+	if (!attr_id && identifier) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No PKEX code identifier received, but expected one");
+		return 0;
+	}
+
+	if (attr_id && !identifier) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: PKEX code identifier received, but not expecting one");
+		return 0;
+	}
+
+	if (attr_id && identifier &&
+	    (os_strlen(identifier) != attr_id_len ||
+	     os_memcmp(identifier, attr_id, attr_id_len) != 0)) {
+		wpa_printf(MSG_DEBUG, "DPP: PKEX code identifier mismatch");
+		return 0;
+	}
+
+	return 1;
+}
+
+
 struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 					   struct dpp_bootstrap_info *bi,
 					   const u8 *own_mac,
@@ -6535,19 +6658,11 @@ struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
+	attr_id_len = 0;
 	attr_id = dpp_get_attr(buf, len, DPP_ATTR_CODE_IDENTIFIER,
 			       &attr_id_len);
-	if (!attr_id && identifier) {
-		wpa_printf(MSG_DEBUG,
-			   "DPP: No PKEX code identifier received, but expected one");
+	if (!dpp_pkex_identifier_match(attr_id, attr_id_len, identifier))
 		return NULL;
-	}
-	if (attr_id && identifier &&
-	    (os_strlen(identifier) != attr_id_len ||
-	     os_memcmp(identifier, attr_id, attr_id_len) != 0)) {
-		wpa_printf(MSG_DEBUG, "DPP: PKEX code identifier mismatch");
-		return NULL;
-	}
 
 	attr_group = dpp_get_attr(buf, len, DPP_ATTR_FINITE_CYCLIC_GROUP,
 				  &attr_group_len);
@@ -6919,16 +7034,11 @@ struct wpabuf * dpp_pkex_rx_exchange_resp(struct dpp_pkex *pkex,
 		return NULL;
 	}
 
+	attr_id_len = 0;
 	attr_id = dpp_get_attr(buf, buflen, DPP_ATTR_CODE_IDENTIFIER,
 			       &attr_id_len);
-	if (!attr_id && pkex->identifier) {
-		wpa_printf(MSG_DEBUG,
-			   "DPP: No PKEX code identifier received, but expected one");
-		return NULL;
-	}
-	if (attr_id && pkex->identifier &&
-	    (os_strlen(pkex->identifier) != attr_id_len ||
-	     os_memcmp(pkex->identifier, attr_id, attr_id_len) != 0)) {
+	if (!dpp_pkex_identifier_match(attr_id, attr_id_len,
+				       pkex->identifier)) {
 		dpp_pkex_fail(pkex, "PKEX code identifier mismatch");
 		return NULL;
 	}

@@ -861,6 +861,111 @@ def test_p2ps_connect_adv_go_persistent(dev):
     p2ps_connect_pd(dev[0], dev[1], ev0, ev1)
     remove_group(dev[0], dev[1])
 
+def test_p2ps_stale_group_removal(dev):
+    """P2PS stale group removal"""
+    go_neg_pin_authorized_persistent(i_dev=dev[0], i_intent=15,
+                                     r_dev=dev[1], r_intent=0)
+    dev[0].remove_group()
+    dev[1].wait_go_ending_session()
+
+    # Drop the first persistent group on dev[1] and form new persistent groups
+    # on both devices.
+    dev[1].request("FLUSH")
+    go_neg_pin_authorized_persistent(i_dev=dev[0], i_intent=15,
+                                     r_dev=dev[1], r_intent=0)
+    dev[0].remove_group()
+    dev[1].wait_go_ending_session()
+
+    # The GO now has a stale persistent group as the first entry. Try to go
+    # through P2PS sequence to hit stale group removal.
+    if len(dev[0].list_networks(p2p=True)) != 2:
+        raise Exception("Unexpected number of networks on dev[0]")
+    if len(dev[1].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[1]")
+
+    p2ps_advertise(r_dev=dev[0], r_role='4', svc_name='org.wi-fi.wfds.send.rx',
+                   srv_info='I can receive files upto size 2 GB')
+    [adv_id, rcvd_svc_name] = p2ps_exact_seek(i_dev=dev[1], r_dev=dev[0],
+                                              svc_name='org.wi-fi.wfds.send.rx',
+                                              srv_info='2 GB')
+    ev1, ev0 = p2ps_provision(dev[1], dev[0], adv_id)
+    if "persist=" not in ev0 or "persist=" not in ev1:
+        raise Exception("Persistent group isn't used by peers")
+
+    p2ps_connect_pd(dev[0], dev[1], ev0, ev1)
+    remove_group(dev[0], dev[1])
+
+    if len(dev[0].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[0] (2)")
+    if len(dev[1].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[1] (2)")
+
+def test_p2ps_stale_group_removal2(dev):
+    """P2PS stale group removal (2)"""
+    go_neg_pin_authorized_persistent(i_dev=dev[0], i_intent=0,
+                                     r_dev=dev[1], r_intent=15)
+    dev[1].remove_group()
+    dev[0].wait_go_ending_session()
+
+    # Drop the first persistent group on dev[1] and form new persistent groups
+    # on both devices.
+    dev[1].request("FLUSH")
+    go_neg_pin_authorized_persistent(i_dev=dev[0], i_intent=0,
+                                     r_dev=dev[1], r_intent=15)
+    dev[1].remove_group()
+    dev[0].wait_go_ending_session()
+
+    # The P2P Client now has a stale persistent group as the first entry. Try
+    # to go through P2PS sequence to hit stale group removal.
+    if len(dev[0].list_networks(p2p=True)) != 2:
+        raise Exception("Unexpected number of networks on dev[0]")
+    if len(dev[1].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[1]")
+
+    p2ps_advertise(r_dev=dev[1], r_role='4', svc_name='org.wi-fi.wfds.send.rx',
+                   srv_info='I can receive files upto size 2 GB')
+    [adv_id, rcvd_svc_name] = p2ps_exact_seek(i_dev=dev[0], r_dev=dev[1],
+                                              svc_name='org.wi-fi.wfds.send.rx',
+                                              srv_info='2 GB')
+    ev0, ev1 = p2ps_provision(dev[0], dev[1], adv_id)
+    # This hits persistent group removal on dev[0] (P2P Client)
+
+def test_p2ps_stale_group_removal3(dev):
+    """P2PS stale group removal (3)"""
+    dev[0].p2p_start_go(persistent=True)
+    dev[0].remove_group()
+    if len(dev[0].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[0]")
+
+    go_neg_pin_authorized_persistent(i_dev=dev[0], i_intent=15,
+                                     r_dev=dev[1], r_intent=0)
+    dev[0].remove_group()
+    dev[1].wait_go_ending_session()
+
+    # The GO now has a stale persistent group as the first entry. Try to go
+    # through P2PS sequence to hit stale group removal.
+    if len(dev[0].list_networks(p2p=True)) != 2:
+        raise Exception("Unexpected number of networks on dev[0] (2)")
+    if len(dev[1].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[1] (2)")
+
+    p2ps_advertise(r_dev=dev[0], r_role='4', svc_name='org.wi-fi.wfds.send.rx',
+                   srv_info='I can receive files upto size 2 GB')
+    [adv_id, rcvd_svc_name] = p2ps_exact_seek(i_dev=dev[1], r_dev=dev[0],
+                                              svc_name='org.wi-fi.wfds.send.rx',
+                                              srv_info='2 GB')
+    ev1, ev0 = p2ps_provision(dev[1], dev[0], adv_id)
+    if "persist=" not in ev0 or "persist=" not in ev1:
+        raise Exception("Persistent group isn't used by peers")
+
+    p2ps_connect_pd(dev[0], dev[1], ev0, ev1)
+    remove_group(dev[0], dev[1])
+
+    if len(dev[0].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[0] (3)")
+    if len(dev[1].list_networks(p2p=True)) != 1:
+        raise Exception("Unexpected number of networks on dev[1] (3)")
+
 @remote_compatible
 def test_p2ps_adv_go_persistent_no_peer_entry(dev):
     """P2PS advertisement as GO having persistent group (no peer entry)"""
@@ -1126,8 +1231,8 @@ def test_p2ps_channel_one_connected(dev, apdev):
         if freq != '2442':
             raise Exception('Unexpected frequency for group 2442 != ' + freq)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 def set_random_listen_chan(dev):
     chan = random.randrange(0, 3) * 5 + 1
@@ -1158,10 +1263,10 @@ def test_p2ps_channel_both_connected_same(dev, apdev):
         if freq != '2437':
             raise Exception('Unexpected frequency for group 2437 != ' + freq)
     finally:
-        remove_group(dev[2], dev[1])
         dev[2].global_request("P2P_SERVICE_DEL asp all")
         for i in range(1, 3):
             set_random_listen_chan(dev[i])
+        remove_group(dev[2], dev[1])
 
 def disconnect_handler(seeker, advertiser):
     advertiser.request("DISCONNECT")
@@ -1199,8 +1304,8 @@ def test_p2ps_channel_both_connected_different(dev, apdev):
         if freq != '2457':
             raise Exception('Unexpected frequency for group 2457 != ' + freq)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 def test_p2ps_channel_both_connected_different_mcc(dev, apdev):
     """P2PS connection with P2PS method - stations connected on different channels with mcc"""
@@ -1226,8 +1331,8 @@ def test_p2ps_channel_both_connected_different_mcc(dev, apdev):
         if freq != '2422' and freq != '2457':
             raise Exception('Unexpected frequency for group =' + freq)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 def clear_disallow_handler(seeker, advertiser):
     advertiser.global_request("P2P_SET disallow_freq ")
@@ -1258,10 +1363,10 @@ def test_p2ps_channel_disallow_freq(dev, apdev):
         if freq != '2412':
             raise Exception('Unexpected frequency for group 2412 != ' + freq)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SERVICE_DEL asp all")
         dev[0].global_request("P2P_SET disallow_freq ")
         dev[1].global_request("P2P_SET disallow_freq ")
+        remove_group(dev[0], dev[1])
 
 def test_p2ps_channel_sta_connected_disallow_freq(dev, apdev):
     """P2PS connection with P2PS method - one station and disallow freqs"""
@@ -1293,9 +1398,9 @@ def test_p2ps_channel_sta_connected_disallow_freq(dev, apdev):
         if freq != '2437':
             raise Exception('Unexpected frequency for group 2437 != ' + freq)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SET disallow_freq ")
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 def test_p2ps_channel_sta_connected_disallow_freq_mcc(dev, apdev):
     """P2PS connection with P2PS method - one station and disallow freqs with mcc"""
@@ -1323,9 +1428,9 @@ def test_p2ps_channel_sta_connected_disallow_freq_mcc(dev, apdev):
             if freq == '2437':
                 raise Exception('Unexpected frequency=2437')
         finally:
-            remove_group(dev[0], wpas)
             dev[0].global_request("P2P_SET disallow_freq ")
             dev[0].global_request("P2P_SERVICE_DEL asp all")
+            remove_group(dev[0], wpas)
 
 @remote_compatible
 def test_p2ps_active_go_adv(dev, apdev):
@@ -1356,8 +1461,8 @@ def test_p2ps_active_go_adv(dev, apdev):
         dev[0].p2p_stop_find()
         p2ps_connect_pd(dev[0], dev[1], ev0, ev1)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 @remote_compatible
 def test_p2ps_active_go_seeker(dev, apdev):
@@ -1385,8 +1490,8 @@ def test_p2ps_active_go_seeker(dev, apdev):
         p2ps_connect_pd(dev[0], dev[1], ev0, ev1,
                         join_extra=" freq=" + res['freq'])
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 def test_p2ps_channel_active_go_and_station_same(dev, apdev):
     """P2PS connection, active P2P GO and station on channel"""
@@ -1419,10 +1524,10 @@ def test_p2ps_channel_active_go_and_station_same(dev, apdev):
         ev1, ev0 = p2ps_provision(dev[1], dev[2], adv_id)
         p2ps_connect_pd(dev[2], dev[1], ev0, ev1, join_extra=" freq=2462")
     finally:
-        remove_group(dev[2], dev[1])
         dev[2].global_request("P2P_SERVICE_DEL asp all")
         for i in range(1, 3):
             set_random_listen_chan(dev[i])
+        remove_group(dev[2], dev[1])
 
 def test_p2ps_channel_active_go_and_station_different(dev, apdev):
     """P2PS connection, active P2P GO and station on channel"""
@@ -1500,10 +1605,10 @@ def test_p2ps_channel_active_go_and_station_different_mcc(dev, apdev):
         ev1, ev0 = p2ps_provision(dev[1], dev[0], adv_id)
         p2ps_connect_pd(dev[0], dev[1], ev0, ev1)
     finally:
-        remove_group(dev[0], dev[1])
         dev[0].request("DISCONNECT")
         hapd.disable()
         dev[0].global_request("P2P_SERVICE_DEL asp all")
+        remove_group(dev[0], dev[1])
 
 def test_p2ps_connect_p2p_device(dev):
     """P2PS connection using cfg80211 P2P Device"""

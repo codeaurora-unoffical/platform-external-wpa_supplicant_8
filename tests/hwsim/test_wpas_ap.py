@@ -78,6 +78,28 @@ def test_wpas_ap_open(dev):
     dev[1].request("DISCONNECT")
     dev[2].request("DISCONNECT")
 
+def test_wpas_ap_open_isolate(dev):
+    """wpa_supplicant AP mode - open network with client isolation"""
+    try:
+        dev[0].set("ap_isolate", "1")
+        id = dev[0].add_network()
+        dev[0].set_network(id, "mode", "2")
+        dev[0].set_network_quoted(id, "ssid", "wpas-ap-open")
+        dev[0].set_network(id, "key_mgmt", "NONE")
+        dev[0].set_network(id, "frequency", "2412")
+        dev[0].set_network(id, "scan_freq", "2412")
+        dev[0].select_network(id)
+        wait_ap_ready(dev[0])
+
+        dev[1].connect("wpas-ap-open", key_mgmt="NONE", scan_freq="2412")
+        dev[2].connect("wpas-ap-open", key_mgmt="NONE", scan_freq="2412")
+        hwsim_utils.test_connectivity(dev[0], dev[1])
+        hwsim_utils.test_connectivity(dev[0], dev[2])
+        hwsim_utils.test_connectivity(dev[1], dev[2], success_expected=False,
+                                      timeout=1)
+    finally:
+        dev[0].set("ap_isolate", "0")
+
 @remote_compatible
 def test_wpas_ap_wep(dev):
     """wpa_supplicant AP mode - WEP"""
@@ -360,7 +382,10 @@ def _test_wpas_ap_dfs(dev):
         raise Exception("AP failed to start")
 
     dev[1].connect("wpas-ap-dfs", key_mgmt="NONE")
+    dev[1].wait_regdom(country_ie=True)
+    dev[0].request("DISCONNECT")
     dev[1].request("DISCONNECT")
+    dev[1].request("ABORT_SCAN")
     dev[1].wait_disconnected()
 
 @remote_compatible
@@ -717,3 +742,26 @@ def test_wpas_ap_no_ht(dev):
         raise Exception("HT was not disabled: " + str(sig))
     if "WIDTH=20 MHz" not in sig2:
         raise Exception("HT was not enabled: " + str(sig2))
+
+def test_wpas_ap_async_fail(dev):
+    """wpa_supplicant AP mode - Async failure"""
+    id = dev[0].add_network()
+    dev[0].set("country", "FI")
+    try:
+        dev[0].set_network(id, "mode", "2")
+        dev[0].set_network_quoted(id, "ssid", "wpas-ap-open")
+        dev[0].set_network(id, "key_mgmt", "NONE")
+        dev[0].set_network(id, "frequency", "5180")
+        dev[0].set_network(id, "scan_freq", "5180")
+        dev[0].set_network(id, "vht", "1")
+        dev[0].set_network(id, "vht_center_freq1", "5210")
+        dev[0].set_network(id, "max_oper_chwidth", "1")
+        dev[0].set_network(id, "ht40", "1")
+
+        with alloc_fail(dev[0], 1,
+                        "nl80211_get_scan_results;ieee80211n_check_scan"):
+            dev[0].select_network(id)
+            dev[0].wait_disconnected()
+    finally:
+        set_country("00")
+        dev[0].set("country", "00")

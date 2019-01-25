@@ -64,6 +64,7 @@ union tls_event_data {
 		size_t hash_len;
 		const char *altsubject[TLS_MAX_ALT_SUBJECT];
 		int num_altsubject;
+		const char *serial_num;
 	} peer_cert;
 
 	struct {
@@ -101,6 +102,10 @@ struct tls_config {
 #define TLS_CONN_REQUIRE_OCSP_ALL BIT(10)
 #define TLS_CONN_SUITEB BIT(11)
 #define TLS_CONN_SUITEB_NO_ECDH BIT(12)
+#define TLS_CONN_DISABLE_TLSv1_3 BIT(13)
+#define TLS_CONN_ENABLE_TLSv1_0 BIT(14)
+#define TLS_CONN_ENABLE_TLSv1_1 BIT(15)
+#define TLS_CONN_ENABLE_TLSv1_2 BIT(16)
 
 /**
  * struct tls_connection_params - Parameters for TLS connection
@@ -142,6 +147,8 @@ struct tls_config {
  * @cert_id: the certificate's id when using engine
  * @ca_cert_id: the CA certificate's id when using engine
  * @openssl_ciphers: OpenSSL cipher configuration
+ * @openssl_ecdh_curves: OpenSSL ECDH curve configuration. %NULL for auto if
+ *	supported, empty string to disable, or a colon-separated curve list.
  * @flags: Parameter options (TLS_CONN_*)
  * @ocsp_stapling_response: DER encoded file with cached OCSP stapling response
  *	or %NULL if OCSP is not enabled
@@ -185,6 +192,7 @@ struct tls_connection_params {
 	const char *cert_id;
 	const char *ca_cert_id;
 	const char *openssl_ciphers;
+	const char *openssl_ecdh_curves;
 
 	unsigned int flags;
 	const char *ocsp_stapling_response;
@@ -252,6 +260,18 @@ void tls_connection_deinit(void *tls_ctx, struct tls_connection *conn);
 int tls_connection_established(void *tls_ctx, struct tls_connection *conn);
 
 /**
+ * tls_connection_peer_serial_num - Fetch peer certificate serial number
+ * @tls_ctx: TLS context data from tls_init()
+ * @conn: Connection context data from tls_connection_init()
+ * Returns: Allocated string buffer containing the peer certificate serial
+ * number or %NULL on error.
+ *
+ * The caller is responsible for freeing the returned buffer with os_free().
+ */
+char * tls_connection_peer_serial_num(void *tls_ctx,
+				      struct tls_connection *conn);
+
+/**
  * tls_connection_shutdown - Shutdown TLS connection
  * @tls_ctx: TLS context data from tls_init()
  * @conn: Connection context data from tls_connection_init()
@@ -307,9 +327,11 @@ int __must_check tls_global_set_params(
  * @tls_ctx: TLS context data from tls_init()
  * @check_crl: 0 = do not verify CRLs, 1 = verify CRL for the user certificate,
  * 2 = verify CRL for all certificates
+ * @strict: 0 = allow CRL time errors, 1 = do not allow CRL time errors
  * Returns: 0 on success, -1 on failure
  */
-int __must_check tls_global_set_verify(void *tls_ctx, int check_crl);
+int __must_check tls_global_set_verify(void *tls_ctx, int check_crl,
+				       int strict);
 
 /**
  * tls_connection_set_verify - Set certificate verification options

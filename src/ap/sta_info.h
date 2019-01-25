@@ -36,6 +36,7 @@
 #define WLAN_STA_VHT_OPMODE_ENABLED BIT(20)
 #define WLAN_STA_VENDOR_VHT BIT(21)
 #define WLAN_STA_PENDING_FILS_ERP BIT(22)
+#define WLAN_STA_MULTI_AP BIT(23)
 #define WLAN_STA_PENDING_DISASSOC_CB BIT(29)
 #define WLAN_STA_PENDING_DEAUTH_CB BIT(30)
 #define WLAN_STA_NONERP BIT(31)
@@ -67,6 +68,7 @@ struct sta_info {
 	be32 ipaddr;
 	struct dl_list ip6addr; /* list head for struct ip6addr */
 	u16 aid; /* STA's unique AID (1 .. 2007) or 0 if not yet assigned */
+	u16 disconnect_reason_code; /* RADIUS server override */
 	u32 flags; /* Bitfield of WLAN_STA_* */
 	u16 capability;
 	u16 listen_interval; /* or beacon_int for APs */
@@ -114,6 +116,9 @@ struct sta_info {
 	unsigned int added_unassoc:1;
 	unsigned int pending_wds_enable:1;
 	unsigned int power_capab:1;
+	unsigned int agreed_to_steer:1;
+	unsigned int hs20_t_c_filtering:1;
+	unsigned int ft_over_ds:1;
 
 	u16 auth_alg;
 
@@ -159,6 +164,7 @@ struct sta_info {
 
 	struct ieee80211_ht_capabilities *ht_capabilities;
 	struct ieee80211_vht_capabilities *vht_capabilities;
+	struct ieee80211_vht_operation *vht_operation;
 	u8 vht_opmode;
 
 #ifdef CONFIG_IEEE80211W
@@ -180,8 +186,11 @@ struct sta_info {
 	struct wpabuf *wps_ie; /* WPS IE from (Re)Association Request */
 	struct wpabuf *p2p_ie; /* P2P IE from (Re)Association Request */
 	struct wpabuf *hs20_ie; /* HS 2.0 IE from (Re)Association Request */
+	/* Hotspot 2.0 Roaming Consortium from (Re)Association Request */
+	struct wpabuf *roaming_consortium;
 	u8 remediation_method;
 	char *remediation_url; /* HS 2.0 Subscription Remediation Server URL */
+	char *t_c_url; /* HS 2.0 Terms and Conditions Server URL */
 	struct wpabuf *hs20_deauth_req;
 	char *hs20_session_info_url;
 	int hs20_disassoc_timer;
@@ -196,7 +205,8 @@ struct sta_info {
 	unsigned int mesh_sae_pmksa_caching:1;
 #endif /* CONFIG_SAE */
 
-	u32 session_timeout; /* valid only if session_timeout_set == 1 */
+	/* valid only if session_timeout_set == 1 */
+	struct os_reltime session_timeout;
 
 	/* Last Authentication/(Re)Association Request/Action frame sequence
 	 * control */
@@ -208,6 +218,7 @@ struct sta_info {
 	u8 cell_capa; /* 0 = unknown (not an MBO STA); otherwise,
 		       * enum mbo_cellular_capa values */
 	struct mbo_non_pref_chan_info *non_pref_chan;
+	int auth_rssi; /* Last Authentication frame RSSI */
 #endif /* CONFIG_MBO */
 
 	u8 *supp_op_classes; /* Supported Operating Classes element, if
@@ -252,6 +263,7 @@ struct sta_info {
 #endif /* CONFIG_OWE */
 
 	u8 *ext_capability;
+	char *ifname_wds; /* WDS ifname, if in use */
 
 #ifdef CONFIG_TESTING_OPTIONS
 	enum wpa_alg last_tk_alg;

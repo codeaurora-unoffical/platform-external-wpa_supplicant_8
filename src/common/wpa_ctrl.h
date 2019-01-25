@@ -62,6 +62,7 @@ extern "C" {
 /** EAP authentication failed due to no response received */
 #define WPA_EVENT_EAP_TIMEOUT_FAILURE "CTRL-EVENT-EAP-TIMEOUT-FAILURE "
 #define WPA_EVENT_EAP_TIMEOUT_FAILURE2 "CTRL-EVENT-EAP-TIMEOUT-FAILURE2 "
+#define WPA_EVENT_EAP_ERROR_CODE "EAP-ERROR-CODE "
 /** Network block temporarily disabled (e.g., due to authentication failure) */
 #define WPA_EVENT_TEMP_DISABLED "CTRL-EVENT-SSID-TEMP-DISABLED "
 /** Temporarily disabled network block re-enabled */
@@ -88,6 +89,9 @@ extern "C" {
 #define WPA_EVENT_REGDOM_CHANGE "CTRL-EVENT-REGDOM-CHANGE "
 /** Channel switch (followed by freq=<MHz> and other channel parameters) */
 #define WPA_EVENT_CHANNEL_SWITCH "CTRL-EVENT-CHANNEL-SWITCH "
+/** SAE authentication failed due to unknown password identifier */
+#define WPA_EVENT_SAE_UNKNOWN_PASSWORD_IDENTIFIER \
+	"CTRL-EVENT-SAE-UNKNOWN-PASSWORD-IDENTIFIER "
 
 /** IP subnet status change notification
  *
@@ -176,6 +180,7 @@ extern "C" {
 #define DPP_EVENT_FAIL "DPP-FAIL "
 #define DPP_EVENT_PKEX_T_LIMIT "DPP-PKEX-T-LIMIT "
 #define DPP_EVENT_INTRO "DPP-INTRO "
+#define DPP_EVENT_CONF_REQ_RX "DPP-CONF-REQ-RX "
 
 /* MESH events */
 #define MESH_GROUP_STARTED "MESH-GROUP-STARTED "
@@ -270,8 +275,12 @@ extern "C" {
 #define RX_HS20_ICON "RX-HS20-ICON "
 #define RX_MBO_ANQP "RX-MBO-ANQP "
 
+/* parameters: <Venue Number> <Venue URL> */
+#define RX_VENUE_URL "RX-VENUE-URL "
+
 #define HS20_SUBSCRIPTION_REMEDIATION "HS20-SUBSCRIPTION-REMEDIATION "
 #define HS20_DEAUTH_IMMINENT_NOTICE "HS20-DEAUTH-IMMINENT-NOTICE "
+#define HS20_T_C_ACCEPTANCE "HS20-T-C-ACCEPTANCE "
 
 #define EXT_RADIO_WORK_START "EXT-RADIO-WORK-START "
 #define EXT_RADIO_WORK_TIMEOUT "EXT-RADIO-WORK-TIMEOUT "
@@ -294,6 +303,9 @@ extern "C" {
 
 #define AP_REJECTED_MAX_STA "AP-REJECTED-MAX-STA "
 #define AP_REJECTED_BLOCKED_STA "AP-REJECTED-BLOCKED-STA "
+
+#define HS20_T_C_FILTERING_ADD "HS20-T-C-FILTERING-ADD "
+#define HS20_T_C_FILTERING_REMOVE "HS20-T-C-FILTERING-REMOVE "
 
 #define AP_EVENT_ENABLED "AP-ENABLED "
 #define AP_EVENT_DISABLED "AP-DISABLED "
@@ -320,6 +332,13 @@ extern "C" {
 /* BSS Transition Management Response frame received */
 #define BSS_TM_RESP "BSS-TM-RESP "
 
+/* Collocated Interference Request frame received;
+ * parameters: <dialog token> <automatic report enabled> <report timeout> */
+#define COLOC_INTF_REQ "COLOC-INTF-REQ "
+/* Collocated Interference Report frame received;
+ * parameters: <STA address> <dialog token> <hexdump of report elements> */
+#define COLOC_INTF_REPORT "COLOC-INTF-REPORT "
+
 /* MBO IE with cellular data connection preference received */
 #define MBO_CELL_PREFERENCE "MBO-CELL-PREFERENCE "
 
@@ -343,6 +362,15 @@ extern "C" {
 /* Event to indicate Probe Request frame;
  * parameters: sa=<STA MAC address> signal=<signal> */
 #define RX_PROBE_REQUEST "RX-PROBE-REQUEST "
+
+/* Event to indicate station's HT/VHT operation mode change information */
+#define STA_OPMODE_MAX_BW_CHANGED "STA-OPMODE-MAX-BW-CHANGED "
+#define STA_OPMODE_SMPS_MODE_CHANGED "STA-OPMODE-SMPS-MODE-CHANGED "
+#define STA_OPMODE_N_SS_CHANGED "STA-OPMODE-N_SS-CHANGED "
+
+/* New interface addition or removal for 4addr WDS SDA */
+#define WDS_STA_INTERFACE_ADDED "WDS-STA-INTERFACE-ADDED "
+#define WDS_STA_INTERFACE_REMOVED "WDS-STA-INTERFACE-REMOVED "
 
 /* BSS command information masks */
 
@@ -445,7 +473,7 @@ void wpa_ctrl_close(struct wpa_ctrl *ctrl);
  *
  * This function is used to send commands to wpa_supplicant/hostapd. Received
  * response will be written to reply and reply_len is set to the actual length
- * of the reply. This function will block for up to two seconds while waiting
+ * of the reply. This function will block for up to 10 seconds while waiting
  * for the reply. If unsolicited messages are received, the blocking time may
  * be longer.
  *

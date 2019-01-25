@@ -116,10 +116,13 @@ def test_ap_country(dev, apdev):
         dev[0].connect(ssid, psk=passphrase, scan_freq="5180")
         hwsim_utils.test_connectivity(dev[0], hapd)
     finally:
-        dev[0].request("DISCONNECT")
         if hapd:
             hapd.request("DISABLE")
+        dev[0].request("DISCONNECT")
+        dev[0].request("ABORT_SCAN")
+        dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=0.5)
         hostapd.cmd_execute(apdev[0], ['iw', 'reg', 'set', '00'])
+        dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
         dev[0].flush_scan_cache()
 
 def test_ap_acl_accept(dev, apdev):
@@ -150,13 +153,83 @@ def test_ap_acl_deny(dev, apdev):
     params['ssid'] = ssid
     params['deny_mac_file'] = "hostapd.macaddr"
     hapd = hostapd.add_ap(apdev[0], params)
-    dev[0].scan_for_bss(apdev[0]['bssid'], freq="2412")
+    dev[0].scan_for_bss(apdev[0]['bssid'], freq="2412", passive=True)
     dev[0].connect(ssid, key_mgmt="NONE", scan_freq="2412", wait_connect=False)
     dev[1].scan_for_bss(apdev[0]['bssid'], freq="2412")
     dev[1].connect(ssid, key_mgmt="NONE", scan_freq="2412")
     ev = dev[0].wait_event(["CTRL-EVENT-CONNECTED"], timeout=1)
     if ev is not None:
         raise Exception("Unexpected association")
+
+def test_ap_acl_mgmt(dev, apdev):
+    """MAC ACL accept/deny management"""
+    ssid = "acl"
+    params = {}
+    params['ssid'] = ssid
+    params['deny_mac_file'] = "hostapd.macaddr"
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    accept = hapd.request("ACCEPT_ACL SHOW").splitlines()
+    logger.info("accept: " + str(accept))
+    deny = hapd.request("DENY_ACL SHOW").splitlines()
+    logger.info("deny: " + str(deny))
+    if len(accept) != 0:
+        raise Exception("Unexpected number of accept entries")
+    if len(deny) != 3:
+        raise Exception("Unexpected number of deny entries")
+    if "01:01:01:01:01:01 VLAN_ID=0" not in deny:
+        raise Exception("Missing deny entry")
+
+    hapd.request("ACCEPT_ACL ADD_MAC 22:33:44:55:66:77")
+    hapd.request("DENY_ACL ADD_MAC 22:33:44:55:66:88 VLAN_ID=2")
+
+    accept = hapd.request("ACCEPT_ACL SHOW").splitlines()
+    logger.info("accept: " + str(accept))
+    deny = hapd.request("DENY_ACL SHOW").splitlines()
+    logger.info("deny: " + str(deny))
+    if len(accept) != 1:
+        raise Exception("Unexpected number of accept entries (2)")
+    if len(deny) != 4:
+        raise Exception("Unexpected number of deny entries (2)")
+    if "01:01:01:01:01:01 VLAN_ID=0" not in deny:
+        raise Exception("Missing deny entry (2)")
+    if "22:33:44:55:66:88 VLAN_ID=2" not in deny:
+        raise Exception("Missing deny entry (2)")
+    if "22:33:44:55:66:77 VLAN_ID=0" not in accept:
+        raise Exception("Missing accept entry (2)")
+
+    hapd.request("ACCEPT_ACL DEL_MAC 22:33:44:55:66:77")
+    hapd.request("DENY_ACL DEL_MAC 22:33:44:55:66:88")
+
+    accept = hapd.request("ACCEPT_ACL SHOW").splitlines()
+    logger.info("accept: " + str(accept))
+    deny = hapd.request("DENY_ACL SHOW").splitlines()
+    logger.info("deny: " + str(deny))
+    if len(accept) != 0:
+        raise Exception("Unexpected number of accept entries (3)")
+    if len(deny) != 3:
+        raise Exception("Unexpected number of deny entries (3)")
+    if "01:01:01:01:01:01 VLAN_ID=0" not in deny:
+        raise Exception("Missing deny entry (3)")
+
+    hapd.request("ACCEPT_ACL CLEAR")
+    hapd.request("DENY_ACL CLEAR")
+
+    accept = hapd.request("ACCEPT_ACL SHOW").splitlines()
+    logger.info("accept: " + str(accept))
+    deny = hapd.request("DENY_ACL SHOW").splitlines()
+    logger.info("deny: " + str(deny))
+    if len(accept) != 0:
+        raise Exception("Unexpected number of accept entries (4)")
+    if len(deny) != 0:
+        raise Exception("Unexpected number of deny entries (4)")
+
+    dev[0].scan_for_bss(apdev[0]['bssid'], freq="2412")
+    dev[0].connect(ssid, key_mgmt="NONE", scan_freq="2412")
+    dev[0].dump_monitor()
+    hapd.request("DENY_ACL ADD_MAC " + dev[0].own_addr())
+    dev[0].wait_disconnected()
+    dev[0].request("DISCONNECT")
 
 @remote_compatible
 def test_ap_wds_sta(dev, apdev):
@@ -174,6 +247,19 @@ def test_ap_wds_sta(dev, apdev):
         dev[0].cmd_execute(['ip', 'link', 'set', 'dev', 'wds-br0', 'up'])
         dev[0].cmd_execute(['iw', dev[0].ifname, 'set', '4addr', 'on'])
         dev[0].connect(ssid, psk=passphrase, scan_freq="2412")
+        ev = hapd.wait_event(["WDS-STA-INTERFACE-ADDED"], timeout=10)
+        if ev is None:
+            raise Exception("No WDS-STA-INTERFACE-ADDED event seen")
+        if "sta_addr=" + dev[0].own_addr() not in ev:
+            raise Exception("No sta_addr match in " + ev)
+        if "ifname=" + hapd.ifname + ".sta" not in ev:
+            raise Exception("No ifname match in " + ev)
+        sta = hapd.get_sta(dev[0].own_addr())
+        if "wds_sta_ifname" not in sta:
+            raise Exception("Missing wds_sta_ifname in STA data")
+        if "ifname=" + sta['wds_sta_ifname'] not in ev:
+            raise Exception("wds_sta_ifname %s not in event: %s" %
+                            (sta['wds_sta_ifname'], ev))
         hwsim_utils.test_connectivity_iface(dev[0], hapd, "wds-br0",
                                             max_tries=15)
         dev[0].request("REATTACH")
@@ -332,11 +418,15 @@ def test_ap_spectrum_management_required(dev, apdev):
         hapd = None
         hapd = hostapd.add_ap(apdev[0], params)
         dev[0].connect(ssid, key_mgmt="NONE", scan_freq="5180")
+        dev[0].wait_regdom(country_ie=True)
     finally:
-        dev[0].request("DISCONNECT")
         if hapd:
             hapd.request("DISABLE")
+        dev[0].request("DISCONNECT")
+        dev[0].request("ABORT_SCAN")
+        dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=0.5)
         hostapd.cmd_execute(apdev[0], ['iw', 'reg', 'set', '00'])
+        dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
         dev[0].flush_scan_cache()
 
 @remote_compatible
@@ -431,6 +521,10 @@ def test_ap_tx_queue_params_invalid(dev, apdev):
     params['wmm_ac_bk_acm'] = "0"
 
     hapd = hostapd.add_ap(apdev[0], params)
+
+    # Valid WMM change
+    hapd.set("wmm_ac_be_cwmin", "3")
+
     # "Invalid TX queue cwMin/cwMax values. cwMin(7) greater than cwMax(3)"
     if "FAIL" not in hapd.request('SET tx_queue_data2_cwmax 3'):
         raise Exception("TX cwMax < cwMin accepted")

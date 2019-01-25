@@ -325,6 +325,7 @@ def test_dbus_set_global_properties(dev, apdev):
     """D-Bus Get/Set fi.w1.wpa_supplicant1 interface global properties"""
     (bus,wpas_obj,path,if_obj) = prepare_dbus(dev[0])
 
+    dev[0].set("model_name", "")
     props = [ ('Okc', '0', '1'), ('ModelName', '', 'blahblahblah') ]
 
     for p in props:
@@ -340,6 +341,7 @@ def test_dbus_set_global_properties(dev, apdev):
                          dbus_interface=dbus.PROPERTIES_IFACE)
         if res != p[2]:
             raise Exception("Unexpected " + p[0] + " value after set: " + str(res))
+    dev[0].set("model_name", "")
 
 def test_dbus_invalid_method(dev, apdev):
     """D-Bus invalid method"""
@@ -2171,6 +2173,10 @@ def test_dbus_tdls(dev, apdev):
 
 def test_dbus_tdls_channel_switch(dev, apdev):
     """D-Bus TDLS channel switch configuration"""
+    flags = int(dev[0].get_driver_status_field('capa.flags'), 16)
+    if flags & 0x800000000 == 0:
+        raise HwsimSkip("Driver does not support TDLS channel switching")
+
     (bus,wpas_obj,path,if_obj) = prepare_dbus(dev[0])
     iface = dbus.Interface(if_obj, WPAS_DBUS_IFACE)
 
@@ -2374,34 +2380,18 @@ def _test_dbus_pmf(dev, apdev):
     dev[0].set("pmf", "0")
     res = if_obj.Get(WPAS_DBUS_IFACE, "Pmf",
                      dbus_interface=dbus.PROPERTIES_IFACE)
-    if res != 0:
-        raise Exception("Unexpected initial Pmf value: %d" % res)
+    if res != "0":
+        raise Exception("Unexpected initial Pmf value: %s" % res)
 
     for i in range(3):
-        if_obj.Set(WPAS_DBUS_IFACE, "Pmf", dbus.UInt32(i),
-                     dbus_interface=dbus.PROPERTIES_IFACE)
+        if_obj.Set(WPAS_DBUS_IFACE, "Pmf", str(i),
+                   dbus_interface=dbus.PROPERTIES_IFACE)
         res = if_obj.Get(WPAS_DBUS_IFACE, "Pmf",
                          dbus_interface=dbus.PROPERTIES_IFACE)
-        if res != i:
-            raise Exception("Unexpected Pmf value %d (expected %d)" % (res, i))
+        if res != str(i):
+            raise Exception("Unexpected Pmf value %s (expected %d)" % (res, i))
 
-    try:
-        if_obj.Set(WPAS_DBUS_IFACE, "Pmf", dbus.Int16(-1),
-                   dbus_interface=dbus.PROPERTIES_IFACE)
-        raise Exception("Invalid Set(Pmf,-1) accepted")
-    except dbus.exceptions.DBusException, e:
-        if "Error.Failed: wrong property type" not in str(e):
-            raise Exception("Unexpected error message for invalid Set(Pmf,-1): " + str(e))
-
-    try:
-        if_obj.Set(WPAS_DBUS_IFACE, "Pmf", dbus.UInt32(123),
-                   dbus_interface=dbus.PROPERTIES_IFACE)
-        raise Exception("Invalid Set(Pmf,123) accepted")
-    except dbus.exceptions.DBusException, e:
-        if "Error.Failed: Pmf must be 0, 1, or 2" not in str(e):
-            raise Exception("Unexpected error message for invalid Set(Pmf,123): " + str(e))
-
-    if_obj.Set(WPAS_DBUS_IFACE, "Pmf", dbus.UInt32(1),
+    if_obj.Set(WPAS_DBUS_IFACE, "Pmf", "1",
                dbus_interface=dbus.PROPERTIES_IFACE)
 
 def test_dbus_fastreauth(dev, apdev):
@@ -2954,6 +2944,12 @@ def test_dbus_p2p_oom(dev, apdev):
 
 def test_dbus_p2p_discovery(dev, apdev):
     """D-Bus P2P discovery"""
+    try:
+        run_dbus_p2p_discovery(dev, apdev)
+    finally:
+        dev[1].request("VENDOR_ELEM_REMOVE 1 *")
+
+def run_dbus_p2p_discovery(dev, apdev):
     (bus,wpas_obj,path,if_obj) = prepare_dbus(dev[0])
     p2p = dbus.Interface(if_obj, WPAS_DBUS_IFACE_P2PDEVICE)
 
@@ -2961,6 +2957,7 @@ def test_dbus_p2p_discovery(dev, apdev):
 
     dev[1].request("SET sec_device_type 1-0050F204-2")
     dev[1].request("VENDOR_ELEM_ADD 1 dd0c0050f2041049000411223344")
+    dev[1].request("VENDOR_ELEM_ADD 1 dd06001122335566")
     dev[1].p2p_listen()
     addr1 = dev[1].p2p_dev_addr()
     a1 = binascii.unhexlify(addr1.replace(':',''))
@@ -3043,6 +3040,14 @@ def test_dbus_p2p_discovery(dev, apdev):
                 if "\x11\x22\x33\x44" not in vendor:
                     raise Exception("Secondary device type mismatch")
 
+                if 'VSIE' not in res:
+                    raise Exception("Missing VSIE")
+                vendor = res['VSIE']
+                if len(vendor) < 1:
+                    raise Exception("VSIE missing")
+                if vendor != "\xdd\x06\x00\x11\x22\x33\x55\x66":
+                    raise Exception("VSIE mismatch")
+
                 self.found = True
             elif res['DeviceAddress'] == a2:
                 if 'IEs' not in res:
@@ -3060,6 +3065,12 @@ def test_dbus_p2p_discovery(dev, apdev):
 
         def deviceLost(self, path):
             logger.debug("deviceLost: path=%s" % path)
+            if not self.found or not self.found2:
+                # This may happen if a previous test case ended up scheduling
+                # deviceLost event and that event did not get delivered before
+                # starting the next test execution.
+                logger.debug("Ignore deviceLost before the deviceFound events")
+                return
             self.lost = True
             try:
                 p2p.RejectPeer(path)
@@ -5260,6 +5271,37 @@ def test_dbus_introspect(dev, apdev):
         if len(res2) >= len(res):
             raise Exception("Unexpected Introspect response")
 
+def run_busctl(service, obj):
+    logger.info("busctl introspect %s %s" % (service, obj))
+    cmd = subprocess.Popen([ 'busctl', 'introspect', service, obj ],
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+    out = cmd.communicate()
+    cmd.wait()
+    logger.info("busctl stdout:\n%s" % out[0].strip())
+    if len(out[1]) > 0:
+        logger.info("busctl stderr: %s" % out[1].strip())
+    if "Duplicate property" in out[1]:
+        raise Exception("Duplicate property")
+
+def test_dbus_introspect_busctl(dev, apdev):
+    """D-Bus introspection with busctl"""
+    (bus,wpas_obj,path,if_obj) = prepare_dbus(dev[0])
+    ifaces = dbus_get(dbus, wpas_obj, "Interfaces")
+    run_busctl(WPAS_DBUS_SERVICE, WPAS_DBUS_PATH)
+    run_busctl(WPAS_DBUS_SERVICE, WPAS_DBUS_PATH + "/Interfaces")
+    run_busctl(WPAS_DBUS_SERVICE, ifaces[0])
+
+    hapd = hostapd.add_ap(apdev[0], { "ssid": "open" })
+    bssid = apdev[0]['bssid']
+    dev[0].scan_for_bss(bssid, freq=2412)
+    id = dev[0].add_network()
+    dev[0].set_network(id, "disabled", "0")
+    dev[0].set_network_quoted(id, "ssid", "test")
+
+    run_busctl(WPAS_DBUS_SERVICE, ifaces[0] + "/BSSs/0")
+    run_busctl(WPAS_DBUS_SERVICE, ifaces[0] + "/Networks/0")
+
 def test_dbus_ap(dev, apdev):
     """D-Bus AddNetwork for AP mode"""
     (bus,wpas_obj,path,if_obj) = prepare_dbus(dev[0])
@@ -5272,6 +5314,11 @@ def test_dbus_ap(dev, apdev):
         def __init__(self, bus):
             TestDbus.__init__(self, bus)
             self.started = False
+            self.sta_added = False
+            self.sta_removed = False
+            self.authorized = False
+            self.deauthorized = False
+            self.stations = False
 
         def __enter__(self):
             gobject.timeout_add(1, self.run_connect)
@@ -5281,6 +5328,13 @@ def test_dbus_ap(dev, apdev):
                             "NetworkSelected")
             self.add_signal(self.propertiesChanged, WPAS_DBUS_IFACE,
                             "PropertiesChanged")
+            self.add_signal(self.stationAdded, WPAS_DBUS_IFACE, "StationAdded")
+            self.add_signal(self.stationRemoved, WPAS_DBUS_IFACE,
+                            "StationRemoved")
+            self.add_signal(self.staAuthorized, WPAS_DBUS_IFACE,
+                            "StaAuthorized")
+            self.add_signal(self.staDeauthorized, WPAS_DBUS_IFACE,
+                            "StaDeauthorized")
             self.loop.run()
             return self
 
@@ -5296,7 +5350,41 @@ def test_dbus_ap(dev, apdev):
             logger.debug("propertiesChanged: %s" % str(properties))
             if 'State' in properties and properties['State'] == "completed":
                 self.started = True
-                self.loop.quit()
+                dev1 = WpaSupplicant('wlan1', '/tmp/wpas-wlan1')
+                dev1.connect(ssid, psk=passphrase, scan_freq="2412")
+
+        def stationAdded(self, station, properties):
+            logger.debug("stationAdded: %s" % str(station))
+            logger.debug(str(properties))
+            self.sta_added = True
+            res = if_obj.Get(WPAS_DBUS_IFACE, 'Stations',
+                             dbus_interface=dbus.PROPERTIES_IFACE)
+            logger.info("Stations: " + str(res))
+            if len(res) == 1:
+                self.stations = True
+            else:
+                raise Exception("Missing Stations entry: " + str(res))
+
+        def stationRemoved(self, station):
+            logger.debug("stationRemoved: %s" % str(station))
+            self.sta_removed = True
+            res = if_obj.Get(WPAS_DBUS_IFACE, 'Stations',
+                             dbus_interface=dbus.PROPERTIES_IFACE)
+            logger.info("Stations: " + str(res))
+            if len(res) != 0:
+                self.stations = False
+                raise Exception("Unexpected Stations entry: " + str(res))
+            self.loop.quit()
+
+        def staAuthorized(self, name):
+            logger.debug("staAuthorized: " + name)
+            self.authorized = True
+            dev1 = WpaSupplicant('wlan1', '/tmp/wpas-wlan1')
+            dev1.request("DISCONNECT")
+
+        def staDeauthorized(self, name):
+            logger.debug("staDeauthorized: " + name)
+            self.deauthorized = True
 
         def run_connect(self, *args):
             logger.debug("run_connect")
@@ -5304,19 +5392,20 @@ def test_dbus_ap(dev, apdev):
                                      'key_mgmt': 'WPA-PSK',
                                      'psk': passphrase,
                                      'mode': 2,
-                                     'frequency': 2412 },
+                                     'frequency': 2412,
+                                     'scan_freq': 2412 },
                                    signature='sv')
             self.netw = iface.AddNetwork(args)
             iface.SelectNetwork(self.netw)
             return False
 
         def success(self):
-            return self.started
+            return self.started and self.sta_added and self.sta_removed and \
+                self.authorized and self.deauthorized
 
     with TestDbusConnect(bus) as t:
         if not t.success():
             raise Exception("Expected signals not seen")
-        dev[1].connect(ssid, psk=passphrase, scan_freq="2412")
 
 def test_dbus_connect_wpa_eap(dev, apdev):
     """D-Bus AddNetwork and connection with WPA+WPA2-Enterprise AP"""

@@ -125,8 +125,23 @@ config_checks = [ ("ap_scan", "0"),
                   ("go_internet", "1"),
                   ("go_venue_group", "3"),
                   ("go_venue_type", "4"),
+                  ("p2p_device_random_mac_addr", "1"),
+                  ("p2p_device_persistent_mac_addr", "02:12:34:56:78:9a"),
+                  ("p2p_interface_random_mac_addr", "1"),
                   ("openssl_ciphers", "DEFAULT") ]
-def check_config(config):
+
+def supported_param(capa, field):
+    mesh_params = [ "user_mpm", "max_peer_links", "mesh_max_inactivity" ]
+    if field in mesh_params and not capa['mesh']:
+        return False
+
+    sae_params = [ "dot11RSNASAERetransPeriod" ]
+    if field in sae_params and not capa['sae']:
+        return False
+
+    return True
+
+def check_config(capa, config):
     with open(config, "r") as f:
         data = f.read()
     if "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=" not in data:
@@ -138,8 +153,9 @@ def check_config(config):
     if "network={" not in data:
         raise Exception("Missing network")
     for field, value in config_checks:
-        if "\n" + field + "=" + value + "\n" not in data:
-            raise Exception("Missing value: " + field)
+        if supported_param(capa, field):
+            if "\n" + field + "=" + value + "\n" not in data:
+                raise Exception("Missing value: " + field)
     return data
 
 def test_wpas_config_file(dev, apdev, params):
@@ -176,6 +192,9 @@ def test_wpas_config_file(dev, apdev, params):
             f.write("device_name=name#foo\n")
 
         wpas.interface_add("wlan5", config=config)
+        capa = {}
+        capa['mesh'] = "MESH" in wpas.get_capability("modes")
+        capa['sae'] = "SAE" in wpas.get_capability("auth_alg")
 
         id = wpas.add_network()
         wpas.set_network_quoted(id, "ssid", "foo")
@@ -200,6 +219,8 @@ def test_wpas_config_file(dev, apdev, params):
         wpas.set_cred_quoted(id, "domain_suffix_match", "example.com")
         wpas.set_cred(id, "roaming_consortium", "112233")
         wpas.set_cred(id, "required_roaming_consortium", "112233")
+        wpas.set_cred_quoted(id, "roaming_consortiums",
+                             "112233,aabbccddee,445566")
         wpas.set_cred_quoted(id, "roaming_partner",
                              "roaming.example.net,1,127,*")
         wpas.set_cred_quoted(id, "ca_cert", "/tmp/ca.pem")
@@ -210,7 +231,8 @@ def test_wpas_config_file(dev, apdev, params):
         wpas.request("SET blob foo 12345678")
 
         for field, value in config_checks:
-            wpas.set(field, value)
+            if supported_param(capa, field):
+                wpas.set(field, value)
 
         if "OK" not in wpas.request("SAVE_CONFIG"):
             raise Exception("Failed to save configuration file")
@@ -218,7 +240,7 @@ def test_wpas_config_file(dev, apdev, params):
             raise Exception("Failed to save configuration file")
 
         wpas.interface_remove("wlan5")
-        data1 = check_config(config)
+        data1 = check_config(capa, config)
 
         wpas.interface_add("wlan5", config=config)
         if len(wpas.list_networks()) != 1:
@@ -226,9 +248,13 @@ def test_wpas_config_file(dev, apdev, params):
         if len(wpas.request("LIST_CREDS").splitlines()) != 2:
             raise Exception("Unexpected number of credentials")
 
+        val = wpas.get_cred(0, "roaming_consortiums")
+        if val != "112233,aabbccddee,445566":
+            raise Exception("Unexpected roaming_consortiums value: " + val)
+
         if "OK" not in wpas.request("SAVE_CONFIG"):
             raise Exception("Failed to save configuration file")
-        data2 = check_config(config)
+        data2 = check_config(capa, config)
 
         if data1 != data2:
             logger.debug(data1)
@@ -500,3 +526,64 @@ def test_wpas_config_file_set_global(dev):
             os.rmdir(config)
         except:
             pass
+
+def test_wpas_config_file_key_mgmt(dev, apdev, params):
+    """wpa_supplicant config file writing and key_mgmt values"""
+    config = os.path.join(params['logdir'],
+                          'wpas_config_file_key_mgmt.conf')
+    if os.path.exists(config):
+        os.remove(config)
+
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+
+    with open(config, "w") as f:
+        f.write("update_config=1\n")
+
+    wpas.interface_add("wlan5", config=config)
+
+    from test_dpp import params1_csign, params1_sta_connector, params1_sta_netaccesskey
+    id = wpas.add_network()
+    wpas.set_network_quoted(id, "ssid", "foo")
+    wpas.set_network(id, "key_mgmt", "DPP")
+    wpas.set_network(id, "ieee80211w", "2")
+    wpas.set_network_quoted(id, "dpp_csign", params1_csign)
+    wpas.set_network_quoted(id, "dpp_connector", params1_sta_connector)
+    wpas.set_network_quoted(id, "dpp_netaccesskey", params1_sta_netaccesskey)
+    if "OK" not in wpas.request("SAVE_CONFIG"):
+        raise Exception("Failed to save configuration file")
+
+    with open(config, "r") as f:
+        data = f.read()
+        logger.info("Configuration file contents: " + data)
+        if "key_mgmt=DPP" not in data:
+            raise Exception("Missing key_mgmt")
+        if 'dpp_connector="' + params1_sta_connector + '"' not in data:
+            raise Exception("Missing dpp_connector")
+        if 'dpp_netaccesskey="' + params1_sta_netaccesskey + '"' not in data:
+            raise Exception("Missing dpp_netaccesskey")
+        if 'dpp_csign="' + params1_csign + '"' not in data:
+            raise Exception("Missing dpp_csign")
+
+    wpas.set_network(id, "dpp_csign", "NULL")
+    wpas.set_network(id, "dpp_connector", "NULL")
+    wpas.set_network(id, "dpp_netaccesskey", "NULL")
+    wpas.set_network_quoted(id, "psk", "12345678")
+    wpas.set_network(id, "ieee80211w", "0")
+
+    tests = [ "WPA-PSK", "WPA-EAP", "IEEE8021X", "NONE", "WPA-NONE", "FT-PSK",
+              "FT-EAP", "FT-EAP-SHA384", "WPA-PSK-SHA256", "WPA-EAP-SHA256",
+              "SAE", "FT-SAE", "OSEN", "WPA-EAP-SUITE-B",
+              "WPA-EAP-SUITE-B-192", "FILS-SHA256", "FILS-SHA384",
+              "FT-FILS-SHA256", "FT-FILS-SHA384", "OWE", "DPP" ]
+    for key_mgmt in tests:
+        wpas.set_network(id, "key_mgmt", key_mgmt)
+        if "OK" not in wpas.request("SAVE_CONFIG"):
+            raise Exception("Failed to save configuration file")
+        with open(config, "r") as f:
+            data = f.read()
+            logger.info("Configuration file contents: " + data)
+            if "key_mgmt=" + key_mgmt not in data:
+                raise Exception("Missing key_mgmt " + key_mgmt)
+
+    wpas.interface_remove("wlan5")
+    wpas.interface_add("wlan5", config=config)

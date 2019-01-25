@@ -181,6 +181,67 @@ def test_fils_sk_pmksa_caching(dev, apdev, params):
     time.sleep(0.1)
     hwsim_utils.test_connectivity(dev[0], hapd)
 
+def test_fils_sk_pmksa_caching_ocv(dev, apdev, params):
+    """FILS SK and PMKSA caching with OCV"""
+    check_fils_capa(dev[0])
+    check_erp_capa(dev[0])
+
+    start_erp_as(apdev[1], msk_dump=os.path.join(params['logdir'], "msk.lst"))
+
+    bssid = apdev[0]['bssid']
+    params = hostapd.wpa2_eap_params(ssid="fils")
+    params['wpa_key_mgmt'] = "FILS-SHA256"
+    params['auth_server_port'] = "18128"
+    params['erp_domain'] = 'example.com'
+    params['fils_realm'] = 'example.com'
+    params['ieee80211w'] = '1'
+    params['ocv'] = '1'
+    try:
+        hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    except Exception, e:
+        if "Failed to set hostapd parameter ocv" in str(e):
+            raise HwsimSkip("OCV not supported")
+        raise
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[0].request("ERP_FLUSH")
+    id = dev[0].connect("fils", key_mgmt="FILS-SHA256",
+                        eap="PSK", identity="psk.user@example.com",
+                        password_hex="0123456789abcdef0123456789abcdef",
+                        erp="1", scan_freq="2412", ieee80211w="1", ocv="1")
+    pmksa = dev[0].get_pmksa(bssid)
+    if pmksa is None:
+        raise Exception("No PMKSA cache entry created")
+
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+
+    dev[0].dump_monitor()
+    dev[0].select_network(id, freq=2412)
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("Connection using PMKSA caching timed out")
+    if "CTRL-EVENT-EAP-STARTED" in ev:
+        raise Exception("Unexpected EAP exchange")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+    pmksa2 = dev[0].get_pmksa(bssid)
+    if pmksa2 is None:
+        raise Exception("No PMKSA cache entry found")
+    if pmksa['pmkid'] != pmksa2['pmkid']:
+        raise Exception("Unexpected PMKID change")
+
+    # Verify EAPOL reauthentication after FILS authentication
+    hapd.request("EAPOL_REAUTH " + dev[0].own_addr())
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED"], timeout=5)
+    if ev is None:
+        raise Exception("EAP authentication did not start")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=5)
+    if ev is None:
+        raise Exception("EAP authentication did not succeed")
+    time.sleep(0.1)
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
 def test_fils_sk_pmksa_caching_and_cache_id(dev, apdev):
     """FILS SK and PMKSA caching with Cache Identifier"""
     check_fils_capa(dev[0])
@@ -370,6 +431,7 @@ def run_fils_sk_erp(dev, apdev, key_mgmt, params):
     hwsim_utils.test_connectivity(dev[0], hapd)
 
 def test_fils_sk_erp_followed_by_pmksa_caching(dev, apdev, params):
+    """FILS SK ERP following by PMKSA caching"""
     check_fils_capa(dev[0])
     check_erp_capa(dev[0])
 
@@ -1728,6 +1790,147 @@ def test_fils_and_ft(dev, apdev, params):
     #dev[0].roam_over_ds(apdev[1]['bssid'])
     dev[0].roam(apdev[1]['bssid'])
 
+def test_fils_and_ft_over_air(dev, apdev, params):
+    """FILS SK using ERP and FT-over-air (SHA256)"""
+    run_fils_and_ft_over_air(dev, apdev, params, "FT-FILS-SHA256")
+
+def test_fils_and_ft_over_air_sha384(dev, apdev, params):
+    """FILS SK using ERP and FT-over-air (SHA384)"""
+    run_fils_and_ft_over_air(dev, apdev, params, "FT-FILS-SHA384")
+
+def run_fils_and_ft_over_air(dev, apdev, params, key_mgmt):
+    hapd, hapd2 = run_fils_and_ft_setup(dev, apdev, params, key_mgmt)
+
+    logger.info("FT protocol using FT key hierarchy established during FILS authentication")
+    dev[0].scan_for_bss(apdev[1]['bssid'], freq="2412", force_scan=True)
+    hapd.request("NOTE FT protocol to AP2 using FT keys established during FILS FILS authentication")
+    dev[0].roam(apdev[1]['bssid'])
+    hwsim_utils.test_connectivity(dev[0], hapd2)
+
+    logger.info("FT protocol using the previously established FT key hierarchy from FILS authentication")
+    hapd.request("NOTE FT protocol back to AP1 using FT keys established during FILS FILS authentication")
+    dev[0].roam(apdev[0]['bssid'])
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    hapd.request("NOTE FT protocol back to AP2 using FT keys established during FILS FILS authentication")
+    dev[0].roam(apdev[1]['bssid'])
+    hwsim_utils.test_connectivity(dev[0], hapd2)
+
+    hapd.request("NOTE FT protocol back to AP1 using FT keys established during FILS FILS authentication (2)")
+    dev[0].roam(apdev[0]['bssid'])
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_fils_and_ft_over_ds(dev, apdev, params):
+    """FILS SK using ERP and FT-over-DS (SHA256)"""
+    run_fils_and_ft_over_ds(dev, apdev, params, "FT-FILS-SHA256")
+
+def test_fils_and_ft_over_ds_sha384(dev, apdev, params):
+    """FILS SK using ERP and FT-over-DS (SHA384)"""
+    run_fils_and_ft_over_ds(dev, apdev, params, "FT-FILS-SHA384")
+
+def run_fils_and_ft_over_ds(dev, apdev, params, key_mgmt):
+    hapd, hapd2 = run_fils_and_ft_setup(dev, apdev, params, key_mgmt)
+
+    logger.info("FT protocol using FT key hierarchy established during FILS authentication")
+    dev[0].scan_for_bss(apdev[1]['bssid'], freq="2412", force_scan=True)
+    hapd.request("NOTE FT protocol to AP2 using FT keys established during FILS FILS authentication")
+    dev[0].roam_over_ds(apdev[1]['bssid'])
+
+    logger.info("FT protocol using the previously established FT key hierarchy from FILS authentication")
+    hapd.request("NOTE FT protocol back to AP1 using FT keys established during FILS FILS authentication")
+    dev[0].roam_over_ds(apdev[0]['bssid'])
+
+    hapd.request("NOTE FT protocol back to AP2 using FT keys established during FILS FILS authentication")
+    dev[0].roam_over_ds(apdev[1]['bssid'])
+
+    hapd.request("NOTE FT protocol back to AP1 using FT keys established during FILS FILS authentication (2)")
+    dev[0].roam_over_ds(apdev[0]['bssid'])
+
+def run_fils_and_ft_setup(dev, apdev, params, key_mgmt):
+    check_fils_capa(dev[0])
+    check_erp_capa(dev[0])
+
+    er = start_erp_as(apdev[1],
+                      msk_dump=os.path.join(params['logdir'], "msk.lst"))
+
+    logger.info("Set up ERP key hierarchy without FILS/FT authentication")
+    bssid = apdev[0]['bssid']
+    params = hostapd.wpa2_eap_params(ssid="fils")
+    params['wpa_key_mgmt'] = key_mgmt
+    params['auth_server_port'] = "18128"
+    params['erp_domain'] = 'example.com'
+    params['fils_realm'] = 'example.com'
+    params['disable_pmksa_caching'] = '1'
+    params['ieee80211w'] = "2"
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[0].request("ERP_FLUSH")
+    hapd.request("NOTE Initial association to establish ERP keys")
+    id = dev[0].connect("fils", key_mgmt=key_mgmt, ieee80211w="2",
+                        eap="PSK", identity="psk.user@example.com",
+                        password_hex="0123456789abcdef0123456789abcdef",
+                        erp="1", scan_freq="2412")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+    hapd.disable()
+    dev[0].flush_scan_cache()
+    if "FAIL" in dev[0].request("PMKSA_FLUSH"):
+        raise Exception("PMKSA_FLUSH failed")
+
+    logger.info("Initial mobility domain association using FILS authentication")
+    params = hostapd.wpa2_eap_params(ssid="fils-ft")
+    params['wpa_key_mgmt'] = key_mgmt
+    params['auth_server_port'] = "18128"
+    params['erp_domain'] = 'example.com'
+    params['fils_realm'] = 'example.com'
+    params['disable_pmksa_caching'] = '1'
+    params["mobility_domain"] = "a1b2"
+    params["r0_key_lifetime"] = "10000"
+    params["pmk_r1_push"] = "1"
+    params["reassociation_deadline"] = "1000"
+    params['nas_identifier'] = "nas1.w1.fi"
+    params['r1_key_holder'] = "000102030405"
+    params['r0kh'] = [ "02:00:00:00:03:00 nas1.w1.fi 100102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f",
+                       "02:00:00:00:04:00 nas2.w1.fi 300102030405060708090a0b0c0d0e0f" ]
+    params['r1kh'] = "02:00:00:00:04:00 00:01:02:03:04:06 200102030405060708090a0b0c0d0e0f"
+    params['ieee80211w'] = "2"
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[0].dump_monitor()
+    hapd.request("NOTE Initial FT mobility domain association using FILS authentication")
+    dev[0].set_network_quoted(id, "ssid", "fils-ft")
+    dev[0].select_network(id, freq=2412)
+
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
+                            "CTRL-EVENT-AUTH-REJECT",
+                            "EVENT-ASSOC-REJECT",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("Connection using FILS/ERP timed out")
+    if "CTRL-EVENT-EAP-STARTED" in ev:
+        raise Exception("Unexpected EAP exchange")
+    if "CTRL-EVENT-AUTH-REJECT" in ev:
+        raise Exception("Authentication failed")
+    if "EVENT-ASSOC-REJECT" in ev:
+        raise Exception("Association failed")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    er.disable()
+
+    params['wpa_key_mgmt'] = key_mgmt
+    params['nas_identifier'] = "nas2.w1.fi"
+    params['r1_key_holder'] = "000102030406"
+    params['r0kh'] = [ "02:00:00:00:03:00 nas1.w1.fi 200102030405060708090a0b0c0d0e0f",
+                       "02:00:00:00:04:00 nas2.w1.fi 000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f" ]
+    params['r1kh'] = "02:00:00:00:03:00 00:01:02:03:04:05 300102030405060708090a0b0c0d0e0f"
+    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+
+    return hapd, hapd2
+
 def test_fils_assoc_replay(dev, apdev, params):
     """FILS AP and replayed Association Request frame"""
     capfile = os.path.join(params['logdir'], "hwsim0.pcapng")
@@ -1817,3 +2020,83 @@ def test_fils_assoc_replay(dev, apdev, params):
 
     if not ok:
         raise Exception("The second hwsim connectivity test failed")
+
+def test_fils_sk_erp_server_flush(dev, apdev, params):
+    """FILS SK ERP and ERP flush on server, but not on peer"""
+    check_fils_capa(dev[0])
+    check_erp_capa(dev[0])
+
+    hapd_as = start_erp_as(apdev[1], msk_dump=os.path.join(params['logdir'],
+                                                           "msk.lst"))
+
+    bssid = apdev[0]['bssid']
+    params = hostapd.wpa2_eap_params(ssid="fils")
+    params['wpa_key_mgmt'] = "FILS-SHA256"
+    params['auth_server_port'] = "18128"
+    params['erp_domain'] = 'example.com'
+    params['fils_realm'] = 'example.com'
+    params['disable_pmksa_caching'] = '1'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[0].request("ERP_FLUSH")
+    id = dev[0].connect("fils", key_mgmt="FILS-SHA256",
+                        eap="PSK", identity="psk.user@example.com",
+                        password_hex="0123456789abcdef0123456789abcdef",
+                        erp="1", scan_freq="2412")
+
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+
+    dev[0].dump_monitor()
+    dev[0].select_network(id, freq=2412)
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
+                            "EVENT-ASSOC-REJECT",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("Connection using FILS/ERP timed out")
+    if "CTRL-EVENT-EAP-STARTED" in ev:
+        raise Exception("Unexpected EAP exchange")
+    if "EVENT-ASSOC-REJECT" in ev:
+        raise Exception("Association failed")
+
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+
+    hapd_as.request("ERP_FLUSH")
+    dev[0].dump_monitor()
+    dev[0].select_network(id, freq=2412)
+    ev = dev[0].wait_event(["CTRL-EVENT-AUTH-REJECT"], timeout=10)
+    if ev is None:
+        raise Exception("No authentication rejection seen after ERP flush on server")
+
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
+                            "CTRL-EVENT-AUTH-REJECT",
+                            "EVENT-ASSOC-REJECT",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("Connection attempt using FILS/ERP timed out")
+    if "CTRL-EVENT-AUTH-REJECT" in ev:
+        raise Exception("Failed to recover from ERP flush on server")
+    if "EVENT-ASSOC-REJECT" in ev:
+        raise Exception("Association failed")
+    if "CTRL-EVENT-EAP-STARTED" not in ev:
+        raise Exception("New EAP exchange not seen")
+    dev[0].wait_connected(error="Connection timeout after ERP flush")
+
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+    dev[0].dump_monitor()
+    dev[0].select_network(id, freq=2412)
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
+                            "CTRL-EVENT-AUTH-REJECT",
+                            "EVENT-ASSOC-REJECT",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("Connection attempt using FILS with new ERP keys timed out")
+    if "CTRL-EVENT-AUTH-REJECT" in ev:
+        raise Exception("Authentication failed with new ERP keys")
+    if "EVENT-ASSOC-REJECT" in ev:
+        raise Exception("Association failed with new ERP keys")
+    if "CTRL-EVENT-EAP-STARTED" in ev:
+        raise Exception("Unexpected EAP exchange")

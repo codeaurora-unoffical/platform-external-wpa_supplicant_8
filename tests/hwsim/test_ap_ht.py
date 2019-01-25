@@ -30,6 +30,7 @@ def set_world_reg(apdev0=None, apdev1=None, dev0=None):
         hostapd.cmd_execute(apdev1, ['iw', 'reg', 'set', '00'])
     if dev0:
         dev0.cmd_execute(['iw', 'reg', 'set', '00'])
+    time.sleep(0.1)
 
 def test_ap_ht40_scan(dev, apdev):
     """HT40 co-ex scan"""
@@ -697,6 +698,43 @@ def test_obss_coex_report_handling1(dev, apdev):
     if sec != "1":
         raise Exception("AP did not return to 40 MHz channel")
 
+def test_obss_coex_report_handling2(dev, apdev):
+    """Overlapping BSS scan report handling with obss_interval=1 and no overlap"""
+    clear_scan_cache(apdev[0])
+    params = { "ssid": "obss-scan",
+               "channel": "6",
+               "ht_capab": "[HT40+]",
+               "obss_interval": "1" }
+    hapd = hostapd.add_ap(apdev[0], params)
+    bssid = apdev[0]['bssid']
+    dev[0].connect("obss-scan", key_mgmt="NONE", scan_freq="2437")
+
+    sec = hapd.get_status_field("secondary_channel")
+    if sec != "1":
+        raise Exception("AP is not using 40 MHz channel")
+
+    # 20/40 MHz co-ex report that does not force a move to 20 MHz channel
+    # (out of affected range and matching primary channel cases)
+    msg = '0400' + '480100' + '49020001' + '49020006'
+    req = "MGMT_TX {} {} freq=2437 action={}".format(bssid, bssid, msg)
+    if "OK" not in dev[0].request(req):
+        raise Exception("Could not send management frame")
+    time.sleep(0.5)
+    sec = hapd.get_status_field("secondary_channel")
+    if sec != "1":
+        raise Exception("Unexpected move to 20 MHz channel")
+
+    # 20/40 MHz co-ex report forcing 20 MHz channel
+    # (out of affected range and in affected range but not matching primary)
+    msg = '0400' + '480100' + '4903000105'
+    req = "MGMT_TX {} {} freq=2437 action={}".format(bssid, bssid, msg)
+    if "OK" not in dev[0].request(req):
+        raise Exception("Could not send management frame")
+    time.sleep(0.5)
+    sec = hapd.get_status_field("secondary_channel")
+    if sec != "0":
+        raise Exception("AP did not move to 20 MHz channel")
+
 def test_olbc(dev, apdev):
     """OLBC detection"""
     params = { "ssid": "test-olbc",
@@ -796,7 +834,7 @@ def test_ap_require_ht(dev, apdev):
     """Require HT"""
     params = { "ssid": "require-ht",
                "require_ht": "1" }
-    hapd = hostapd.add_ap(apdev[0], params, wait_enabled=False)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[1].connect("require-ht", key_mgmt="NONE", scan_freq="2412",
                    disable_ht="1", wait_connect=False)
@@ -811,7 +849,18 @@ def test_ap_require_ht(dev, apdev):
                    ht_mcs="0x01 00 00 00 00 00 00 00 00 00",
                    disable_max_amsdu="1", ampdu_factor="2",
                    ampdu_density="1", disable_ht40="1", disable_sgi="1",
-                   disable_ldpc="1")
+                   disable_ldpc="1", rx_stbc="2", tx_stbc="1")
+
+def test_ap_ht_stbc(dev, apdev):
+    """HT STBC overrides"""
+    params = { "ssid": "ht" }
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    dev[0].connect("ht", key_mgmt="NONE", scan_freq="2412")
+    dev[1].connect("ht", key_mgmt="NONE", scan_freq="2412",
+                   rx_stbc="0", tx_stbc="0")
+    dev[2].connect("ht", key_mgmt="NONE", scan_freq="2412",
+                   rx_stbc="1", tx_stbc="1")
 
 @remote_compatible
 def test_ap_require_ht_limited_rates(dev, apdev):
@@ -819,7 +868,7 @@ def test_ap_require_ht_limited_rates(dev, apdev):
     params = { "ssid": "require-ht",
                "supported_rates": "60 120 240 360 480 540",
                "require_ht": "1" }
-    hapd = hostapd.add_ap(apdev[0], params, wait_enabled=False)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[1].connect("require-ht", key_mgmt="NONE", scan_freq="2412",
                    disable_ht="1", wait_connect=False)
@@ -873,6 +922,25 @@ def test_ap_ht_40mhz_intolerant_sta(dev, apdev):
         raise Exception("Unexpected num_sta_ht40_intolerant value (expected 0)")
     if hapd.get_status_field("secondary_channel") != "-1":
         raise Exception("Unexpected secondary_channel (did not re-enable 40 MHz)")
+
+def test_ap_ht_40mhz_intolerant_sta_deinit(dev, apdev):
+    """Associated STA indicating 40 MHz intolerant and hostapd deinit"""
+    clear_scan_cache(apdev[0])
+    params = { "ssid": "intolerant",
+               "channel": "6",
+               "ht_capab": "[HT40-]",
+               "obss_interval": "0" }
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    dev[0].connect("intolerant", key_mgmt="NONE", scan_freq="2437",
+                   ht40_intolerant="1")
+    time.sleep(1)
+    if hapd.get_status_field("num_sta_ht40_intolerant") != "1":
+        raise Exception("Unexpected num_sta_ht40_intolerant value (expected 1)")
+    hglobal = hostapd.HostapdGlobal()
+    hglobal.remove(apdev[0]['ifname'])
+
+    dev[0].request("DISCONNECT")
 
 def test_ap_ht_40mhz_intolerant_ap(dev, apdev):
     """Associated STA reports 40 MHz intolerant AP after association"""
@@ -1267,8 +1335,14 @@ def run_op_class(dev, apdev, hw_mode, channel, country, ht_capab, sec_chan,
         rx_opclass, = struct.unpack('B', ie[59][0:1])
         if rx_opclass != opclass:
             raise Exception("Unexpected operating class: %d" % rx_opclass)
+        hapd.disable()
+        dev[0].request("REMOVE_NETWORK all")
+        dev[0].request("ABORT_SCAN")
+        dev[0].wait_disconnected()
+        dev[0].dump_monitor()
     finally:
-        set_world_reg(apdev[0], None, None)
+        set_world_reg(apdev[0], None, dev[0])
+        time.sleep(0.1)
 
 def test_ap_ht_op_class_81(dev, apdev):
     """HT20 on operationg class 81"""
@@ -1373,3 +1447,38 @@ def test_ap_ht40_plus_minus2(dev, apdev):
         raise Exception("Unexpected secondary channel: " + sec)
 
     dev[0].connect("test-ht40", key_mgmt="NONE", scan_freq=freq)
+
+def test_ap_ht40_disable(dev, apdev):
+    """HT40 disabling"""
+    clear_scan_cache(apdev[0])
+    params = { "ssid": "test-ht40",
+               "channel": "6",
+               "ht_capab": "[HT40-]"}
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    sec = hapd.get_status_field("secondary_channel")
+    if sec != "-1":
+        raise Exception("Unexpected secondary channel: " + sec)
+
+    id = dev[0].connect("test-ht40", key_mgmt="NONE", scan_freq="2437")
+    sig = dev[0].request("SIGNAL_POLL").splitlines()
+    logger.info("SIGNAL_POLL: " + str(sig))
+    if "WIDTH=40 MHz" not in sig:
+        raise Exception("Station did not report 40 MHz bandwidth")
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+
+    hapd.disable()
+    hapd.set("ht_capab", "")
+    hapd.enable()
+    sec = hapd.get_status_field("secondary_channel")
+    if sec != "0":
+        raise Exception("Unexpected secondary channel(2): " + sec)
+
+    dev[0].flush_scan_cache()
+    dev[0].select_network(id, freq=2437)
+    dev[0].wait_connected()
+    sig = dev[0].request("SIGNAL_POLL").splitlines()
+    logger.info("SIGNAL_POLL: " + str(sig))
+    if "WIDTH=20 MHz" not in sig:
+        raise Exception("Station did not report 20 MHz bandwidth")

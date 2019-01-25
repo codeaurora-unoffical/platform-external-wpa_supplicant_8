@@ -23,7 +23,12 @@ void wpas_notify_state_changed(struct wpa_supplicant *wpa_s,
 			       enum wpa_states new_state,
 			       enum wpa_states old_state);
 void wpas_notify_disconnect_reason(struct wpa_supplicant *wpa_s);
+void wpas_notify_auth_status_code(struct wpa_supplicant *wpa_s);
 void wpas_notify_assoc_status_code(struct wpa_supplicant *wpa_s);
+void wpas_notify_roam_time(struct wpa_supplicant *wpa_s);
+void wpas_notify_roam_complete(struct wpa_supplicant *wpa_s);
+void wpas_notify_session_length(struct wpa_supplicant *wpa_s);
+void wpas_notify_bss_tm_status(struct wpa_supplicant *wpa_s);
 void wpas_notify_network_changed(struct wpa_supplicant *wpa_s);
 void wpas_notify_ap_scan_changed(struct wpa_supplicant *wpa_s);
 void wpas_notify_bssid_changed(struct wpa_supplicant *wpa_s);
@@ -134,6 +139,7 @@ void wpas_notify_preq(struct wpa_supplicant *wpa_s,
 		      const u8 *ie, size_t ie_len, u32 ssi_signal);
 void wpas_notify_eap_status(struct wpa_supplicant *wpa_s, const char *status,
 			    const char *parameter);
+void wpas_notify_eap_error(struct wpa_supplicant *wpa_s, int error_code);
 void wpas_notify_network_bssid_set_changed(struct wpa_supplicant *wpa_s,
 					   struct wpa_ssid *ssid);
 void wpas_notify_network_type_changed(struct wpa_supplicant *wpa_s,

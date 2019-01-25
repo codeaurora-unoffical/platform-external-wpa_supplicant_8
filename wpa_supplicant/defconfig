@@ -44,7 +44,7 @@ CONFIG_DRIVER_NL80211=y
 #CONFIG_LIBNL20=y
 
 # Use libnl 3.2 libraries (if this is selected, CONFIG_LIBNL20 is ignored)
-#CONFIG_LIBNL32=y
+CONFIG_LIBNL32=y
 
 
 # Driver interface for FreeBSD net80211 layer (e.g., Atheros driver)
@@ -73,6 +73,12 @@ CONFIG_DRIVER_NL80211=y
 # Driver interface for wired Ethernet drivers
 CONFIG_DRIVER_WIRED=y
 
+# Driver interface for MACsec capable Qualcomm Atheros drivers
+#CONFIG_DRIVER_MACSEC_QCA=y
+
+# Driver interface for Linux MACsec drivers
+#CONFIG_DRIVER_MACSEC_LINUX=y
+
 # Driver interface for the Broadcom RoboSwitch family
 #CONFIG_DRIVER_ROBOSWITCH=y
 
@@ -83,8 +89,8 @@ CONFIG_DRIVER_WIRED=y
 #LIBS += -lsocket -ldlpi -lnsl
 #LIBS_c += -lsocket
 
-# Enable IEEE 802.1X Supplicant (automatically included if any EAP method is
-# included)
+# Enable IEEE 802.1X Supplicant (automatically included if any EAP method or
+# MACsec is included)
 CONFIG_IEEE8021X_EAPOL=y
 
 # EAP-MD5
@@ -165,6 +171,9 @@ CONFIG_EAP_LEAP=y
 
 # EAP-EKE
 #CONFIG_EAP_EKE=y
+
+# MACsec
+#CONFIG_MACSEC=y
 
 # PKCS#12 (PFX) support (used to read private key and certificate file from
 # a file that usually has extension .p12 or .pfx)
@@ -292,6 +301,9 @@ CONFIG_BACKEND=file
 # Driver support is also needed for IEEE 802.11w.
 #CONFIG_IEEE80211W=y
 
+# Support Operating Channel Validation
+#CONFIG_OCV=y
+
 # Select TLS implementation
 # openssl = OpenSSL (default)
 # gnutls = GnuTLS
@@ -375,10 +387,6 @@ CONFIG_BACKEND=file
 # IEEE Std 802.11r-2008 (Fast BSS Transition) for station mode
 #CONFIG_IEEE80211R=y
 
-# IEEE Std 802.11r-2008 (Fast BSS Transition) for AP mode (implies
-# CONFIG_IEEE80211R).
-#CONFIG_IEEE80211R_AP=y
-
 # Add support for writing debug log to a file (/tmp/wpa_supplicant-log-#.txt)
 #CONFIG_DEBUG_FILE=y
 
@@ -452,6 +460,11 @@ CONFIG_BACKEND=file
 # should only be considered for builds that are known to be used on devices
 # that meet the requirements described above.
 #CONFIG_NO_RANDOM_POOL=y
+
+# Should we attempt to use the getrandom(2) call that provides more reliable
+# yet secure randomness source than /dev/random on Linux 3.17 and newer.
+# Requires glibc 2.25 to build, falls back to /dev/random if unavailable.
+#CONFIG_GETRANDOM=y
 
 # IEEE 802.11n (High Throughput) support (mainly for AP mode)
 #CONFIG_IEEE80211N=y
@@ -556,8 +569,6 @@ CONFIG_BACKEND=file
 #CONFIG_MBO=y
 
 # Fast Initial Link Setup (FILS) (IEEE 802.11ai)
-# Note: This is an experimental and not yet complete implementation. This
-# should not be enabled for production use.
 #CONFIG_FILS=y
 # FILS shared key authentication with PFS
 #CONFIG_FILS_SK_PFS=y

@@ -15,7 +15,7 @@ import os
 import hostapd
 import hwsim_utils
 from tshark import run_tshark
-from utils import alloc_fail, fail_test, wait_fail_trigger
+from utils import *
 from wpasupplicant import WpaSupplicant
 from test_ap_ht import set_world_reg
 
@@ -211,7 +211,8 @@ def test_ap_bss_load(dev, apdev):
     """AP with open mode (no security) configuration"""
     hapd = hostapd.add_ap(apdev[0],
                           { "ssid": "open",
-                            "bss_load_update_period": "10" })
+                            "bss_load_update_period": "10",
+                            "chan_util_avg_period": "20" })
     dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
     # this does not really get much useful output with mac80211_hwsim currently,
     # but run through the channel survey update couple of times
@@ -220,6 +221,9 @@ def test_ap_bss_load(dev, apdev):
         hwsim_utils.test_connectivity(dev[0], hapd)
         hwsim_utils.test_connectivity(dev[0], hapd)
         time.sleep(0.15)
+    avg = hapd.get_status_field("chan_util_avg")
+    if avg is None:
+        raise Exception("No STATUS chan_util_avg seen")
 
 def test_ap_bss_load_fail(dev, apdev):
     """BSS Load update failing to get survey data"""
@@ -422,7 +426,9 @@ def test_ap_open_disconnect_in_ps(dev, apdev, params):
         raise Exception("No connection event received from hostapd")
 
     time.sleep(0.2)
-    hwsim_utils.set_powersave(dev[0], hwsim_utils.PS_MANUAL_POLL)
+    # enable power save mode
+    hwsim_utils.set_powersave(dev[0], hwsim_utils.PS_ENABLED)
+    time.sleep(0.1)
     try:
         # inject some traffic
         sa = hapd.own_addr()
@@ -761,11 +767,10 @@ def test_ap_open_country_outdoor(dev, apdev):
 
 def _test_ap_open_country(dev, apdev, country_code, country3):
     try:
-        run_ap_open_country(dev, apdev, country_code, country3)
+        hapd = None
+        hapd = run_ap_open_country(dev, apdev, country_code, country3)
     finally:
-        dev[0].request("DISCONNECT")
-        set_world_reg(apdev[0], apdev[1], dev[0])
-        dev[0].flush_scan_cache()
+        clear_regdom(hapd, dev)
 
 def run_ap_open_country(dev, apdev, country_code, country3):
     hapd = hostapd.add_ap(apdev[0], { "ssid": "open",
@@ -774,8 +779,8 @@ def run_ap_open_country(dev, apdev, country_code, country3):
                                       "ieee80211d": "1" })
     dev[0].scan_for_bss(hapd.own_addr(), freq=2412)
     dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
-    dev[0].request("DISCONNECT")
-    dev[0].wait_disconnected()
+    dev[0].wait_regdom(country_ie=True)
+    return hapd
 
 def test_ap_open_disable_select(dev, apdev):
     """DISABLE_NETWORK for connected AP followed by SELECT_NETWORK"""
@@ -802,3 +807,30 @@ def test_ap_open_reassoc_same(dev, apdev):
         hwsim_utils.test_connectivity(dev[0], hapd)
     finally:
         dev[0].request("SET reassoc_same_bss_optim 0")
+
+def test_ap_open_no_reflection(dev, apdev):
+    """AP with open mode, STA sending packets to itself"""
+    hapd = hostapd.add_ap(apdev[0], { "ssid": "open" })
+    dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
+
+    ev = hapd.wait_event([ "AP-STA-CONNECTED" ], timeout=5)
+    if ev is None:
+        raise Exception("No connection event received from hostapd")
+    # test normal connectivity is OK
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    # test that we can't talk to ourselves
+    addr = dev[0].own_addr()
+    res = dev[0].request('DATA_TEST_CONFIG 1')
+    try:
+        assert 'OK' in res
+
+        cmd = "DATA_TEST_TX {} {} {}".format(addr, addr, 0)
+        dev[0].request(cmd)
+
+        ev = dev[0].wait_event(["DATA-TEST-RX"], timeout=1)
+
+        if ev is not None and "DATA-TEST-RX {} {}".format(addr, addr) in ev:
+            raise Exception("STA can unexpectedly talk to itself")
+    finally:
+        dev[0].request('DATA_TEST_CONFIG 0')

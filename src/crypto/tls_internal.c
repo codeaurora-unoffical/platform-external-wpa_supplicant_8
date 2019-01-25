@@ -177,6 +177,14 @@ int tls_connection_established(void *tls_ctx, struct tls_connection *conn)
 }
 
 
+char * tls_connection_peer_serial_num(void *tls_ctx,
+				      struct tls_connection *conn)
+{
+	/* TODO */
+	return NULL;
+}
+
+
 int tls_connection_shutdown(void *tls_ctx, struct tls_connection *conn)
 {
 #ifdef CONFIG_TLS_INTERNAL_CLIENT
@@ -236,6 +244,12 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
 
 	if (params->openssl_ciphers) {
 		wpa_printf(MSG_INFO, "TLS: openssl_ciphers not supported");
+		tlsv1_cred_free(cred);
+		return -1;
+	}
+
+	if (params->openssl_ecdh_curves) {
+		wpa_printf(MSG_INFO, "TLS: openssl_ecdh_curves not supported");
 		tlsv1_cred_free(cred);
 		return -1;
 	}
@@ -345,7 +359,7 @@ int tls_global_set_params(void *tls_ctx,
 }
 
 
-int tls_global_set_verify(void *tls_ctx, int check_crl)
+int tls_global_set_verify(void *tls_ctx, int check_crl, int strict)
 {
 	struct tls_global *global = tls_ctx;
 	global->check_crl = check_crl;

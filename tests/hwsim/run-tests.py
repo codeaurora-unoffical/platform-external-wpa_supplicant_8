@@ -123,11 +123,12 @@ def report(conn, prefill, build, commit, run, test, result, duration, logdir,
                              logdir + "/" + test + "." + log)
 
 class DataCollector(object):
-    def __init__(self, logdir, testname, tracing, dmesg):
+    def __init__(self, logdir, testname, args):
         self._logdir = logdir
         self._testname = testname
-        self._tracing = tracing
-        self._dmesg = dmesg
+        self._tracing = args.tracing
+        self._dmesg = args.dmesg
+        self._dbus = args.dbus
     def __enter__(self):
         if self._tracing:
             output = os.path.abspath(os.path.join(self._logdir, '%s.dat' % (self._testname, )))
@@ -142,6 +143,16 @@ class DataCollector(object):
             res = self._trace_cmd.returncode
             if res:
                 print "Failed calling trace-cmd: returned exit status %d" % res
+                sys.exit(1)
+        if self._dbus:
+            output = os.path.abspath(os.path.join(self._logdir, '%s.dbus' % (self._testname, )))
+            self._dbus_cmd = subprocess.Popen(['dbus-monitor', '--system'],
+                                              stdout=open(output, 'w'),
+                                              stderr=open('/dev/null', 'w'),
+                                              cwd=self._logdir)
+            res = self._dbus_cmd.returncode
+            if res:
+                print "Failed calling dbus-monitor: returned exit status %d" % res
                 sys.exit(1)
     def __exit__(self, type, value, traceback):
         if self._tracing:
@@ -214,6 +225,8 @@ def main():
                         help='collect tracing per test case (in log directory)')
     parser.add_argument('-D', action='store_true', dest='dmesg',
                         help='collect dmesg per test case (in log directory)')
+    parser.add_argument('--dbus', action='store_true', dest='dbus',
+                        help='collect dbus per test case (in log directory)')
     parser.add_argument('--shuffle-tests', action='store_true',
                         dest='shuffle_tests',
                         help='Shuffle test cases to randomize order')
@@ -379,6 +392,12 @@ def main():
         num_tests = len(tests_to_run)
     if args.stdin_ctrl:
         set_term_echo(sys.stdin.fileno(), False)
+
+    check_country_00 = True
+    for d in dev:
+        if d.get_driver_status_field("country") != "00":
+            check_country_00 = False
+
     while True:
         if args.stdin_ctrl:
             test = sys.stdin.readline()
@@ -402,6 +421,31 @@ def main():
                 break
             t = tests_to_run.pop(0)
 
+        if dev[0].get_driver_status_field("country") == "98":
+            # Work around cfg80211 regulatory issues in clearing intersected
+            # country code 98. Need to make station disconnect without any
+            # other wiphy being active in the system.
+            logger.info("country=98 workaround - try to clear state")
+            id = dev[1].add_network()
+            dev[1].set_network(id, "mode", "2")
+            dev[1].set_network_quoted(id, "ssid", "country98")
+            dev[1].set_network(id, "key_mgmt", "NONE")
+            dev[1].set_network(id, "frequency", "2412")
+            dev[1].set_network(id, "scan_freq", "2412")
+            dev[1].select_network(id)
+            ev = dev[1].wait_event(["CTRL-EVENT-CONNECTED"])
+            if ev:
+                dev[0].connect("country98", key_mgmt="NONE", scan_freq="2412")
+                dev[1].request("DISCONNECT")
+                dev[0].wait_disconnected()
+                dev[0].request("DISCONNECT")
+                dev[0].request("ABORT_SCAN")
+                time.sleep(1)
+            dev[0].reset()
+            dev[1].reset()
+            dev[0].dump_monitor()
+            dev[1].dump_monitor()
+
         name = t.__name__.replace('test_', '', 1)
         open('/dev/kmsg', 'w').write('running hwsim test case %s\n' % name)
         if log_handler:
@@ -414,7 +458,7 @@ def main():
             logger.addHandler(log_handler)
 
         reset_ok = True
-        with DataCollector(args.logdir, name, args.tracing, args.dmesg):
+        with DataCollector(args.logdir, name, args):
             count = count + 1
             msg = "START {} {}/{}".format(name, count, num_tests)
             logger.info(msg)
@@ -454,6 +498,30 @@ def main():
                 else:
                     t(dev)
                 result = "PASS"
+                if check_country_00:
+                    for d in dev:
+                        country = d.get_driver_status_field("country")
+                        if country != "00":
+                            d.dump_monitor()
+                            logger.info("Country code not reset back to 00: is " + country)
+                            print "Country code not reset back to 00: is " + country
+                            result = "FAIL"
+
+                            # Try to wait for cfg80211 regulatory state to
+                            # clear.
+                            d.cmd_execute(['iw', 'reg', 'set', '00'])
+                            for i in range(5):
+                                time.sleep(1)
+                                country = d.get_driver_status_field("country")
+                                if country == "00":
+                                    break
+                            if country == "00":
+                                print "Country code cleared back to 00"
+                                logger.info("Country code cleared back to 00")
+                            else:
+                                print "Country code remains set - expect following test cases to fail"
+                                logger.info("Country code remains set - expect following test cases to fail")
+                            break
             except HwsimSkip, e:
                 logger.info("Skip test case: %s" % e)
                 result = "SKIP"
