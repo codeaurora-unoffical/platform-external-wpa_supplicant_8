@@ -235,7 +235,7 @@ std::string AddOrUpdateHostapdConfig(
 #ifdef CONFIG_SAE
 	case static_cast<uint32_t>(VendorEncryptionType::SAE):
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "3"));
-		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "SAE"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "SAE WPA-PSK"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_passphrase", nw_params.pskPassphrase.c_str()));
 		break;
 #endif
@@ -258,9 +258,12 @@ std::string AddOrUpdateHostapdConfig(
 #endif
 
 #if defined(CONFIG_OWE) || defined(CONFIG_SAE)
-	if (encryption == static_cast<uint32_t>(VendorEncryptionType::SAE)
-		|| encryption == static_cast<uint32_t>(VendorEncryptionType::OWE)) {
+	if (encryption == static_cast<uint32_t>(VendorEncryptionType::OWE)) {
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "2"));
+	} else if (encryption == static_cast<uint32_t>(VendorEncryptionType::SAE)){
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "1"));
+		// sae_require_mfp only applicable to SAE network
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "sae_require_mfp", "1"));
 	} else {
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "0"));
 	}
