@@ -480,8 +480,11 @@ static int ieee80211n_check_40mhz(struct hostapd_iface *iface)
 	int ret;
 
 	/* Check that HT40 is used and PRI / SEC switch is allowed */
-	if (!iface->conf->secondary_channel || iface->conf->no_pri_sec_switch)
+	if (!iface->conf->secondary_channel || iface->conf->no_pri_sec_switch) {
+		if (iface->conf->ht_capab & HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET)
+			iface->conf->ht_capab &= ~HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
 		return 0;
+	}
 
 	hostapd_set_state(iface, HAPD_IFACE_HT_SCAN);
 	wpa_printf(MSG_DEBUG, "Scan for neighboring BSSes prior to enabling "
@@ -679,7 +682,8 @@ int hostapd_check_ht_capab(struct hostapd_iface *iface)
 	if (!ieee80211n_supported_ht_capab(iface))
 		return -1;
 #ifdef CONFIG_IEEE80211AC
-	if (!ieee80211ac_supported_vht_capab(iface))
+	if (iface->conf->ieee80211ac &&
+	    !ieee80211ac_supported_vht_capab(iface))
 		return -1;
 #endif /* CONFIG_IEEE80211AC */
 	ret = ieee80211n_check_40mhz(iface);

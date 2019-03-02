@@ -73,11 +73,24 @@ int qsap_cmd(std::string cmd) {
 	char *data[max_arg_size];
 	char **argv = data;
 	int argc = 0;
+	int index = 0;
+	std::string subcmd;
+	std::string subval;
 
 	wpa_printf(MSG_DEBUG, "qsap command: %s", cmd.c_str());
 
+	/* spit the input into two parts by '=' */
+	/* e.g. softap qccmd set wpa_passphrase=12345678 */
+	index = cmd.find('=');
+	if (index > 0) {
+		subcmd = cmd.substr(0, index);
+		subval = cmd.substr(index);
+	} else {
+		subcmd = cmd;
+	}
+
 	/* Tokenize command to char array */
-	std::istringstream buf(cmd);
+	std::istringstream buf(subcmd);
 	std::istream_iterator<std::string> beg(buf), end;
 	std::vector<std::string> tokens(beg, end);
 
@@ -88,6 +101,13 @@ int qsap_cmd(std::string cmd) {
 		}
 		data[argc] = strdup(s.c_str());
 		argc++;
+	}
+
+	/* Append the subval to last argc of data */
+	if (index > 0 && argc > 0) {
+		std::string subkey(data[argc-1]);
+		free(data[argc-1]);
+		data[argc-1] = strdup((subkey + subval).c_str());
 	}
 
 	if (run_qsap_cmd(argc, argv)) {
@@ -182,10 +202,13 @@ std::string AddOrUpdateHostapdConfig(
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "channel", std::to_string(iface_params.channelParams.channel).c_str()));
 	}
 
+	// reset fields to default
+	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ht_capab", "[SHORT-GI-20] [GF] [DSSS_CCK-40] [LSIG-TXOP-PROT]"));
+	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "vht_oper_chwidth", "0"));
+
 	switch (iface_params.channelParams.band) {
 	case IHostapd::Band::BAND_2_4_GHZ:
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "hw_mode", "g"));
-		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ht_capab", "[SHORT-GI-20] [GF] [DSSS_CCK-40] [LSIG-TXOP-PROT]"));
 		break;
 	case IHostapd::Band::BAND_5_GHZ:
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "hw_mode", "a"));
@@ -213,6 +236,8 @@ std::string AddOrUpdateHostapdConfig(
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211ac", iface_params.hwModeParams.enable80211AC ? "1" : "0"));
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ignore_broadcast_ssid", nw_params.isHidden ? "1" : "0"));
 	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wowlan_triggers", "any"));
+	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "accept_mac_file", "/data/vendor/wifi/hostapd/hostapd.accept"));
+	qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "deny_mac_file", "/data/vendor/wifi/hostapd/hostapd.deny"));
 
 	if (dual_mode)
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "bridge", v_iface_params.bridgeIfaceName.c_str()));

@@ -1030,6 +1030,7 @@ endif
 
 ifndef CONFIG_TLS
 CONFIG_TLS=openssl
+L_CFLAGS += -DCONFIG_USE_OPENSSL_RNG
 endif
 
 ifdef CONFIG_TLSV11
@@ -1707,7 +1708,6 @@ endif
 include $(CLEAR_VARS)
 LOCAL_MODULE := wpa_cli
 LOCAL_PROPRIETARY_MODULE := true
-LOCAL_MODULE_TAGS := debug
 LOCAL_SHARED_LIBRARIES := libc libcutils liblog
 LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_SRC_FILES := $(OBJS_c)
