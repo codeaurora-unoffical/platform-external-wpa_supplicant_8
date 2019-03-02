@@ -542,26 +542,30 @@ fail:
 }
 
 
+static int sae_modp_group_require_masking(int group)
+{
+	/* Groups for which pwd-value is likely to be >= p frequently */
+	return group == 22 || group == 23 || group == 24;
+}
+
+
 static int sae_derive_pwe_ffc(struct sae_data *sae, const u8 *addr1,
 			      const u8 *addr2, const u8 *password,
 			      size_t password_len)
 {
-	u8 counter, sel_counter = 0;
+	u8 counter, k, sel_counter = 0;
 	u8 addrs[2 * ETH_ALEN];
 	const u8 *addr[2];
 	size_t len[2];
 	u8 found = 0; /* 0 (false) or 0xff (true) to be used as const_time_*
 		       * mask */
 	u8 mask;
-	struct crypto_bignum *pwe;
+	struct crypto_bignum *pwe = NULL;
 	size_t prime_len = sae->tmp->prime_len * 8;
 	u8 *pwe_buf;
 
-	if (sae->tmp->pwe_ffc == NULL) {
-		sae->tmp->pwe_ffc = crypto_bignum_init();
-		if (sae->tmp->pwe_ffc == NULL)
-			return -1;
-	}
+	crypto_bignum_deinit(sae->tmp->pwe_ffc, 1);
+	sae->tmp->pwe_ffc = NULL;
 
 	/* Allocate a buffer to maintain selected and candidate PWE for constant
 	 * time selection. */
@@ -585,7 +589,9 @@ static int sae_derive_pwe_ffc(struct sae_data *sae, const u8 *addr1,
 	addr[1] = &counter;
 	len[1] = sizeof(counter);
 
-	for (counter = 1; !found; counter++) {
+	k = sae_modp_group_require_masking(sae->group) ? 40 : 1;
+
+	for (counter = 1; counter <= k || !found; counter++) {
 		u8 pwd_seed[SHA256_MAC_LEN];
 		int res;
 
@@ -595,11 +601,15 @@ static int sae_derive_pwe_ffc(struct sae_data *sae, const u8 *addr1,
 			break;
 		}
 
-		wpa_printf(MSG_DEBUG, "SAE: counter = %u", counter);
+		wpa_printf(MSG_DEBUG, "SAE: counter = %02u", counter);
 		if (hmac_sha256_vector(addrs, sizeof(addrs), 2, addr, len,
 				       pwd_seed) < 0)
 			break;
-
+		if (!pwe) {
+			pwe = crypto_bignum_init();
+			if (!pwe)
+				break;
+		}
 		res = sae_test_pwd_seed_ffc(sae, pwd_seed, pwe);
 		/* res is -1 for fatal failure, 0 if a valid PWE was not found,
 		 * or 1 if a valid PWE was found. */
