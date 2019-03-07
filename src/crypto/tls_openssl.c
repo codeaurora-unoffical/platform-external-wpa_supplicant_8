@@ -30,13 +30,6 @@
 #include "tls.h"
 #include "tls_openssl.h"
 
-#if OPENSSL_VERSION_NUMBER < 0x10000000L
-/* ERR_remove_thread_state replaces ERR_remove_state and the latter is
- * deprecated. However, OpenSSL 0.9.8 doesn't include
- * ERR_remove_thread_state. */
-#define ERR_remove_thread_state(tid) ERR_remove_state(0)
-#endif
-
 #if defined(OPENSSL_IS_BORINGSSL)
 /* stack_index_t is the return type of OpenSSL's sk_XXX_num() functions. */
 typedef size_t stack_index_t;
@@ -2718,17 +2711,11 @@ static int openssl_get_keyblock_size(SSL *ssl)
 		return -1;
 
 	c = ssl->enc_read_ctx->cipher;
-#if OPENSSL_VERSION_NUMBER >= 0x00909000L
 	h = EVP_MD_CTX_md(ssl->read_hash);
-#else
-	h = ssl->read_hash;
-#endif
 	if (h)
 		md_size = EVP_MD_size(h);
-#if OPENSSL_VERSION_NUMBER >= 0x10000000L
 	else if (ssl->s3)
 		md_size = ssl->s3->tmp.new_mac_secret_size;
-#endif
 	else
 		return -1;
 
@@ -3713,7 +3700,7 @@ unsigned int tls_capabilities(void *tls_ctx)
  * commented out unless explicitly needed for EAP-FAST in order to be able to
  * build this file with unmodified openssl. */
 
-#ifdef OPENSSL_IS_BORINGSSL
+#if (defined(OPENSSL_IS_BORINGSSL) || OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
 static int tls_sess_sec_cb(SSL *s, void *secret, int *secret_len,
 			   STACK_OF(SSL_CIPHER) *peer_ciphers,
 			   const SSL_CIPHER **cipher, void *arg)
@@ -3803,7 +3790,13 @@ int tls_connection_set_session_ticket_cb(void *tls_ctx,
 
 int tls_get_library_version(char *buf, size_t buf_len)
 {
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+	return os_snprintf(buf, buf_len, "OpenSSL build=%s run=%s",
+			   OPENSSL_VERSION_TEXT,
+			   OpenSSL_version(OPENSSL_VERSION));
+#else
 	return os_snprintf(buf, buf_len, "OpenSSL build=%s run=%s",
 			   OPENSSL_VERSION_TEXT,
 			   SSLeay_version(SSLEAY_VERSION));
+#endif
 }

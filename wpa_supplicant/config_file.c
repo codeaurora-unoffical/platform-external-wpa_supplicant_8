@@ -1355,7 +1355,7 @@ int wpa_config_write(const char *name, struct wpa_config *config)
 	}
 #endif /* CONFIG_NO_CONFIG_BLOBS */
 
-	os_fsync(f);
+	os_fdatasync(f);
 
 	fclose(f);
 
