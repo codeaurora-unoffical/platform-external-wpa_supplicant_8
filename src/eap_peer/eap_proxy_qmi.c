@@ -2057,4 +2057,17 @@ int eap_proxy_allowed_method(struct eap_peer_config *config, int vendor,
 	return 0;
 }
 
+u8 *eap_proxy_get_eap_session_id(struct eap_proxy_sm *sm, size_t *len)
+{
+	return NULL;
+}
+
+u8 *eap_proxy_get_emsk(struct eap_proxy_sm *sm, size_t *len)
+{
+	return NULL;
+}
+
+void eap_proxy_sm_abort(struct eap_proxy_sm *sm)
+{
+}
 #endif  /* CONFIG_EAP_PROXY */
