@@ -2388,6 +2388,16 @@ static int nl80211_mgmt_subscribe_ap_dev_sme(struct i802_bss *bss)
 	if (nl80211_action_subscribe_ap(bss))
 		goto out_err;
 
+	if (bss->drv->device_ap_sme) {
+		u16 type = (WLAN_FC_TYPE_MGMT << 2) | (WLAN_FC_STYPE_AUTH << 4);
+
+		/* Register for all Authentication frames */
+		if (nl80211_register_frame(bss, bss->nl_mgmt, type, NULL, 0)
+		    < 0)
+			wpa_printf(MSG_DEBUG, "nl80211: Failed to subscribe to"
+				   "mgmt auth frames");
+	}
+
 	nl80211_mgmt_handle_register_eloop(bss);
 	return 0;
 
@@ -4067,6 +4077,9 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 	    (nla_put_u16(msg, NL80211_ATTR_CONTROL_PORT_ETHERTYPE, ETH_P_PAE) ||
 	     nla_put_flag(msg, NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT)))
 		goto fail;
+
+	if (drv->device_ap_sme && (params->key_mgmt_suites & WPA_KEY_MGMT_SAE))
+	     nla_put_flag(msg, NL80211_ATTR_EXTERNAL_AUTH_SUPPORT);
 
 	wpa_printf(MSG_DEBUG, "nl80211: pairwise_ciphers=0x%x",
 		   params->pairwise_ciphers);
@@ -10613,15 +10626,25 @@ static int nl80211_send_external_auth_status(void *priv,
 	struct nl_msg *msg = NULL;
 	int ret = -1;
 
+	/* External auth command/status is intended for the drivers that support
+	 * SME but want to offload authentication(Ex: SAE) to
+	 * hostapd/wpa_supplicant. Don't send the status to drivers which don't
+	 * support AP SME or use wpa_supplicant/hostapd SME.
+	 */
+	if(!bss->drv->device_ap_sme || drv->capa.flags & WPA_DRIVER_FLAGS_SME)
+		return -1;
+
 	wpa_dbg(drv->ctx, MSG_DEBUG,
 		"nl80211: External auth status: %u", params->status);
 
 	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_EXTERNAL_AUTH);
 	if (!msg ||
 	    nla_put_u16(msg, NL80211_ATTR_STATUS_CODE, params->status) ||
-	    nla_put(msg, NL80211_ATTR_SSID, params->ssid_len,
-		    params->ssid) ||
-	    nla_put(msg, NL80211_ATTR_BSSID, ETH_ALEN, params->bssid))
+	    (params->ssid_len &&
+	     nla_put(msg, NL80211_ATTR_SSID, params->ssid_len, params->ssid)) ||
+	    nla_put(msg, NL80211_ATTR_BSSID, ETH_ALEN, params->bssid) ||
+	    (params->pmkid &&
+	     nla_put(msg, NL80211_ATTR_PMKID, PMKID_LEN, params->pmkid)))
 		goto fail;
 	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
 	msg = NULL;
