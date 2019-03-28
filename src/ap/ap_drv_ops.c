@@ -757,6 +757,14 @@ int hostapd_drv_send_action(struct hostapd_data *hapd, unsigned int freq,
 					 hapd->own_addr, bssid, data, len, 0);
 }
 
+int hostapd_drv_update_dh_ie(struct hostapd_data *hapd, const u8 *peer,
+			     u16 reason_code, const u8 *ie, size_t ielen)
+{
+	if (!hapd->driver || !peer || !hapd->drv_priv)
+		return 0;
+	return hapd->driver->update_dh_ie(hapd->drv_priv, peer, reason_code,
+					  ie, ielen);
+}
 
 int hostapd_drv_send_action_addr3_ap(struct hostapd_data *hapd,
 				     unsigned int freq,
