@@ -16,6 +16,7 @@
 #include "crypto/md5.h"
 #include "common/eapol_common.h"
 #include "eap_peer/eap.h"
+#include "eap_peer/eap_config.h"
 #include "eap_peer/eap_proxy.h"
 #include "eapol_supp_sm.h"
 
@@ -914,6 +915,9 @@ static void eapol_sm_abortSupp(struct eapol_sm *sm)
 	wpabuf_free(sm->eapReqData);
 	sm->eapReqData = NULL;
 	eap_sm_abort(sm->eap);
+#ifdef CONFIG_EAP_PROXY
+	eap_proxy_sm_abort(sm->eap_proxy);
+#endif /* CONFIG_EAP_PROXY */
 }
 
 

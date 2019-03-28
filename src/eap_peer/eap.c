@@ -680,6 +680,8 @@ void eap_peer_erp_init(struct eap_sm *sm, u8 *ext_session_id,
 #ifdef CONFIG_ERP
 	u8 *emsk = NULL;
 	size_t emsk_len = 0;
+	u8 *session_id = NULL;
+	size_t session_id_len = 0;
 	u8 EMSKname[EAP_EMSK_NAME_LEN];
 	u8 len[2], ctx[3];
 	char *realm;
@@ -709,7 +711,13 @@ void eap_peer_erp_init(struct eap_sm *sm, u8 *ext_session_id,
 	if (erp == NULL)
 		goto fail;
 
-	emsk = sm->m->get_emsk(sm, sm->eap_method_priv, &emsk_len);
+	if (ext_emsk) {
+		emsk = ext_emsk;
+		emsk_len = ext_emsk_len;
+	} else {
+		emsk = sm->m->get_emsk(sm, sm->eap_method_priv, &emsk_len);
+	}
+
 	if (!emsk || emsk_len == 0 || emsk_len > ERP_MAX_KEY_LEN) {
 		wpa_printf(MSG_DEBUG,
 			   "EAP: No suitable EMSK available for ERP");
@@ -718,10 +726,23 @@ void eap_peer_erp_init(struct eap_sm *sm, u8 *ext_session_id,
 
 	wpa_hexdump_key(MSG_DEBUG, "EAP: EMSK", emsk, emsk_len);
 
+	if (ext_session_id) {
+		session_id = ext_session_id;
+		session_id_len = ext_session_id_len;
+	} else {
+		session_id = sm->eapSessionId;
+		session_id_len = sm->eapSessionIdLen;
+	}
+
+	if (!session_id || session_id_len == 0) {
+		wpa_printf(MSG_DEBUG,
+			   "EAP: No suitable session id available for ERP");
+		goto fail;
+	}
+
 	WPA_PUT_BE16(len, EAP_EMSK_NAME_LEN);
-	if (hmac_sha256_kdf(sm->eapSessionId, sm->eapSessionIdLen, "EMSK",
-			    len, sizeof(len),
-			    EMSKname, EAP_EMSK_NAME_LEN) < 0) {
+	if (hmac_sha256_kdf(session_id, session_id_len, "EMSK", len,
+			    sizeof(len), EMSKname, EAP_EMSK_NAME_LEN) < 0) {
 		wpa_printf(MSG_DEBUG, "EAP: Could not derive EMSKname");
 		goto fail;
 	}
