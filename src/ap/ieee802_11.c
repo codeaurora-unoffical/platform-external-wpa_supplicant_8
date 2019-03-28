@@ -50,6 +50,7 @@
 #include "fils_hlp.h"
 #include "dpp_hostapd.h"
 #include "gas_query_ap.h"
+#include "wpa_auth_i.h"
 
 
 #ifdef CONFIG_FILS
@@ -615,10 +616,18 @@ static void sae_sme_send_external_auth_status(struct hostapd_data *hapd,
 {
 	struct external_auth params;
 
+	if (sta->wpa_sm == NULL)
+		sta->wpa_sm = wpa_auth_sta_init(hapd->wpa_auth,
+						sta->addr, NULL);
+	if (sta->wpa_sm == NULL) {
+		wpa_printf(MSG_WARNING,
+			   "Failed to initialize WPA state machine");
+	}
 	os_memset(&params, 0, sizeof(params));
 	params.status = status;
 	os_memcpy(params.bssid, sta->addr, ETH_ALEN);
-	if (status == WLAN_STATUS_SUCCESS)
+	if (status == WLAN_STATUS_SUCCESS && sta->wpa_sm &&
+	    !sta->wpa_sm->wpa_auth->conf.disable_pmksa_caching)
 		params.pmkid = sta->sae->pmkid;
 
 	hostapd_drv_send_external_auth_status(hapd, &params);
