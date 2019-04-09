@@ -8541,7 +8541,7 @@ static int wpa_driver_nl80211_update_dh_ie(void *priv, const u8 *peer_mac,
 
 	wpa_printf(MSG_DEBUG, "nl80211: Updating DH IE peer: " MACSTR
 		   " reason %d", MAC2STR(peer_mac), reason_code);
-	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_UPDATE_OWE_INFO)) ||
+	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_UPDATE_OWE_INFO)) ||
 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, peer_mac) ||
 	    nla_put_u16(msg, NL80211_ATTR_STATUS_CODE, reason_code) ||
 	    (ie && nla_put(msg, NL80211_ATTR_IE, ie_len, ie))) {
