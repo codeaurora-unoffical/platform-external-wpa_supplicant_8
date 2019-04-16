@@ -106,4 +106,6 @@ static inline void sae_clear_retransmit_timer(struct hostapd_data *hapd,
 }
 #endif /* CONFIG_SAE */
 
+void auth_sae_process_commit(void *eloop_ctx, void *user_ctx);
+
 #endif /* IEEE802_11_H */
