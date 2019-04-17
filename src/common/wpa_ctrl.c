@@ -188,8 +188,8 @@ try_again:
 	}
 	chown(ctrl->local.sun_path, -1, gid_wifi);
 	chown(ctrl->local.sun_path, uid_system, gid_wifi);
-	lchown(ctrl->local.sun_path, -1, AID_WIFI);
-	lchown(ctrl->local.sun_path, AID_SYSTEM, AID_WIFI);
+//	lchown(ctrl->local.sun_path, -1, AID_WIFI);
+//	lchown(ctrl->local.sun_path, AID_SYSTEM, AID_WIFI);
 
 	if (os_strncmp(ctrl_path, "@android:", 9) == 0) {
 		if (socket_local_client_connect(
