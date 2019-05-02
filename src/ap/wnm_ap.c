@@ -202,7 +202,7 @@ static void ieee802_11_rx_wnmsleep_req(struct hostapd_data *hapd,
 	u8 *tfsreq_ie_end = NULL;
 	u16 tfsreq_ie_len = 0;
 
-	if (!hapd->conf->wnm_sleep_mode) {
+	if (!hapd->conf->wnm_sleep_mode || len < 1) {
 		wpa_printf(MSG_DEBUG, "Ignore WNM-Sleep Mode Request from "
 			   MACSTR " since WNM-Sleep Mode is disabled",
 			   MAC2STR(addr));
