@@ -1,6 +1,6 @@
 /*
  * WPA Supplicant - Driver event processing
- * Copyright (c) 2003-2017, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2003-2019, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -29,6 +29,7 @@
 #include "common/ieee802_11_defs.h"
 #include "common/ieee802_11_common.h"
 #include "common/gas_server.h"
+#include "common/dpp.h"
 #include "crypto/random.h"
 #include "blacklist.h"
 #include "wpas_glue.h"
@@ -559,6 +560,10 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 					"   skip RSN IE - parse failed");
 			break;
 		}
+		if (!ie.has_pairwise)
+			ie.pairwise_cipher = wpa_default_rsn_cipher(bss->freq);
+		if (!ie.has_group)
+			ie.group_cipher = wpa_default_rsn_cipher(bss->freq);
 
 		if (wep_ok &&
 		    (ie.group_cipher & (WPA_CIPHER_WEP40 | WPA_CIPHER_WEP104)))
@@ -1899,7 +1904,7 @@ static int _wpa_supplicant_event_scan_results(struct wpa_supplicant *wpa_s,
 	if (sme_proc_obss_scan(wpa_s) > 0)
 		goto scan_work_done;
 
-	if (own_request &&
+	if (own_request && data &&
 	    wpas_beacon_rep_scan_process(wpa_s, scan_res, &data->scan_info) > 0)
 		goto scan_work_done;
 
@@ -2305,6 +2310,13 @@ static void multi_ap_process_assoc_resp(struct wpa_supplicant *wpa_s,
 	}
 
 	if (!(map_sub_elem[2] & MULTI_AP_BACKHAUL_BSS)) {
+		if ((map_sub_elem[2] & MULTI_AP_FRONTHAUL_BSS) &&
+		    wpa_s->current_ssid->key_mgmt & WPA_KEY_MGMT_WPS) {
+			wpa_printf(MSG_INFO,
+				   "WPS active, accepting fronthaul-only BSS");
+			/* Don't set 4addr mode in this case, so just return */
+			return;
+		}
 		wpa_printf(MSG_INFO, "AP doesn't support backhaul BSS");
 		goto fail;
 	}
@@ -2429,6 +2441,42 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
 		}
 	}
 
+	wpa_s->connection_vht_max_eight_spatial_streams = 0;
+	wpa_s->connection_twt = 0;
+	if (wpa_s->connection_set && wpa_s->connection_vht) {
+		const u8 *ie;
+		int twt_req_support, twt_resp_support;
+
+		ie = get_ie(data->assoc_info.resp_ies,
+			    data->assoc_info.resp_ies_len,
+			    WLAN_EID_VHT_CAP);
+
+		if (ie && ie[1] >= 4) {
+			struct ieee80211_vht_capabilities *vht_capa;
+
+			vht_capa = (struct ieee80211_vht_capabilities *) &ie[2];
+
+			if ((le_to_host32(vht_capa->vht_capabilities_info) &
+			    VHT_CAP_BEAMFORMEE_STS_MAX) == VHT_CAP_BEAMFORMEE_STS_MAX)
+				wpa_s->connection_vht_max_eight_spatial_streams = 1;
+		}
+
+		ie = get_ie(data->assoc_info.req_ies,
+			    data->assoc_info.req_ies_len,
+			    WLAN_EID_EXT_CAPAB);
+
+		twt_req_support = ieee802_11_ext_capab(ie, 77);
+
+		ie = get_ie(data->assoc_info.resp_ies,
+			    data->assoc_info.resp_ies_len,
+			    WLAN_EID_EXT_CAPAB);
+
+		twt_resp_support = ieee802_11_ext_capab(ie, 78);
+
+		if (twt_req_support && twt_resp_support)
+			wpa_s->connection_twt = 1;
+	}
+
 	p = data->assoc_info.req_ies;
 	l = data->assoc_info.req_ies_len;
 
@@ -2486,6 +2534,28 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 #endif /* CONFIG_OWE */
+
+#ifdef CONFIG_DPP2
+	wpa_sm_set_dpp_z(wpa_s->wpa, NULL);
+	if (wpa_s->key_mgmt == WPA_KEY_MGMT_DPP && wpa_s->dpp_pfs) {
+		struct ieee802_11_elems elems;
+
+		if (ieee802_11_parse_elems(data->assoc_info.resp_ies,
+					   data->assoc_info.resp_ies_len,
+					   &elems, 0) == ParseFailed ||
+		    !elems.owe_dh)
+			goto no_pfs;
+		if (dpp_pfs_process(wpa_s->dpp_pfs, elems.owe_dh,
+				    elems.owe_dh_len) < 0) {
+			wpa_supplicant_deauthenticate(wpa_s,
+						      WLAN_REASON_UNSPECIFIED);
+			return -1;
+		}
+
+		wpa_sm_set_dpp_z(wpa_s->wpa, wpa_s->dpp_pfs->secret);
+	}
+no_pfs:
+#endif /* CONFIG_DPP2 */
 
 #ifdef CONFIG_IEEE80211R
 #ifdef CONFIG_SME
@@ -2825,8 +2895,17 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 	}
 	wpa_supplicant_cancel_scan(wpa_s);
 
-	if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK) &&
-	    wpa_key_mgmt_wpa_psk(wpa_s->key_mgmt)) {
+	if (ft_completed) {
+		/*
+		 * FT protocol completed - make sure EAPOL state machine ends
+		 * up in authenticated.
+		 */
+		wpa_supplicant_cancel_auth_timeout(wpa_s);
+		wpa_supplicant_set_state(wpa_s, WPA_COMPLETED);
+		eapol_sm_notify_portValid(wpa_s->eapol, TRUE);
+		eapol_sm_notify_eap_success(wpa_s->eapol, TRUE);
+	} else if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK) &&
+		   wpa_key_mgmt_wpa_psk(wpa_s->key_mgmt)) {
 		/*
 		 * We are done; the driver will take care of RSN 4-way
 		 * handshake.
@@ -2843,15 +2922,6 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 		 * waiting for WPA supplicant.
 		 */
 		eapol_sm_notify_portValid(wpa_s->eapol, TRUE);
-	} else if (ft_completed) {
-		/*
-		 * FT protocol completed - make sure EAPOL state machine ends
-		 * up in authenticated.
-		 */
-		wpa_supplicant_cancel_auth_timeout(wpa_s);
-		wpa_supplicant_set_state(wpa_s, WPA_COMPLETED);
-		eapol_sm_notify_portValid(wpa_s->eapol, TRUE);
-		eapol_sm_notify_eap_success(wpa_s->eapol, TRUE);
 	}
 
 	wpa_s->last_eapol_matches_bssid = 0;
@@ -4831,7 +4901,7 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		break;
 	case EVENT_WPS_BUTTON_PUSHED:
 #ifdef CONFIG_WPS
-		wpas_wps_start_pbc(wpa_s, NULL, 0);
+		wpas_wps_start_pbc(wpa_s, NULL, 0, 0);
 #endif /* CONFIG_WPS */
 		break;
 	case EVENT_AVOID_FREQUENCIES:
