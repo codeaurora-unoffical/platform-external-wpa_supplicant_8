@@ -201,6 +201,16 @@ int authsrv_init(struct hostapd_data *hapd)
 
 		os_memset(&conf, 0, sizeof(conf));
 		conf.tls_session_lifetime = hapd->conf->tls_session_lifetime;
+		if (hapd->conf->crl_reload_interval > 0 &&
+		    hapd->conf->check_crl <= 0) {
+			wpa_printf(MSG_INFO,
+				   "Cannot enable CRL reload functionality - it depends on check_crl being set");
+		} else if (hapd->conf->crl_reload_interval > 0) {
+			conf.crl_reload_interval =
+				hapd->conf->crl_reload_interval;
+			wpa_printf(MSG_INFO,
+				   "Enabled CRL reload functionality");
+		}
 		conf.tls_flags = hapd->conf->tls_flags;
 		conf.event_cb = authsrv_tls_event;
 		conf.cb_ctx = hapd;
@@ -223,6 +233,7 @@ int authsrv_init(struct hostapd_data *hapd)
 			hapd->conf->ocsp_stapling_response;
 		params.ocsp_stapling_response_multi =
 			hapd->conf->ocsp_stapling_response_multi;
+		params.check_cert_subject = hapd->conf->check_cert_subject;
 
 		if (tls_global_set_params(hapd->ssl_ctx, &params)) {
 			wpa_printf(MSG_ERROR, "Failed to set TLS parameters");

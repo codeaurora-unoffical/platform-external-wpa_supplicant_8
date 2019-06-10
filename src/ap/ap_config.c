@@ -13,12 +13,14 @@
 #include "crypto/tls.h"
 #include "radius/radius_client.h"
 #include "common/ieee802_11_defs.h"
+#include "common/ieee802_1x_defs.h"
 #include "common/eapol_common.h"
 #include "common/dhcp.h"
 #include "eap_common/eap_wsc_common.h"
 #include "eap_server/eap.h"
 #include "wpa_auth.h"
 #include "sta_info.h"
+#include "airtime_policy.h"
 #include "ap_config.h"
 
 
@@ -138,6 +140,11 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 	bss->hs20_release = (HS20_VERSION >> 4) + 1;
 #endif /* CONFIG_HS20 */
 
+#ifdef CONFIG_MACSEC
+	bss->mka_priority = DEFAULT_PRIO_NOT_KEY_SERVER;
+	bss->macsec_port = 1;
+#endif /* CONFIG_MACSEC */
+
 	/* Default to strict CRL checking. */
 	bss->check_crl_strict = 1;
 }
@@ -200,8 +207,8 @@ struct hostapd_config * hostapd_config_defaults(void)
 	conf->num_bss = 1;
 
 	conf->beacon_int = 100;
-	conf->rts_threshold = -1; /* use driver default: 2347 */
-	conf->fragm_threshold = -1; /* user driver default: 2346 */
+	conf->rts_threshold = -2; /* use driver default: 2347 */
+	conf->fragm_threshold = -2; /* user driver default: 2346 */
 	/* Set to invalid value means do not add Power Constraint IE */
 	conf->local_pwr_constraint = -1;
 
@@ -236,6 +243,13 @@ struct hostapd_config * hostapd_config_defaults(void)
 	conf->acs_num_scans = 5;
 #endif /* CONFIG_ACS */
 
+#ifdef CONFIG_IEEE80211AX
+	conf->he_op.he_rts_threshold = HE_OPERATION_RTS_THRESHOLD_MASK >>
+		HE_OPERATION_RTS_THRESHOLD_OFFSET;
+	/* Set default basic MCS/NSS set to single stream MCS 0-7 */
+	conf->he_op.he_basic_mcs_nss_set = 0xfffc;
+#endif /* CONFIG_IEEE80211AX */
+
 	/* The third octet of the country string uses an ASCII space character
 	 * by default to indicate that the regulations encompass all
 	 * environments for the current frequency band in the country. */
@@ -243,6 +257,10 @@ struct hostapd_config * hostapd_config_defaults(void)
 
 	conf->rssi_reject_assoc_rssi = 0;
 	conf->rssi_reject_assoc_timeout = 30;
+
+#ifdef CONFIG_AIRTIME_POLICY
+	conf->airtime_update_interval = AIRTIME_DEFAULT_UPDATE_INTERVAL;
+#endif /* CONFIG_AIRTIME_POLICY */
 
 	return conf;
 }
@@ -259,6 +277,12 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 {
 	FILE *f;
 	char buf[128], *pos;
+	const char *keyid;
+	char *context;
+	char *context2;
+	char *token;
+	char *name;
+	char *value;
 	int line = 0, ret = 0, len, ok;
 	u8 addr[ETH_ALEN];
 	struct hostapd_wpa_psk *psk;
@@ -273,6 +297,8 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 	}
 
 	while (fgets(buf, sizeof(buf), f)) {
+		int vlan_id = 0;
+
 		line++;
 
 		if (buf[0] == '#')
@@ -288,9 +314,39 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 		if (buf[0] == '\0')
 			continue;
 
-		if (hwaddr_aton(buf, addr)) {
+		context = NULL;
+		keyid = NULL;
+		while ((token = str_token(buf, " ", &context))) {
+			if (!os_strchr(token, '='))
+				break;
+			context2 = NULL;
+			name = str_token(token, "=", &context2);
+			if (!name)
+				break;
+			value = str_token(token, "", &context2);
+			if (!value)
+				value = "";
+			if (!os_strcmp(name, "keyid")) {
+				keyid = value;
+			} else if (!os_strcmp(name, "vlanid")) {
+				vlan_id = atoi(value);
+			} else {
+				wpa_printf(MSG_ERROR,
+					   "Unrecognized '%s=%s' on line %d in '%s'",
+					   name, value, line, fname);
+				ret = -1;
+				break;
+			}
+		}
+
+		if (ret == -1)
+			break;
+
+		if (!token)
+			token = "";
+		if (hwaddr_aton(token, addr)) {
 			wpa_printf(MSG_ERROR, "Invalid MAC address '%s' on "
-				   "line %d in '%s'", buf, line, fname);
+				   "line %d in '%s'", token, line, fname);
 			ret = -1;
 			break;
 		}
@@ -301,20 +357,20 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 			ret = -1;
 			break;
 		}
+		psk->vlan_id = vlan_id;
 		if (is_zero_ether_addr(addr))
 			psk->group = 1;
 		else
 			os_memcpy(psk->addr, addr, ETH_ALEN);
 
-		pos = buf + 17;
-		if (*pos == '\0') {
+		pos = str_token(buf, "", &context);
+		if (!pos) {
 			wpa_printf(MSG_ERROR, "No PSK on line %d in '%s'",
 				   line, fname);
 			os_free(psk);
 			ret = -1;
 			break;
 		}
-		pos++;
 
 		ok = 0;
 		len = os_strlen(pos);
@@ -331,6 +387,18 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 			os_free(psk);
 			ret = -1;
 			break;
+		}
+
+		if (keyid) {
+			len = os_strlcpy(psk->keyid, keyid, sizeof(psk->keyid));
+			if ((size_t) len >= sizeof(psk->keyid)) {
+				wpa_printf(MSG_ERROR,
+					   "PSK keyid too long on line %d in '%s'",
+					   line, fname);
+				os_free(psk);
+				ret = -1;
+				break;
+			}
 		}
 
 		psk->next = ssid->wpa_psk;
@@ -509,6 +577,20 @@ static void hostapd_config_free_sae_passwords(struct hostapd_bss_config *conf)
 }
 
 
+#ifdef CONFIG_DPP2
+static void hostapd_dpp_controller_conf_free(struct dpp_controller_conf *conf)
+{
+	struct dpp_controller_conf *prev;
+
+	while (conf) {
+		prev = conf;
+		conf = conf->next;
+		os_free(prev);
+	}
+}
+#endif /* CONFIG_DPP2 */
+
+
 void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 {
 	if (conf == NULL)
@@ -545,6 +627,7 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 	os_free(conf->server_cert);
 	os_free(conf->private_key);
 	os_free(conf->private_key_passwd);
+	os_free(conf->check_cert_subject);
 	os_free(conf->ocsp_stapling_response);
 	os_free(conf->ocsp_stapling_response_multi);
 	os_free(conf->dh_file);
@@ -594,6 +677,8 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 	os_free(conf->ap_pin);
 	os_free(conf->extra_cred);
 	os_free(conf->ap_settings);
+	hostapd_config_clear_wpa_psk(&conf->multi_ap_backhaul_ssid.wpa_psk);
+	str_clear_free(conf->multi_ap_backhaul_ssid.wpa_passphrase);
 	os_free(conf->upnp_iface);
 	os_free(conf->friendly_name);
 	os_free(conf->manufacturer_url);
@@ -687,9 +772,26 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 	os_free(conf->dpp_connector);
 	wpabuf_free(conf->dpp_netaccesskey);
 	wpabuf_free(conf->dpp_csign);
+#ifdef CONFIG_DPP2
+	hostapd_dpp_controller_conf_free(conf->dpp_controller);
+#endif /* CONFIG_DPP2 */
 #endif /* CONFIG_DPP */
 
 	hostapd_config_free_sae_passwords(conf);
+
+#ifdef CONFIG_AIRTIME_POLICY
+	{
+		struct airtime_sta_weight *wt, *wt_prev;
+
+		wt = conf->airtime_weight_list;
+		conf->airtime_weight_list = NULL;
+		while (wt) {
+			wt_prev = wt;
+			wt = wt->next;
+			os_free(wt_prev);
+		}
+	}
+#endif /* CONFIG_AIRTIME_POLICY */
 
 	os_free(conf);
 }
@@ -815,10 +917,13 @@ const char * hostapd_get_vlan_id_ifname(struct hostapd_vlan *vlan, int vlan_id)
 
 const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
 			   const u8 *addr, const u8 *p2p_dev_addr,
-			   const u8 *prev_psk)
+			   const u8 *prev_psk, int *vlan_id)
 {
 	struct hostapd_wpa_psk *psk;
 	int next_ok = prev_psk == NULL;
+
+	if (vlan_id)
+		*vlan_id = 0;
 
 	if (p2p_dev_addr && !is_zero_ether_addr(p2p_dev_addr)) {
 		wpa_printf(MSG_DEBUG, "Searching a PSK for " MACSTR
@@ -837,8 +942,11 @@ const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
 		     (addr && os_memcmp(psk->addr, addr, ETH_ALEN) == 0) ||
 		     (!addr && p2p_dev_addr &&
 		      os_memcmp(psk->p2p_dev_addr, p2p_dev_addr, ETH_ALEN) ==
-		      0)))
+		      0))) {
+			if (vlan_id)
+				*vlan_id = psk->vlan_id;
 			return psk->psk;
+		}
 
 		if (psk->psk == prev_psk)
 			next_ok = 1;
@@ -1081,6 +1189,13 @@ int hostapd_config_check(struct hostapd_config *conf, int full_config)
 		return -1;
 	}
 
+#ifdef CONFIG_AIRTIME_POLICY
+	if (full_config && conf->airtime_mode > AIRTIME_MODE_STATIC &&
+	    !conf->airtime_update_interval) {
+		wpa_printf(MSG_ERROR, "Airtime update interval cannot be zero");
+		return -1;
+	}
+#endif /* CONFIG_AIRTIME_POLICY */
 	for (i = 0; i < NUM_TX_QUEUES; i++) {
 		if (hostapd_config_check_cw(conf, i))
 			return -1;

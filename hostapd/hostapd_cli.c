@@ -1214,6 +1214,13 @@ static int hostapd_cli_cmd_disable(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int hostapd_cli_cmd_update_beacon(struct wpa_ctrl *ctrl, int argc,
+				      char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "UPDATE_BEACON");
+}
+
+
 static int hostapd_cli_cmd_vendor(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	char cmd[256];
@@ -1494,6 +1501,13 @@ static int hostapd_cli_cmd_req_beacon(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int hostapd_cli_cmd_reload_wpa_psk(struct wpa_ctrl *ctrl, int argc,
+					  char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "RELOAD_WPA_PSK");
+}
+
+
 struct hostapd_cli_cmd {
 	const char *cmd;
 	int (*handler)(struct wpa_ctrl *ctrl, int argc, char *argv[]);
@@ -1610,6 +1624,8 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	  "= reload configuration for current interface" },
 	{ "disable", hostapd_cli_cmd_disable, NULL,
 	  "= disable hostapd on current interface" },
+	{ "update_beacon", hostapd_cli_cmd_update_beacon, NULL,
+	  "= update Beacon frame contents\n"},
 	{ "erp_flush", hostapd_cli_cmd_erp_flush, NULL,
 	  "= drop all ERP keys"},
 	{ "log_level", hostapd_cli_cmd_log_level, NULL,
@@ -1669,6 +1685,8 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	  "<addr> = poll a STA to check connectivity with a QoS null frame" },
 	{ "req_beacon", hostapd_cli_cmd_req_beacon, NULL,
 	  "<addr> [req_mode=] <measurement request hexdump>  = send a Beacon report request to a station" },
+	{ "reload_wpa_psk", hostapd_cli_cmd_reload_wpa_psk, NULL,
+	  "= reload wpa_psk_file only" },
 	{ NULL, NULL, NULL, NULL }
 };
 

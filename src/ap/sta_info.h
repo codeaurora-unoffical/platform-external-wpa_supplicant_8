@@ -37,6 +37,7 @@
 #define WLAN_STA_VENDOR_VHT BIT(21)
 #define WLAN_STA_PENDING_FILS_ERP BIT(22)
 #define WLAN_STA_MULTI_AP BIT(23)
+#define WLAN_STA_HE BIT(24)
 #define WLAN_STA_PENDING_DISASSOC_CB BIT(29)
 #define WLAN_STA_PENDING_DEAUTH_CB BIT(30)
 #define WLAN_STA_NONERP BIT(31)
@@ -166,6 +167,8 @@ struct sta_info {
 	struct ieee80211_vht_capabilities *vht_capabilities;
 	struct ieee80211_vht_operation *vht_operation;
 	u8 vht_opmode;
+	struct ieee80211_he_capabilities *he_capab;
+	size_t he_capab_len;
 
 #ifdef CONFIG_IEEE80211W
 	int sa_query_count; /* number of pending SA Query requests;
@@ -265,12 +268,20 @@ struct sta_info {
 	u8 *ext_capability;
 	char *ifname_wds; /* WDS ifname, if in use */
 
+#ifdef CONFIG_DPP2
+	struct dpp_pfs *dpp_pfs;
+#endif /* CONFIG_DPP2 */
+
 #ifdef CONFIG_TESTING_OPTIONS
 	enum wpa_alg last_tk_alg;
 	int last_tk_key_idx;
 	u8 last_tk[WPA_TK_MAX_LEN];
 	size_t last_tk_len;
 #endif /* CONFIG_TESTING_OPTIONS */
+#ifdef CONFIG_AIRTIME_POLICY
+	unsigned int airtime_weight;
+	struct os_reltime backlogged_until;
+#endif /* CONFIG_AIRTIME_POLICY */
 };
 
 
@@ -324,6 +335,8 @@ int ap_sta_set_vlan(struct hostapd_data *hapd, struct sta_info *sta,
 void ap_sta_start_sa_query(struct hostapd_data *hapd, struct sta_info *sta);
 void ap_sta_stop_sa_query(struct hostapd_data *hapd, struct sta_info *sta);
 int ap_check_sa_query_timeout(struct hostapd_data *hapd, struct sta_info *sta);
+const char * ap_sta_wpa_get_keyid(struct hostapd_data *hapd,
+				  struct sta_info *sta);
 void ap_sta_disconnect(struct hostapd_data *hapd, struct sta_info *sta,
 		       const u8 *addr, u16 reason);
 
