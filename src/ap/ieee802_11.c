@@ -62,6 +62,9 @@ prepare_auth_resp_fils(struct hostapd_data *hapd,
 		       const u8 *msk, size_t msk_len,
 		       int *is_pub);
 #endif /* CONFIG_FILS */
+static void handle_auth(struct hostapd_data *hapd,
+			const struct ieee80211_mgmt *mgmt, size_t len,
+			int rssi, int from_queue);
 
 u8 * hostapd_eid_supp_rates(struct hostapd_data *hapd, u8 *eid)
 {
@@ -493,7 +496,24 @@ static int use_sae_anti_clogging(struct hostapd_data *hapd)
 			return 1;
 	}
 
+	/* In addition to already existing open SAE sessions, check whether
+	 * there are enough pending commit messages in the processing queue to
+	 * potentially result in too many open sessions. */
+	if (open + dl_list_len(&hapd->sae_commit_queue) >=
+	    hapd->conf->sae_anti_clogging_threshold)
+		return 1;
+
 	return 0;
+}
+
+
+static u8 sae_token_hash(struct hostapd_data *hapd, const u8 *addr)
+{
+	u8 hash[SHA256_MAC_LEN];
+
+	hmac_sha256(hapd->sae_token_key, sizeof(hapd->sae_token_key),
+		    addr, ETH_ALEN, hash);
+	return hash[0];
 }
 
 
@@ -501,13 +521,32 @@ static int check_sae_token(struct hostapd_data *hapd, const u8 *addr,
 			   const u8 *token, size_t token_len)
 {
 	u8 mac[SHA256_MAC_LEN];
+	const u8 *addrs[2];
+	size_t len[2];
+	u16 token_idx;
+	u8 idx;
 
 	if (token_len != SHA256_MAC_LEN)
 		return -1;
-	if (hmac_sha256(hapd->sae_token_key, sizeof(hapd->sae_token_key),
-			addr, ETH_ALEN, mac) < 0 ||
-	    os_memcmp_const(token, mac, SHA256_MAC_LEN) != 0)
+	idx = sae_token_hash(hapd, addr);
+	token_idx = hapd->sae_pending_token_idx[idx];
+	if (token_idx == 0 || token_idx != WPA_GET_BE16(token)) {
+		wpa_printf(MSG_DEBUG, "SAE: Invalid anti-clogging token from "
+			   MACSTR " - token_idx 0x%04x, expected 0x%04x",
+			   MAC2STR(addr), WPA_GET_BE16(token), token_idx);
 		return -1;
+	}
+
+	addrs[0] = addr;
+	len[0] = ETH_ALEN;
+	addrs[1] = token;
+	len[1] = 2;
+	if (hmac_sha256_vector(hapd->sae_token_key, sizeof(hapd->sae_token_key),
+			       2, addrs, len, mac) < 0 ||
+	    os_memcmp_const(token + 2, &mac[2], SHA256_MAC_LEN - 2) != 0)
+		return -1;
+
+	hapd->sae_pending_token_idx[idx] = 0; /* invalidate used token */
 
 	return 0;
 }
@@ -519,16 +558,25 @@ static struct wpabuf * auth_build_token_req(struct hostapd_data *hapd,
 	struct wpabuf *buf;
 	u8 *token;
 	struct os_reltime now;
+	u8 idx[2];
+	const u8 *addrs[2];
+	size_t len[2];
+	u8 p_idx;
+	u16 token_idx;
 
 	os_get_reltime(&now);
 	if (!os_reltime_initialized(&hapd->last_sae_token_key_update) ||
-	    os_reltime_expired(&now, &hapd->last_sae_token_key_update, 60)) {
+	    os_reltime_expired(&now, &hapd->last_sae_token_key_update, 60) ||
+	    hapd->sae_token_idx == 0xffff) {
 		if (random_get_bytes(hapd->sae_token_key,
 				     sizeof(hapd->sae_token_key)) < 0)
 			return NULL;
 		wpa_hexdump(MSG_DEBUG, "SAE: Updated token key",
 			    hapd->sae_token_key, sizeof(hapd->sae_token_key));
 		hapd->last_sae_token_key_update = now;
+		hapd->sae_token_idx = 0;
+		os_memset(hapd->sae_pending_token_idx, 0,
+			  sizeof(hapd->sae_pending_token_idx));
 	}
 
 	buf = wpabuf_alloc(sizeof(le16) + SHA256_MAC_LEN);
@@ -537,9 +585,25 @@ static struct wpabuf * auth_build_token_req(struct hostapd_data *hapd,
 
 	wpabuf_put_le16(buf, group); /* Finite Cyclic Group */
 
+	p_idx = sae_token_hash(hapd, addr);
+	token_idx = hapd->sae_pending_token_idx[p_idx];
+	if (!token_idx) {
+		hapd->sae_token_idx++;
+		token_idx = hapd->sae_token_idx;
+		hapd->sae_pending_token_idx[p_idx] = token_idx;
+	}
+	WPA_PUT_BE16(idx, token_idx);
 	token = wpabuf_put(buf, SHA256_MAC_LEN);
-	hmac_sha256(hapd->sae_token_key, sizeof(hapd->sae_token_key),
-		    addr, ETH_ALEN, token);
+	addrs[0] = addr;
+	len[0] = ETH_ALEN;
+	addrs[1] = idx;
+	len[1] = sizeof(idx);
+	if (hmac_sha256_vector(hapd->sae_token_key, sizeof(hapd->sae_token_key),
+			       2, addrs, len, token) < 0) {
+		wpabuf_free(buf);
+		return NULL;
+	}
+	WPA_PUT_BE16(token, token_idx);
 
 	return buf;
 }
@@ -648,7 +712,7 @@ void sae_accept_sta(struct hostapd_data *hapd, struct sta_info *sta)
 
 
 static int sae_sm_step(struct hostapd_data *hapd, struct sta_info *sta,
-		       const u8 *bssid, u8 auth_transaction)
+		       const u8 *bssid, u8 auth_transaction, int allow_reuse)
 {
 	int ret;
 
@@ -661,7 +725,8 @@ static int sae_sm_step(struct hostapd_data *hapd, struct sta_info *sta,
 	switch (sta->sae->state) {
 	case SAE_NOTHING:
 		if (auth_transaction == 1) {
-			ret = auth_sae_send_commit(hapd, sta, bssid, 1);
+			ret = auth_sae_send_commit(hapd, sta, bssid,
+						   !allow_reuse);
 			if (ret)
 				return ret;
 			sae_set_state(sta, SAE_COMMITTED, "Sent Commit");
@@ -750,7 +815,8 @@ static int sae_sm_step(struct hostapd_data *hapd, struct sta_info *sta,
 			 * step to get to Accepted without waiting for
 			 * additional events.
 			 */
-			return sae_sm_step(hapd, sta, bssid, auth_transaction);
+			return sae_sm_step(hapd, sta, bssid, auth_transaction,
+					   0);
 		}
 		break;
 	case SAE_CONFIRMED:
@@ -820,18 +886,21 @@ static void sae_pick_next_group(struct hostapd_data *hapd, struct sta_info *sta)
 {
 	struct sae_data *sae = sta->sae;
 	int i, *groups = hapd->conf->sae_groups;
+	int default_groups[] = { 19, 0 };
 
 	if (sae->state != SAE_COMMITTED)
 		return;
 
 	wpa_printf(MSG_DEBUG, "SAE: Previously selected group: %d", sae->group);
 
-	for (i = 0; groups && groups[i] > 0; i++) {
+	if (!groups)
+		groups = default_groups;
+	for (i = 0; groups[i] > 0; i++) {
 		if (sae->group == groups[i])
 			break;
 	}
 
-	if (!groups || groups[i] <= 0) {
+	if (groups[i] <= 0) {
 		wpa_printf(MSG_DEBUG,
 			   "SAE: Previously selected group not found from the current configuration");
 		return;
@@ -860,6 +929,11 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 {
 	int resp = WLAN_STATUS_SUCCESS;
 	struct wpabuf *data = NULL;
+	int *groups = hapd->conf->sae_groups;
+	int default_groups[] = { 19, 0 };
+
+	if (!groups)
+		groups = default_groups;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (hapd->conf->sae_reflection_attack && auth_transaction == 1) {
@@ -909,6 +983,8 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 	if (auth_transaction == 1) {
 		const u8 *token = NULL, *pos, *end;
 		size_t token_len = 0;
+		int allow_reuse = 0;
+
 		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
 			       HOSTAPD_LEVEL_DEBUG,
 			       "start SAE authentication (RX commit, status=%u)",
@@ -925,8 +1001,7 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 				resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
 				goto reply;
 			}
-			resp = sae_group_allowed(sta->sae,
-						 hapd->conf->sae_groups,
+			resp = sae_group_allowed(sta->sae, groups,
 						 WPA_GET_LE16(pos));
 			if (resp != WLAN_STATUS_SUCCESS) {
 				wpa_printf(MSG_ERROR,
@@ -987,15 +1062,28 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 			 * to use a different group and that would not be
 			 * allowed if we remain in Committed state with the
 			 * previously set parameters. */
-			sae_set_state(sta, SAE_NOTHING,
-				      "Clear existing state to allow restart");
-			sae_clear_data(sta->sae);
+			pos = mgmt->u.auth.variable;
+			end = ((const u8 *) mgmt) + len;
+			if (end - pos >= (int) sizeof(le16) &&
+			    sae_group_allowed(sta->sae, groups,
+					      WPA_GET_LE16(pos)) ==
+			    WLAN_STATUS_SUCCESS) {
+				/* Do not waste resources deriving the same PWE
+				 * again since the same group is reused. */
+				sae_set_state(sta, SAE_NOTHING,
+					      "Allow previous PWE to be reused");
+				allow_reuse = 1;
+			} else {
+				sae_set_state(sta, SAE_NOTHING,
+					      "Clear existing state to allow restart");
+				sae_clear_data(sta->sae);
+			}
 		}
 
 		resp = sae_parse_commit(sta->sae, mgmt->u.auth.variable,
 					((const u8 *) mgmt) + len -
 					mgmt->u.auth.variable, &token,
-					&token_len, hapd->conf->sae_groups);
+					&token_len, groups);
 		if (resp == SAE_SILENTLY_DISCARD) {
 			wpa_printf(MSG_DEBUG,
 				   "SAE: Drop commit message from " MACSTR " due to reflection attack",
@@ -1025,7 +1113,7 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 		if (resp != WLAN_STATUS_SUCCESS)
 			goto reply;
 
-		if (!token && use_sae_anti_clogging(hapd)) {
+		if (!token && use_sae_anti_clogging(hapd) && !allow_reuse) {
 			wpa_printf(MSG_DEBUG,
 				   "SAE: Request anti-clogging token from "
 				   MACSTR, MAC2STR(sta->addr));
@@ -1038,7 +1126,8 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 			goto reply;
 		}
 
-		resp = sae_sm_step(hapd, sta, mgmt->bssid, auth_transaction);
+		resp = sae_sm_step(hapd, sta, mgmt->bssid, auth_transaction,
+				   allow_reuse);
 	} else if (auth_transaction == 2) {
 		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
 			       HOSTAPD_LEVEL_DEBUG,
@@ -1079,7 +1168,7 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 			}
 			sta->sae->rc = peer_send_confirm;
 		}
-		resp = sae_sm_step(hapd, sta, mgmt->bssid, auth_transaction);
+		resp = sae_sm_step(hapd, sta, mgmt->bssid, auth_transaction, 0);
 	} else {
 		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
 			       HOSTAPD_LEVEL_DEBUG,
@@ -1136,6 +1225,105 @@ int auth_sae_init_committed(struct hostapd_data *hapd, struct sta_info *sta)
 	sae_set_state(sta, SAE_COMMITTED, "Init and sent commit");
 	sta->sae->sync = 0;
 	sae_set_retransmit_timer(hapd, sta);
+
+	return 0;
+}
+
+
+void auth_sae_process_commit(void *eloop_ctx, void *user_ctx)
+{
+	struct hostapd_data *hapd = eloop_ctx;
+	struct hostapd_sae_commit_queue *q;
+	unsigned int queue_len;
+
+	q = dl_list_first(&hapd->sae_commit_queue,
+			  struct hostapd_sae_commit_queue, list);
+	if (!q)
+		return;
+	wpa_printf(MSG_DEBUG,
+		   "SAE: Process next available message from queue");
+	dl_list_del(&q->list);
+	handle_auth(hapd, (const struct ieee80211_mgmt *) q->msg, q->len,
+		    q->rssi, 1);
+	os_free(q);
+
+	if (eloop_is_timeout_registered(auth_sae_process_commit, hapd, NULL))
+		return;
+	queue_len = dl_list_len(&hapd->sae_commit_queue);
+	eloop_register_timeout(0, queue_len * 10000, auth_sae_process_commit,
+			       hapd, NULL);
+}
+
+
+static void auth_sae_queue(struct hostapd_data *hapd,
+			   const struct ieee80211_mgmt *mgmt, size_t len,
+			   int rssi)
+{
+	struct hostapd_sae_commit_queue *q, *q2;
+	unsigned int queue_len;
+	const struct ieee80211_mgmt *mgmt2;
+
+	queue_len = dl_list_len(&hapd->sae_commit_queue);
+	if (queue_len >= 15) {
+		wpa_printf(MSG_DEBUG,
+			   "SAE: No more room in message queue - drop the new frame from "
+			   MACSTR, MAC2STR(mgmt->sa));
+		return;
+	}
+
+	wpa_printf(MSG_DEBUG, "SAE: Queue Authentication message from "
+		   MACSTR " for processing (queue_len %u)", MAC2STR(mgmt->sa),
+		   queue_len);
+	q = os_zalloc(sizeof(*q) + len);
+	if (!q)
+		return;
+	q->rssi = rssi;
+	q->len = len;
+	os_memcpy(q->msg, mgmt, len);
+
+	/* Check whether there is already a queued Authentication frame from the
+	 * same station with the same transaction number and if so, replace that
+	 * queue entry with the new one. This avoids issues with a peer that
+	 * sends multiple times (e.g., due to frequent SAE retries). There is no
+	 * point in us trying to process the old attempts after a new one has
+	 * obsoleted them. */
+	dl_list_for_each(q2, &hapd->sae_commit_queue,
+			 struct hostapd_sae_commit_queue, list) {
+		mgmt2 = (const struct ieee80211_mgmt *) q2->msg;
+		if (os_memcmp(mgmt->sa, mgmt2->sa, ETH_ALEN) == 0 &&
+		    mgmt->u.auth.auth_transaction ==
+		    mgmt2->u.auth.auth_transaction) {
+			wpa_printf(MSG_DEBUG,
+				   "SAE: Replace queued message from same STA with same transaction number");
+			dl_list_add(&q2->list, &q->list);
+			dl_list_del(&q2->list);
+			os_free(q2);
+			goto queued;
+		}
+	}
+
+	/* No pending identical entry, so add to the end of the queue */
+	dl_list_add_tail(&hapd->sae_commit_queue, &q->list);
+
+queued:
+	if (eloop_is_timeout_registered(auth_sae_process_commit, hapd, NULL))
+		return;
+	eloop_register_timeout(0, queue_len * 10000, auth_sae_process_commit,
+			       hapd, NULL);
+}
+
+
+static int auth_sae_queued_addr(struct hostapd_data *hapd, const u8 *addr)
+{
+	struct hostapd_sae_commit_queue *q;
+	const struct ieee80211_mgmt *mgmt;
+
+	dl_list_for_each(q, &hapd->sae_commit_queue,
+			 struct hostapd_sae_commit_queue, list) {
+		mgmt = (const struct ieee80211_mgmt *) q->msg;
+		if (os_memcmp(addr, mgmt->sa, ETH_ALEN) == 0)
+			return 1;
+	}
 
 	return 0;
 }
@@ -1769,7 +1957,8 @@ ieee802_11_set_radius_info(struct hostapd_data *hapd, struct sta_info *sta,
 
 
 static void handle_auth(struct hostapd_data *hapd,
-			const struct ieee80211_mgmt *mgmt, size_t len)
+			const struct ieee80211_mgmt *mgmt, size_t len,
+			int rssi, int from_queue)
 {
 	u16 auth_alg, auth_transaction, status_code;
 	u16 resp = WLAN_STATUS_SUCCESS;
@@ -1816,11 +2005,12 @@ static void handle_auth(struct hostapd_data *hapd,
 
 	wpa_printf(MSG_DEBUG, "authentication: STA=" MACSTR " auth_alg=%d "
 		   "auth_transaction=%d status_code=%d wep=%d%s "
-		   "seq_ctrl=0x%x%s",
+		   "seq_ctrl=0x%x%s%s",
 		   MAC2STR(mgmt->sa), auth_alg, auth_transaction,
 		   status_code, !!(fc & WLAN_FC_ISWEP),
 		   challenge ? " challenge" : "",
-		   seq_ctrl, (fc & WLAN_FC_RETRY) ? " retry" : "");
+		   seq_ctrl, (fc & WLAN_FC_RETRY) ? " retry" : "",
+		   from_queue ? " (from queue)" : "");
 
 #ifdef CONFIG_NO_RC4
 	if (auth_alg == WLAN_AUTH_SHARED_KEY) {
@@ -1947,6 +2137,22 @@ static void handle_auth(struct hostapd_data *hapd,
 	}
 	if (res == HOSTAPD_ACL_PENDING)
 		return;
+
+#ifdef CONFIG_SAE
+	if (auth_alg == WLAN_AUTH_SAE && !from_queue &&
+	    (auth_transaction == 1 ||
+	     (auth_transaction == 2 && auth_sae_queued_addr(hapd, mgmt->sa)))) {
+		/* Handle SAE Authentication commit message through a queue to
+		 * provide more control for postponing the needed heavy
+		 * processing under a possible DoS attack scenario. In addition,
+		 * queue SAE Authentication confirm message if there happens to
+		 * be a queued commit message from the same peer. This is needed
+		 * to avoid reordering Authentication frames within the same
+		 * SAE exchange. */
+		auth_sae_queue(hapd, mgmt, len, rssi);
+		return;
+	}
+#endif /* CONFIG_SAE */
 
 	sta = ap_get_sta(hapd, mgmt->sa);
 	if (sta) {
@@ -4165,7 +4371,7 @@ int ieee802_11_mgmt(struct hostapd_data *hapd, const u8 *buf, size_t len,
 	switch (stype) {
 	case WLAN_FC_STYPE_AUTH:
 		wpa_printf(MSG_DEBUG, "mgmt::auth");
-		handle_auth(hapd, mgmt, len);
+		handle_auth(hapd, mgmt, len, ssi_signal, 0);
 		ret = 1;
 		break;
 	case WLAN_FC_STYPE_ASSOC_REQ:
