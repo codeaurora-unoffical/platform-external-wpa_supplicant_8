@@ -465,8 +465,8 @@ HostapdStatus HostapdVendor::addVendorAccessPointInternal(
 	// Create OWE Iface.
 	std::string ifaceNameOwe = StringPrintf(kOweSuffixFmt, ifaceName.c_str());
 	char ifaceNameOwe_str[32] = {0};
-	strncpy(ifaceNameOwe_str, ifaceNameOwe.c_str(),
-		sizeof(ifaceNameOwe_str)-1); // -1 to null terminated
+	strlcpy(ifaceNameOwe_str, ifaceNameOwe.c_str(),
+		sizeof(ifaceNameOwe_str)); // -1 to null terminated
 	qsap_cmd(StringPrintf("softap create %s", ifaceNameOwe_str));
 
 	// Get OWE Iface Mac address.
@@ -557,8 +557,8 @@ HostapdStatus HostapdVendor::removeVendorAccessPointInternal(const std::string& 
 #ifdef CONFIG_OWE
 	std::string ifaceNameOwe = StringPrintf(kOweSuffixFmt, iface_name.c_str());
 	char ifaceNameOwe_str[32] = {0};
-	strncpy(ifaceNameOwe_str, ifaceNameOwe.c_str(),
-		sizeof(ifaceNameOwe_str)-1); // -1 to null terminated
+	strlcpy(ifaceNameOwe_str, ifaceNameOwe.c_str(),
+		sizeof(ifaceNameOwe_str)); // -1 to null terminated
 	if (if_nametoindex(ifaceNameOwe_str)) {
 		wpa_printf(MSG_DEBUG, "removed OWE-trans iface=%s", ifaceNameOwe_str);
 		qsap_cmd(StringPrintf("softap remove %s", ifaceNameOwe.c_str()));
