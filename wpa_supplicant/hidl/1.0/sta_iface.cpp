@@ -863,7 +863,7 @@ SupplicantStatus StaIface::startWpsPbcInternal(
 	struct wpa_supplicant *wpa_s = retrieveIfacePtr();
 	const uint8_t *bssid_addr =
 	    is_zero_ether_addr(bssid.data()) ? nullptr : bssid.data();
-	if (wpas_wps_start_pbc(wpa_s, bssid_addr, 0)) {
+	if (wpas_wps_start_pbc(wpa_s, bssid_addr, 0, 0)) {
 		return {SupplicantStatusCode::FAILURE_UNKNOWN, ""};
 	}
 	return {SupplicantStatusCode::SUCCESS, ""};
