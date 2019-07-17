@@ -127,9 +127,9 @@ static char bin_to_hexchar(u8 ch);
 static void wpa_qmi_client_indication_cb
 (
         qmi_client_type                user_handle,
-        unsigned long                  msg_id,
-        unsigned char                 *ind_buf_ptr,
-        int                            ind_buf_len,
+        unsigned int                   msg_id,
+        void                          *ind_buf_ptr,
+        unsigned int                   ind_buf_len,
         void                          *ind_cb_data
 );
 static void dump_buff(u8 *buff, int len);
@@ -158,14 +158,28 @@ static Boolean wpa_qmi_register_auth_inds(int sim_num, struct eap_proxy_sm *eap_
 #define EAP_SUB_TYPE_AKA_IDENTITY  0x05
 #define EAP_RESP_TYPE_NAK             3
 
+// Define static global eap_proxy
+#define MAX_EAP_PROXY_INTERFACE 4
+static struct eap_proxy_sm eap_proxy_gb[MAX_EAP_PROXY_INTERFACE];
+
+static struct eap_proxy_sm * get_next_eap_proxy()
+{
+	for (int i = 0; i < MAX_EAP_PROXY_INTERFACE; i++) {
+		if (eap_proxy_gb[i].initialized)
+			continue;
+		return &eap_proxy_gb[i];
+	}
+	wpa_printf(MSG_ERROR, "eap_proxy: All interfaces are in use. max=%d", MAX_EAP_PROXY_INTERFACE);
+	return NULL;
+}
 
 #ifdef SIM_AKA_IDENTITY_IMSI
 static void wpa_qmi_client_indication_cb
 (
         qmi_client_type                user_handle,
-        unsigned long                  msg_id,
-        unsigned char                 *ind_buf_ptr,
-        int                            ind_buf_len,
+        unsigned int                   msg_id,
+        void                          *ind_buf_ptr,
+        unsigned int                   ind_buf_len,
         void                          *ind_cb_data
 )
 {
@@ -177,14 +191,14 @@ static void wpa_qmi_client_indication_cb
 	struct wpa_supplicant *wpa_s = NULL;
 	u32 i, card_info_len = 0;
 
-	wpa_printf(MSG_ERROR, "eap_proxy: %s: msg_id=0x%lx", __func__, msg_id);
+	wpa_printf(MSG_ERROR, "eap_proxy: %s: msg_id=0x%08x", __func__, msg_id);
 
 	if (user_handle == NULL) {
 		wpa_printf(MSG_ERROR, "eap_proxy: qmi_client_type missing in callback");
 		return;
 	}
 
-	if (eap_proxy == NULL) {
+	if (!eap_proxy->initialized) {
 		wpa_printf(MSG_ERROR, "eap_proxy: not initialized, discard client indiataion");
 		return;
 	}
@@ -236,7 +250,7 @@ static void wpa_qmi_client_indication_cb
 			}
 			break;
 		default:
-			wpa_printf(MSG_ERROR, "eap_proxy: Unknown QMI Indicaiton %lu", msg_id);
+			wpa_printf(MSG_ERROR, "eap_proxy: Unknown QMI Indicaiton %u", msg_id);
 			break;
 		}
 	}
@@ -675,6 +689,10 @@ void wpa_qmi_register_notification(void *eloop_ctx, void *timeout_ctx)
         struct eap_proxy_sm *eap_proxy = eloop_ctx;
         wpa_printf(MSG_ERROR, "eap_proxy: %s", __func__);
 
+        if (!eap_proxy->initialized) {
+                wpa_printf(MSG_ERROR, "eap_proxy: %s Skip processing SSR (eap_proxy deinitialized)", __func__);
+                return;
+        }
         eap_proxy_qmi_deinit(eap_proxy);
         eap_proxy_post_init(eap_proxy);
 }
@@ -893,13 +911,12 @@ eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
         int ret;
 
         wpa_printf(MSG_ERROR, "eap_proxy: %s", __func__);
-        eap_proxy =  os_zalloc(sizeof(struct eap_proxy_sm));
-        if (NULL == eap_proxy) {
-                wpa_printf(MSG_ERROR, "Error memory alloc  for eap_proxy"
-                        "eap_proxy_init\n");
+        eap_proxy = get_next_eap_proxy();
+        if (NULL == eap_proxy)
                 return NULL;
-        }
+
         os_memset(eap_proxy, 0, sizeof(*eap_proxy));
+        eap_proxy->initialized = TRUE;
         eap_proxy->ctx = eapol_ctx;
         eap_proxy->eapol_cb = eapol_cb;
         eap_proxy->msg_ctx = msg_ctx;
@@ -921,10 +938,9 @@ eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
                goto fail;
         }
 
-         return eap_proxy;
+        return eap_proxy;
 fail:
-        os_free(eap_proxy);
-        eap_proxy = NULL;
+        eap_proxy->initialized = FALSE;
         return NULL;
 }
 
@@ -935,7 +951,7 @@ static void eap_proxy_qmi_deinit(struct eap_proxy_sm *eap_proxy)
         int index;
         wpa_uim_struct_type *wpa_uim = NULL;
 
-        if (NULL == eap_proxy)
+        if (!eap_proxy->initialized)
                 return;
         /* Waiting for eap_proxy_post_init to exit normally.
          * The eap_proxy_post_init may wait for QMI responese.
@@ -1015,9 +1031,8 @@ static void eap_proxy_qmi_deinit(struct eap_proxy_sm *eap_proxy)
 void eap_proxy_deinit(struct eap_proxy_sm *eap_proxy)
 {
         eap_proxy_qmi_deinit(eap_proxy);
-        if (eap_proxy != NULL) {
-            os_free(eap_proxy);
-            eap_proxy = NULL;
+        if (eap_proxy->initialized) {
+            eap_proxy->initialized = FALSE;
             wpa_printf(MSG_INFO, "eap_proxy: eap_proxy Deinitialzed\n");
         }
 }
@@ -1112,8 +1127,8 @@ static void handle_qmi_eap_reply(
         u32 length;
 
         wpa_printf(MSG_ERROR, "eap_proxy: %s started\n", __func__);
-        if (eap_proxy == NULL) {
-                wpa_printf(MSG_ERROR, "eap_proxy: eap_proxy is NULL");
+        if (!eap_proxy->initialized) {
+                wpa_printf(MSG_ERROR, "eap_proxy: eap_proxy is not initialized");
                 goto done;
         }
         if (QMI_STATE_RESP_PENDING == eap_proxy->qmi_state) {
@@ -1682,7 +1697,7 @@ struct wpabuf * eap_proxy_get_eapRespData(struct eap_proxy_sm *eap_proxy)
         //int i;
 
         wpa_printf(MSG_ERROR, "eap_proxy: eap_proxy_get_eapRespData");
-        if ( (eap_proxy == NULL) ||
+        if ( (!eap_proxy->initialized) ||
              (eap_proxy->qmi_resp_data.eap_send_pkt_resp.resp_data == NULL)
            )
         {
