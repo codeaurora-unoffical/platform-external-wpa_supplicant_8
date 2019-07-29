@@ -3,8 +3,7 @@ CREATE TABLE users(
 	methods TEXT,
 	password TEXT,
 	remediation TEXT,
-	phase2 INTEGER,
-	t_c_timestamp INTEGER
+	phase2 INTEGER
 );
 
 CREATE TABLE wildcards(
@@ -24,19 +23,4 @@ CREATE TABLE authlog(
 	nas_ip TEXT,
 	username TEXT,
 	note TEXT
-);
-
-CREATE TABLE pending_tc(
-	mac_addr TEXT PRIMARY KEY,
-	identity TEXT
-);
-
-CREATE TABLE current_sessions(
-	mac_addr TEXT PRIMARY KEY,
-	identity TEXT,
-	start_time TEXT,
-	nas TEXT,
-	hs20_t_c_filtering BOOLEAN,
-	waiting_coa_ack BOOLEAN,
-	coa_ack_received BOOLEAN
 );

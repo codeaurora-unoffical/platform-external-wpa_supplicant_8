@@ -1,6 +1,6 @@
 /*
  * Control interface for shared AP commands
- * Copyright (c) 2004-2019, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2014, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -26,141 +26,23 @@
 #include "taxonomy.h"
 
 
-static size_t hostapd_write_ht_mcs_bitmask(char *buf, size_t buflen,
-					   size_t curr_len, const u8 *mcs_set)
-{
-	int ret;
-	size_t len = curr_len;
-
-	ret = os_snprintf(buf + len, buflen - len,
-			  "ht_mcs_bitmask=");
-	if (os_snprintf_error(buflen - len, ret))
-		return len;
-	len += ret;
-
-	/* 77 first bits (+ 3 reserved bits) */
-	len += wpa_snprintf_hex(buf + len, buflen - len, mcs_set, 10);
-
-	ret = os_snprintf(buf + len, buflen - len, "\n");
-	if (os_snprintf_error(buflen - len, ret))
-		return curr_len;
-	len += ret;
-
-	return len;
-}
-
-
 static int hostapd_get_sta_tx_rx(struct hostapd_data *hapd,
 				 struct sta_info *sta,
 				 char *buf, size_t buflen)
 {
 	struct hostap_sta_driver_data data;
 	int ret;
-	int len = 0;
 
 	if (hostapd_drv_read_sta_data(hapd, &data, sta->addr) < 0)
 		return 0;
 
 	ret = os_snprintf(buf, buflen, "rx_packets=%lu\ntx_packets=%lu\n"
-			  "rx_bytes=%llu\ntx_bytes=%llu\ninactive_msec=%lu\n"
-			  "signal=%d\n",
+			  "rx_bytes=%llu\ntx_bytes=%llu\ninactive_msec=%lu\n",
 			  data.rx_packets, data.tx_packets,
-			  data.rx_bytes, data.tx_bytes, data.inactive_msec,
-			  data.signal);
+			  data.rx_bytes, data.tx_bytes, data.inactive_msec);
 	if (os_snprintf_error(buflen, ret))
 		return 0;
-	len += ret;
-
-	ret = os_snprintf(buf + len, buflen - len, "rx_rate_info=%lu",
-			  data.current_rx_rate);
-	if (os_snprintf_error(buflen - len, ret))
-		return len;
-	len += ret;
-	if (data.flags & STA_DRV_DATA_RX_MCS) {
-		ret = os_snprintf(buf + len, buflen - len, " mcs %u",
-				  data.rx_mcs);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	if (data.flags & STA_DRV_DATA_RX_VHT_MCS) {
-		ret = os_snprintf(buf + len, buflen - len, " vhtmcs %u",
-				  data.rx_vhtmcs);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	if (data.flags & STA_DRV_DATA_RX_VHT_NSS) {
-		ret = os_snprintf(buf + len, buflen - len, " vhtnss %u",
-				  data.rx_vht_nss);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	if (data.flags & STA_DRV_DATA_RX_SHORT_GI) {
-		ret = os_snprintf(buf + len, buflen - len, " shortGI");
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	ret = os_snprintf(buf + len, buflen - len, "\n");
-	if (!os_snprintf_error(buflen - len, ret))
-		len += ret;
-
-	ret = os_snprintf(buf + len, buflen - len, "tx_rate_info=%lu",
-			  data.current_tx_rate);
-	if (os_snprintf_error(buflen - len, ret))
-		return len;
-	len += ret;
-	if (data.flags & STA_DRV_DATA_TX_MCS) {
-		ret = os_snprintf(buf + len, buflen - len, " mcs %u",
-				  data.tx_mcs);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	if (data.flags & STA_DRV_DATA_TX_VHT_MCS) {
-		ret = os_snprintf(buf + len, buflen - len, " vhtmcs %u",
-				  data.tx_vhtmcs);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	if (data.flags & STA_DRV_DATA_TX_VHT_NSS) {
-		ret = os_snprintf(buf + len, buflen - len, " vhtnss %u",
-				  data.tx_vht_nss);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	if (data.flags & STA_DRV_DATA_TX_SHORT_GI) {
-		ret = os_snprintf(buf + len, buflen - len, " shortGI");
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-	ret = os_snprintf(buf + len, buflen - len, "\n");
-	if (!os_snprintf_error(buflen - len, ret))
-		len += ret;
-
-	if ((sta->flags & WLAN_STA_VHT) && sta->vht_capabilities) {
-		ret = os_snprintf(buf + len, buflen - len,
-				  "rx_vht_mcs_map=%04x\n"
-				  "tx_vht_mcs_map=%04x\n",
-				  le_to_host16(sta->vht_capabilities->
-					       vht_supported_mcs_set.rx_map),
-				  le_to_host16(sta->vht_capabilities->
-					       vht_supported_mcs_set.tx_map));
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-
-	if ((sta->flags & WLAN_STA_HT) && sta->ht_capabilities) {
-		len = hostapd_write_ht_mcs_bitmask(buf, buflen, len,
-						   sta->ht_capabilities->
-						   supported_mcs_set);
-	}
-
-	if (data.flags & STA_DRV_DATA_LAST_ACK_RSSI) {
-		ret = os_snprintf(buf + len, buflen - len,
-				  "last_ack_signal=%d\n", data.last_ack_rssi);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-
-	return len;
+	return ret;
 }
 
 
@@ -207,7 +89,6 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 				      char *buf, size_t buflen)
 {
 	int len, res, ret, i;
-	const char *keyid;
 
 	if (!sta)
 		return 0;
@@ -293,60 +174,6 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 					sta->supp_op_classes + 1,
 					sta->supp_op_classes[0]);
 		len += os_snprintf(buf + len, buflen - len, "\n");
-	}
-
-	if (sta->power_capab) {
-		ret = os_snprintf(buf + len, buflen - len,
-				  "min_txpower=%d\n"
-				  "max_txpower=%d\n",
-				  sta->min_tx_power, sta->max_tx_power);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-
-#ifdef CONFIG_IEEE80211AC
-	if ((sta->flags & WLAN_STA_VHT) && sta->vht_capabilities) {
-		res = os_snprintf(buf + len, buflen - len,
-				  "vht_caps_info=0x%08x\n",
-				  le_to_host32(sta->vht_capabilities->
-					       vht_capabilities_info));
-		if (!os_snprintf_error(buflen - len, res))
-			len += res;
-	}
-#endif /* CONFIG_IEEE80211AC */
-
-#ifdef CONFIG_IEEE80211N
-	if ((sta->flags & WLAN_STA_HT) && sta->ht_capabilities) {
-		res = os_snprintf(buf + len, buflen - len,
-				  "ht_caps_info=0x%04x\n",
-				  le_to_host16(sta->ht_capabilities->
-					       ht_capabilities_info));
-		if (!os_snprintf_error(buflen - len, res))
-			len += res;
-	}
-#endif /* CONFIG_IEEE80211N */
-
-	if (sta->ext_capability &&
-	    buflen - len > (unsigned) (11 + 2 * sta->ext_capability[0])) {
-		len += os_snprintf(buf + len, buflen - len, "ext_capab=");
-		len += wpa_snprintf_hex(buf + len, buflen - len,
-					sta->ext_capability + 1,
-					sta->ext_capability[0]);
-		len += os_snprintf(buf + len, buflen - len, "\n");
-	}
-
-	if (sta->flags & WLAN_STA_WDS && sta->ifname_wds) {
-		ret = os_snprintf(buf + len, buflen - len,
-				  "wds_sta_ifname=%s\n", sta->ifname_wds);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
-	}
-
-	keyid = ap_sta_wpa_get_keyid(hapd, sta);
-	if (keyid) {
-		ret = os_snprintf(buf + len, buflen - len, "keyid=%s\n", keyid);
-		if (!os_snprintf_error(buflen - len, ret))
-			len += ret;
 	}
 
 	return len;
@@ -451,11 +278,11 @@ static int p2p_manager_disconnect(struct hostapd_data *hapd, u16 stype,
 	if (stype == WLAN_FC_STYPE_DEAUTH) {
 		mgmt->u.deauth.reason_code =
 			host_to_le16(WLAN_REASON_PREV_AUTH_NOT_VALID);
-		pos = mgmt->u.deauth.variable;
+		pos = (u8 *) (&mgmt->u.deauth.reason_code + 1);
 	} else {
 		mgmt->u.disassoc.reason_code =
 			host_to_le16(WLAN_REASON_PREV_AUTH_NOT_VALID);
-		pos = mgmt->u.disassoc.variable;
+		pos = (u8 *) (&mgmt->u.disassoc.reason_code + 1);
 	}
 
 	*pos++ = WLAN_EID_VENDOR_SPECIFIC;
@@ -650,8 +477,7 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 			      size_t buflen)
 {
 	struct hostapd_iface *iface = hapd->iface;
-	struct hostapd_hw_modes *mode = iface->current_mode;
-	int len = 0, ret, j;
+	int len = 0, ret;
 	size_t i;
 
 	ret = os_snprintf(buf + len, buflen - len,
@@ -711,17 +537,13 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 			  "channel=%u\n"
 			  "secondary_channel=%d\n"
 			  "ieee80211n=%d\n"
-			  "ieee80211ac=%d\n"
-			  "beacon_int=%u\n"
-			  "dtim_period=%d\n",
+			  "ieee80211ac=%d\n",
 			  iface->conf->channel,
 			  iface->conf->ieee80211n && !hapd->conf->disable_11n ?
 			  iface->conf->secondary_channel : 0,
 			  iface->conf->ieee80211n && !hapd->conf->disable_11n,
 			  iface->conf->ieee80211ac &&
-			  !hapd->conf->disable_11ac,
-			  iface->conf->beacon_int,
-			  hapd->conf->dtim_period);
+			  !hapd->conf->disable_11ac);
 	if (os_snprintf_error(buflen - len, ret))
 		return len;
 	len += ret;
@@ -729,74 +551,13 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 		ret = os_snprintf(buf + len, buflen - len,
 				  "vht_oper_chwidth=%d\n"
 				  "vht_oper_centr_freq_seg0_idx=%d\n"
-				  "vht_oper_centr_freq_seg1_idx=%d\n"
-				  "vht_caps_info=%08x\n",
+				  "vht_oper_centr_freq_seg1_idx=%d\n",
 				  iface->conf->vht_oper_chwidth,
 				  iface->conf->vht_oper_centr_freq_seg0_idx,
-				  iface->conf->vht_oper_centr_freq_seg1_idx,
-				  iface->conf->vht_capab);
+				  iface->conf->vht_oper_centr_freq_seg1_idx);
 		if (os_snprintf_error(buflen - len, ret))
 			return len;
 		len += ret;
-	}
-
-	if (iface->conf->ieee80211ac && !hapd->conf->disable_11ac && mode) {
-		u16 rxmap = WPA_GET_LE16(&mode->vht_mcs_set[0]);
-		u16 txmap = WPA_GET_LE16(&mode->vht_mcs_set[4]);
-
-		ret = os_snprintf(buf + len, buflen - len,
-				  "rx_vht_mcs_map=%04x\n"
-				  "tx_vht_mcs_map=%04x\n",
-				  rxmap, txmap);
-		if (os_snprintf_error(buflen - len, ret))
-			return len;
-		len += ret;
-	}
-
-	if (iface->conf->ieee80211n && !hapd->conf->disable_11n) {
-		ret = os_snprintf(buf + len, buflen - len,
-				  "ht_caps_info=%04x\n",
-				  hapd->iconf->ht_capab);
-		if (os_snprintf_error(buflen - len, ret))
-			return len;
-		len += ret;
-	}
-
-	if (iface->conf->ieee80211n && !hapd->conf->disable_11n && mode) {
-		len = hostapd_write_ht_mcs_bitmask(buf, buflen, len,
-						   mode->mcs_set);
-	}
-
-	if (iface->current_rates && iface->num_rates) {
-		ret = os_snprintf(buf + len, buflen - len, "supported_rates=");
-		if (os_snprintf_error(buflen - len, ret))
-			return len;
-		len += ret;
-
-		for (j = 0; j < iface->num_rates; j++) {
-			ret = os_snprintf(buf + len, buflen - len, "%s%02x",
-					  j > 0 ? " " : "",
-					  iface->current_rates[j].rate / 5);
-			if (os_snprintf_error(buflen - len, ret))
-				return len;
-			len += ret;
-		}
-		ret = os_snprintf(buf + len, buflen - len, "\n");
-		if (os_snprintf_error(buflen - len, ret))
-			return len;
-		len += ret;
-	}
-
-	for (j = 0; mode && j < mode->num_channels; j++) {
-		if (mode->channels[j].freq == iface->freq) {
-			ret = os_snprintf(buf + len, buflen - len,
-					  "max_txpower=%u\n",
-					  mode->channels[j].max_tx_power);
-			if (os_snprintf_error(buflen - len, ret))
-				return len;
-			len += ret;
-			break;
-		}
 	}
 
 	for (i = 0; i < iface->num_bss; i++) {
@@ -812,15 +573,6 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 				  wpa_ssid_txt(bss->conf->ssid.ssid,
 					       bss->conf->ssid.ssid_len),
 				  (int) i, bss->num_sta);
-		if (os_snprintf_error(buflen - len, ret))
-			return len;
-		len += ret;
-	}
-
-	if (hapd->conf->chan_util_avg_period) {
-		ret = os_snprintf(buf + len, buflen - len,
-				  "chan_util_avg=%u\n",
-				  iface->chan_util_average);
 		if (os_snprintf_error(buflen - len, ret))
 			return len;
 		len += ret;

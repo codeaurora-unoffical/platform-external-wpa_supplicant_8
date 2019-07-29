@@ -18,7 +18,6 @@ struct wpa_sm;
 struct eapol_sm;
 struct wpa_config_blob;
 struct hostapd_freq_params;
-struct wpa_channel_info;
 
 struct wpa_sm_ctx {
 	void *ctx; /* pointer to arbitrary upper level context */
@@ -83,7 +82,6 @@ struct wpa_sm_ctx {
 	int (*key_mgmt_set_pmk)(void *ctx, const u8 *pmk, size_t pmk_len);
 	void (*fils_hlp_rx)(void *ctx, const u8 *dst, const u8 *src,
 			    const u8 *pkt, size_t pkt_len);
-	int (*channel_info)(void *ctx, struct wpa_channel_info *ci);
 };
 
 
@@ -97,12 +95,12 @@ enum wpa_sm_conf_params {
 	WPA_PARAM_KEY_MGMT,
 	WPA_PARAM_MGMT_GROUP,
 	WPA_PARAM_RSN_ENABLED,
-	WPA_PARAM_MFP,
-	WPA_PARAM_OCV
+	WPA_PARAM_MFP
 };
 
 struct rsn_supp_config {
 	void *network_ctx;
+	int peerkey_enabled;
 	int allowed_pairwise_cipher; /* bitfield of WPA_CIPHER_* */
 	int proactive_key_caching;
 	int eap_workaround;
@@ -144,7 +142,6 @@ int wpa_sm_set_param(struct wpa_sm *sm, enum wpa_sm_conf_params param,
 int wpa_sm_get_status(struct wpa_sm *sm, char *buf, size_t buflen,
 		      int verbose);
 int wpa_sm_pmf_enabled(struct wpa_sm *sm);
-int wpa_sm_ocv_enabled(struct wpa_sm *sm);
 
 void wpa_sm_key_request(struct wpa_sm *sm, int error, int pairwise);
 
@@ -283,11 +280,6 @@ static inline int wpa_sm_pmf_enabled(struct wpa_sm *sm)
 	return 0;
 }
 
-static inline int wpa_sm_ocv_enabled(struct wpa_sm *sm)
-{
-	return 0;
-}
-
 static inline void wpa_sm_key_request(struct wpa_sm *sm, int error,
 				      int pairwise)
 {
@@ -358,13 +350,27 @@ static inline int wpa_fils_is_completed(struct wpa_sm *sm)
 
 #endif /* CONFIG_NO_WPA */
 
+#ifdef CONFIG_PEERKEY
+int wpa_sm_stkstart(struct wpa_sm *sm, const u8 *peer);
+int wpa_sm_rx_eapol_peerkey(struct wpa_sm *sm, const u8 *src_addr,
+			    const u8 *buf, size_t len);
+#else /* CONFIG_PEERKEY */
+static inline int wpa_sm_stkstart(struct wpa_sm *sm, const u8 *peer)
+{
+	return -1;
+}
+
+static inline int wpa_sm_rx_eapol_peerkey(struct wpa_sm *sm, const u8 *src_addr,
+					  const u8 *buf, size_t len)
+{
+	return 0;
+}
+#endif /* CONFIG_PEERKEY */
+
 #ifdef CONFIG_IEEE80211R
 
 int wpa_sm_set_ft_params(struct wpa_sm *sm, const u8 *ies, size_t ies_len);
 int wpa_ft_prepare_auth_request(struct wpa_sm *sm, const u8 *mdie);
-int wpa_ft_add_mdie(struct wpa_sm *sm, u8 *ies, size_t ies_len,
-		    const u8 *mdie);
-const u8 * wpa_sm_get_ft_md(struct wpa_sm *sm);
 int wpa_ft_process_response(struct wpa_sm *sm, const u8 *ies, size_t ies_len,
 			    int ft_action, const u8 *target_ap,
 			    const u8 *ric_ies, size_t ric_ies_len);
@@ -385,12 +391,6 @@ wpa_sm_set_ft_params(struct wpa_sm *sm, const u8 *ies, size_t ies_len)
 
 static inline int wpa_ft_prepare_auth_request(struct wpa_sm *sm,
 					      const u8 *mdie)
-{
-	return 0;
-}
-
-static inline int wpa_ft_add_mdie(struct wpa_sm *sm, u8 *ies, size_t ies_len,
-				  const u8 *mdie)
 {
 	return 0;
 }
@@ -446,8 +446,6 @@ extern unsigned int tdls_testing;
 
 int wpa_wnmsleep_install_key(struct wpa_sm *sm, u8 subelem_id, u8 *buf);
 void wpa_sm_set_test_assoc_ie(struct wpa_sm *sm, struct wpabuf *buf);
-const u8 * wpa_sm_get_anonce(struct wpa_sm *sm);
-unsigned int wpa_sm_get_key_mgmt(struct wpa_sm *sm);
 
 struct wpabuf * fils_build_auth(struct wpa_sm *sm, int dh_group, const u8 *md);
 int fils_process_auth(struct wpa_sm *sm, const u8 *bssid, const u8 *data,
@@ -459,12 +457,11 @@ struct wpabuf * fils_build_assoc_req(struct wpa_sm *sm, const u8 **kek,
 				     unsigned int num_hlp);
 int fils_process_assoc_resp(struct wpa_sm *sm, const u8 *resp, size_t len);
 
-struct wpabuf * owe_build_assoc_req(struct wpa_sm *sm, u16 group);
-int owe_process_assoc_resp(struct wpa_sm *sm, const u8 *bssid,
-			   const u8 *resp_ies, size_t resp_ies_len);
+struct wpabuf * owe_build_assoc_req(struct wpa_sm *sm);
+int owe_process_assoc_resp(struct wpa_sm *sm, const u8 *resp_ies,
+			   size_t resp_ies_len);
 
 void wpa_sm_set_reset_fils_completed(struct wpa_sm *sm, int set);
 void wpa_sm_set_fils_cache_id(struct wpa_sm *sm, const u8 *fils_cache_id);
-void wpa_sm_set_dpp_z(struct wpa_sm *sm, const struct wpabuf *z);
 
 #endif /* WPA_H */

@@ -60,13 +60,11 @@ struct i802_bss {
 	char brname[IFNAMSIZ];
 	unsigned int beacon_set:1;
 	unsigned int added_if_into_bridge:1;
-	unsigned int already_in_bridge:1;
 	unsigned int added_bridge:1;
 	unsigned int in_deinit:1;
 	unsigned int wdev_id_set:1;
 	unsigned int added_if:1;
 	unsigned int static_ap:1;
-	unsigned int use_nl_connect:1;
 
 	u8 addr[ETH_ALEN];
 
@@ -75,7 +73,7 @@ struct i802_bss {
 	int if_dynamic;
 
 	void *ctx;
-	struct nl_handle *nl_preq, *nl_mgmt, *nl_connect;
+	struct nl_handle *nl_preq, *nl_mgmt;
 	struct nl_cb *nl_cb;
 
 	struct nl80211_wiphy_data *wiphy_data;
@@ -166,7 +164,6 @@ struct wpa_driver_nl80211_data {
 	unsigned int he_capab_vendor_cmd_avail:1;
 	unsigned int fetch_bss_trans_status:1;
 	unsigned int roam_vendor_cmd_avail:1;
-	unsigned int get_supported_akm_suites_avail:1;
 
 	u64 vendor_scan_cookie;
 	u64 remain_on_chan_cookie;
@@ -254,8 +251,7 @@ int wpa_driver_nl80211_set_mode(struct i802_bss *bss,
 				enum nl80211_iftype nlmode);
 int wpa_driver_nl80211_mlme(struct wpa_driver_nl80211_data *drv,
 			    const u8 *addr, int cmd, u16 reason_code,
-			    int local_state_change,
-			    struct nl_handle *nl_connect);
+			    int local_state_change);
 
 int nl80211_create_monitor_interface(struct wpa_driver_nl80211_data *drv);
 void nl80211_remove_monitor_interface(struct wpa_driver_nl80211_data *drv);

@@ -138,8 +138,6 @@ int vlan_init(struct hostapd_data *hapd)
 	    !hapd->conf->vlan) {
 		/* dynamic vlans enabled but no (or empty) vlan_file given */
 		struct hostapd_vlan *vlan;
-		int ret;
-
 		vlan = os_zalloc(sizeof(*vlan));
 		if (vlan == NULL) {
 			wpa_printf(MSG_ERROR, "Out of memory while assigning "
@@ -148,16 +146,8 @@ int vlan_init(struct hostapd_data *hapd)
 		}
 
 		vlan->vlan_id = VLAN_ID_WILDCARD;
-		ret = os_snprintf(vlan->ifname, sizeof(vlan->ifname), "%s.#",
-				  hapd->conf->iface);
-		if (ret >= (int) sizeof(vlan->ifname)) {
-			wpa_printf(MSG_WARNING,
-				   "VLAN: Interface name was truncated to %s",
-				   vlan->ifname);
-		} else if (ret < 0) {
-			os_free(vlan);
-			return ret;
-		}
+		os_snprintf(vlan->ifname, sizeof(vlan->ifname), "%s.#",
+			    hapd->conf->iface);
 		vlan->next = hapd->conf->vlan;
 		hapd->conf->vlan = vlan;
 	}
@@ -187,7 +177,6 @@ struct hostapd_vlan * vlan_add_dynamic(struct hostapd_data *hapd,
 {
 	struct hostapd_vlan *n;
 	char ifname[IFNAMSIZ + 1], *pos;
-	int ret;
 
 	if (vlan == NULL || vlan->vlan_id != VLAN_ID_WILDCARD)
 		return NULL;
@@ -209,13 +198,8 @@ struct hostapd_vlan * vlan_add_dynamic(struct hostapd_data *hapd,
 		n->vlan_desc = *vlan_desc;
 	n->dynamic_vlan = 1;
 
-	ret = os_snprintf(n->ifname, sizeof(n->ifname), "%s%d%s",
-			  ifname, vlan_id, pos);
-	if (os_snprintf_error(sizeof(n->ifname), ret)) {
-		os_free(n);
-		return NULL;
-	}
-	os_strlcpy(n->bridge, vlan->bridge, sizeof(n->bridge));
+	os_snprintf(n->ifname, sizeof(n->ifname), "%s%d%s", ifname, vlan_id,
+		    pos);
 
 	n->next = hapd->conf->vlan;
 	hapd->conf->vlan = n;

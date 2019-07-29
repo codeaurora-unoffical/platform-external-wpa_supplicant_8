@@ -1,6 +1,6 @@
 /*
  * Internal WPA/RSN supplicant state machine definitions
- * Copyright (c) 2004-2018, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2017, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -11,6 +11,7 @@
 
 #include "utils/list.h"
 
+struct wpa_peerkey;
 struct wpa_tdls_peer;
 struct wpa_eapol_key;
 
@@ -56,6 +57,7 @@ struct wpa_sm {
 	int fast_reauth; /* whether EAP fast re-authentication is enabled */
 
 	void *network_ctx;
+	int peerkey_enabled;
 	int allowed_pairwise_cipher; /* bitfield of WPA_CIPHER_* */
 	int proactive_key_caching;
 	int eap_workaround;
@@ -86,13 +88,15 @@ struct wpa_sm {
 
 	int rsn_enabled; /* Whether RSN is enabled in configuration */
 	int mfp; /* 0 = disabled, 1 = optional, 2 = mandatory */
-	int ocv; /* Operating Channel Validation */
 
 	u8 *assoc_wpa_ie; /* Own WPA/RSN IE from (Re)AssocReq */
 	size_t assoc_wpa_ie_len;
 	u8 *ap_wpa_ie, *ap_rsn_ie;
 	size_t ap_wpa_ie_len, ap_rsn_ie_len;
 
+#ifdef CONFIG_PEERKEY
+	struct wpa_peerkey *peerkey;
+#endif /* CONFIG_PEERKEY */
 #ifdef CONFIG_TDLS
 	struct wpa_tdls_peer *tdls;
 	int tdls_prohibited;
@@ -113,14 +117,11 @@ struct wpa_sm {
 #endif /* CONFIG_TDLS */
 
 #ifdef CONFIG_IEEE80211R
-	u8 xxkey[PMK_LEN_MAX]; /* PSK or the second 256 bits of MSK, or the
-				* first 384 bits of MSK */
+	u8 xxkey[PMK_LEN]; /* PSK or the second 256 bits of MSK */
 	size_t xxkey_len;
-	u8 pmk_r0[PMK_LEN_MAX];
-	size_t pmk_r0_len;
+	u8 pmk_r0[PMK_LEN];
 	u8 pmk_r0_name[WPA_PMK_NAME_LEN];
-	u8 pmk_r1[PMK_LEN_MAX];
-	size_t pmk_r1_len;
+	u8 pmk_r1[PMK_LEN];
 	u8 pmk_r1_name[WPA_PMK_NAME_LEN];
 	u8 mobility_domain[MOBILITY_DOMAIN_ID_LEN];
 	u8 r0kh_id[FT_R0KH_ID_MAX_LEN];
@@ -166,12 +167,7 @@ struct wpa_sm {
 
 #ifdef CONFIG_OWE
 	struct crypto_ecdh *owe_ecdh;
-	u16 owe_group;
 #endif /* CONFIG_OWE */
-
-#ifdef CONFIG_DPP2
-	struct wpabuf *dpp_z;
-#endif /* CONFIG_DPP2 */
 };
 
 
@@ -398,14 +394,6 @@ static inline void wpa_sm_fils_hlp_rx(struct wpa_sm *sm,
 {
 	if (sm->ctx->fils_hlp_rx)
 		sm->ctx->fils_hlp_rx(sm->ctx->ctx, dst, src, pkt, pkt_len);
-}
-
-static inline int wpa_sm_channel_info(struct wpa_sm *sm,
-				      struct wpa_channel_info *ci)
-{
-	if (!sm->ctx->channel_info)
-		return -1;
-	return sm->ctx->channel_info(sm->ctx->ctx, ci);
 }
 
 

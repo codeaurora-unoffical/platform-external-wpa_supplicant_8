@@ -159,8 +159,6 @@ struct eap_sm {
 	void *eap_method_priv;
 	u8 *identity;
 	size_t identity_len;
-	char *serial_num;
-	char imsi[20];
 	/* Whether Phase 2 method should validate identity match */
 	int require_identity_match;
 	int lastId; /* Identifier used in the last EAP-Packet */
@@ -213,7 +211,6 @@ struct eap_sm {
 	Boolean try_initiate_reauth;
 	int erp;
 	unsigned int tls_session_lifetime;
-	unsigned int tls_flags;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	u32 tls_test_flags;

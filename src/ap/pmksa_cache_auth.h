@@ -35,7 +35,6 @@ struct rsn_pmksa_cache_entry {
 };
 
 struct rsn_pmksa_cache;
-struct radius_das_attrs;
 
 struct rsn_pmksa_cache *
 pmksa_cache_auth_init(void (*free_cb)(struct rsn_pmksa_cache_entry *entry,

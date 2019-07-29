@@ -75,17 +75,12 @@ static void auth_logger(void *ctx, const u8 *addr, logger_level level,
 
 
 static const u8 *auth_get_psk(void *ctx, const u8 *addr,
-			      const u8 *p2p_dev_addr, const u8 *prev_psk,
-			      size_t *psk_len, int *vlan_id)
+			      const u8 *p2p_dev_addr, const u8 *prev_psk)
 {
 	struct mesh_rsn *mesh_rsn = ctx;
 	struct hostapd_data *hapd = mesh_rsn->wpa_s->ifmsh->bss[0];
 	struct sta_info *sta = ap_get_sta(hapd, addr);
 
-	if (psk_len)
-		*psk_len = PMK_LEN;
-	if (vlan_id)
-		*vlan_id = 0;
 	wpa_printf(MSG_DEBUG, "AUTH: %s (addr=" MACSTR " prev_psk=%p)",
 		   __func__, MAC2STR(addr), prev_psk);
 
@@ -142,7 +137,7 @@ static int auth_start_ampe(void *ctx, const u8 *addr)
 
 
 static int __mesh_rsn_auth_init(struct mesh_rsn *rsn, const u8 *addr,
-				enum mfp_options ieee80211w, int ocv)
+				enum mfp_options ieee80211w)
 {
 	struct wpa_auth_config conf;
 	static const struct wpa_auth_callbacks cb = {
@@ -170,9 +165,6 @@ static int __mesh_rsn_auth_init(struct mesh_rsn *rsn, const u8 *addr,
 	if (ieee80211w != NO_MGMT_FRAME_PROTECTION)
 		conf.group_mgmt_cipher = rsn->mgmt_group_cipher;
 #endif /* CONFIG_IEEE80211W */
-#ifdef CONFIG_OCV
-	conf.ocv = ocv;
-#endif /* CONFIG_OCV */
 
 	rsn->auth = wpa_init(addr, &conf, &cb, rsn);
 	if (rsn->auth == NULL) {
@@ -245,7 +237,7 @@ struct mesh_rsn *mesh_rsn_auth_init(struct wpa_supplicant *wpa_s,
 	mesh_rsn->mgmt_group_cipher = conf->mgmt_group_cipher;
 
 	if (__mesh_rsn_auth_init(mesh_rsn, wpa_s->own_addr,
-				 conf->ieee80211w, conf->ocv) < 0) {
+				 conf->ieee80211w) < 0) {
 		mesh_rsn_deinit(mesh_rsn);
 		os_free(mesh_rsn);
 		return NULL;
@@ -322,12 +314,7 @@ static int mesh_rsn_build_sae_commit(struct wpa_supplicant *wpa_s,
 				     struct wpa_ssid *ssid,
 				     struct sta_info *sta)
 {
-	const char *password;
-
-	password = ssid->sae_password;
-	if (!password)
-		password = ssid->passphrase;
-	if (!password) {
+	if (ssid->passphrase == NULL) {
 		wpa_msg(wpa_s, MSG_DEBUG, "SAE: No password available");
 		return -1;
 	}
@@ -337,15 +324,9 @@ static int mesh_rsn_build_sae_commit(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	if (sta->sae->tmp && !sta->sae->tmp->pw_id && ssid->sae_password_id) {
-		sta->sae->tmp->pw_id = os_strdup(ssid->sae_password_id);
-		if (!sta->sae->tmp->pw_id)
-			return -1;
-	}
 	return sae_prepare_commit(wpa_s->own_addr, sta->addr,
-				  (u8 *) password, os_strlen(password),
-				  ssid->sae_password_id,
-				  sta->sae);
+				  (u8 *) ssid->passphrase,
+				  os_strlen(ssid->passphrase), sta->sae);
 }
 
 
@@ -643,7 +624,7 @@ int mesh_rsn_process_ampe(struct wpa_supplicant *wpa_s, struct sta_info *sta,
 	size_t crypt_len;
 	const u8 *aad[] = { sta->addr, wpa_s->own_addr, cat };
 	const size_t aad_len[] = { ETH_ALEN, ETH_ALEN,
-				   elems->mic ? (elems->mic - 2) - cat : 0 };
+				   (elems->mic - 2) - cat };
 	size_t key_len;
 
 	if (!sta->sae) {
@@ -657,9 +638,7 @@ int mesh_rsn_process_ampe(struct wpa_supplicant *wpa_s, struct sta_info *sta,
 		mesh_rsn_auth_sae_sta(wpa_s, sta);
 	}
 
-	if (chosen_pmk &&
-	    (!sta->sae ||
-	     os_memcmp(chosen_pmk, sta->sae->pmkid, PMKID_LEN) != 0)) {
+	if (chosen_pmk && os_memcmp(chosen_pmk, sta->sae->pmkid, PMKID_LEN)) {
 		wpa_msg(wpa_s, MSG_DEBUG,
 			"Mesh RSN: Invalid PMKID (Chosen PMK did not match calculated PMKID)");
 		return -1;

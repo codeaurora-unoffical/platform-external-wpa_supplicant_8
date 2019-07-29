@@ -14,13 +14,6 @@
 #include "ap_config.h"
 #include "drivers/driver.h"
 
-#define OCE_STA_CFON_ENABLED(hapd) \
-	((hapd->conf->oce & OCE_STA_CFON) && \
-	 (hapd->iface->drv_flags & WPA_DRIVER_FLAGS_OCE_STA_CFON))
-#define OCE_AP_ENABLED(hapd) \
-	((hapd->conf->oce & OCE_AP) && \
-	 (hapd->iface->drv_flags & WPA_DRIVER_FLAGS_OCE_AP))
-
 struct wpa_ctrl_dst;
 struct radius_server_data;
 struct upnp_wps_device_sm;
@@ -64,10 +57,6 @@ struct hapd_interfaces {
 	struct dl_list eth_p_oui; /* OUI Extended EtherType handlers */
 #endif /* CONFIG_ETH_P_OUI */
 	int eloop_initialized;
-
-#ifdef CONFIG_DPP
-	struct dpp_global *dpp;
-#endif /* CONFIG_DPP */
 };
 
 enum hostapd_chan_status {
@@ -90,7 +79,6 @@ struct hostapd_rate_data {
 };
 
 struct hostapd_frame_info {
-	unsigned int freq;
 	u32 channel;
 	u32 datarate;
 	int ssi_signal; /* dBm */
@@ -125,13 +113,6 @@ struct hostapd_neighbor_entry {
 	/* LCI update time */
 	struct os_time lci_date;
 	int stationary;
-};
-
-struct hostapd_sae_commit_queue {
-	struct dl_list list;
-	int rssi;
-	size_t len;
-	u8 msg[];
 };
 
 /**
@@ -276,6 +257,9 @@ struct hostapd_data {
 	unsigned int cs_c_off_ecsa_beacon;
 	unsigned int cs_c_off_ecsa_proberesp;
 
+	/* BSS Load */
+	unsigned int bss_load_update_timeout;
+
 #ifdef CONFIG_P2P
 	struct p2p_data *p2p;
 	struct p2p_group *p2p_group;
@@ -312,10 +296,7 @@ struct hostapd_data {
 	/** Key used for generating SAE anti-clogging tokens */
 	u8 sae_token_key[8];
 	struct os_reltime last_sae_token_key_update;
-	u16 sae_token_idx;
-	u16 sae_pending_token_idx[256];
 	int dot11RSNASAERetransPeriod; /* msec */
-	struct dl_list sae_commit_queue; /* struct hostapd_sae_commit_queue */
 #endif /* CONFIG_SAE */
 
 #ifdef CONFIG_TESTING_OPTIONS
@@ -323,22 +304,15 @@ struct hostapd_data {
 	unsigned int ext_eapol_frame_io:1;
 
 	struct l2_packet_data *l2_test;
-
-	enum wpa_alg last_gtk_alg;
-	int last_gtk_key_idx;
-	u8 last_gtk[WPA_GTK_MAX_LEN];
-	size_t last_gtk_len;
-
-#ifdef CONFIG_IEEE80211W
-	enum wpa_alg last_igtk_alg;
-	int last_igtk_key_idx;
-	u8 last_igtk[WPA_IGTK_MAX_LEN];
-	size_t last_igtk_len;
-#endif /* CONFIG_IEEE80211W */
 #endif /* CONFIG_TESTING_OPTIONS */
 
 #ifdef CONFIG_MBO
 	unsigned int mbo_assoc_disallow;
+	/**
+	 * enable_oce - Enable OCE if it is enabled by user and device also
+	 *		supports OCE.
+	 */
+	u8 enable_oce;
 #endif /* CONFIG_MBO */
 
 	struct dl_list nr_db;
@@ -352,12 +326,13 @@ struct hostapd_data {
 	int dhcp_sock; /* UDP socket used with the DHCP server */
 
 #ifdef CONFIG_DPP
+	struct dl_list dpp_bootstrap; /* struct dpp_bootstrap_info */
+	struct dl_list dpp_configurator; /* struct dpp_configurator */
 	int dpp_init_done;
 	struct dpp_authentication *dpp_auth;
 	u8 dpp_allowed_roles;
 	int dpp_qr_mutual;
 	int dpp_auth_ok_on_ack;
-	int dpp_in_response_listen;
 	struct gas_query_ap *gas;
 	struct dpp_pkex *dpp_pkex;
 	struct dpp_bootstrap_info *dpp_pkex_bi;
@@ -365,17 +340,11 @@ struct hostapd_data {
 	char *dpp_pkex_identifier;
 	char *dpp_pkex_auth_cmd;
 	char *dpp_configurator_params;
-	struct os_reltime dpp_last_init;
-	struct os_reltime dpp_init_iter_start;
-	unsigned int dpp_init_max_tries;
-	unsigned int dpp_init_retry_time;
-	unsigned int dpp_resp_wait_time;
-	unsigned int dpp_resp_max_tries;
-	unsigned int dpp_resp_retry_time;
 #ifdef CONFIG_TESTING_OPTIONS
 	char *dpp_config_obj_override;
 	char *dpp_discovery_override;
 	char *dpp_groups_override;
+	char *dpp_devices_override;
 	unsigned int dpp_ignore_netaccesskey_mismatch:1;
 #endif /* CONFIG_TESTING_OPTIONS */
 #endif /* CONFIG_DPP */
@@ -516,10 +485,6 @@ struct hostapd_iface {
 	u64 last_channel_time_busy;
 	u8 channel_utilization;
 
-	unsigned int chan_util_samples_sum;
-	unsigned int chan_util_num_sample_periods;
-	unsigned int chan_util_average;
-
 	/* eCSA IE will be added only if operating class is specified */
 	u8 cs_oper_class;
 
@@ -548,7 +513,6 @@ int hostapd_for_each_interface(struct hapd_interfaces *interfaces,
 			       int (*cb)(struct hostapd_iface *iface,
 					 void *ctx), void *ctx);
 int hostapd_reload_config(struct hostapd_iface *iface);
-void hostapd_reconfig_encryption(struct hostapd_data *hapd);
 struct hostapd_data *
 hostapd_alloc_bss_data(struct hostapd_iface *hapd_iface,
 		       struct hostapd_config *conf,
@@ -575,7 +539,6 @@ void hostapd_channel_list_updated(struct hostapd_iface *iface, int initiator);
 void hostapd_set_state(struct hostapd_iface *iface, enum hostapd_iface_state s);
 const char * hostapd_state_text(enum hostapd_iface_state s);
 int hostapd_csa_in_progress(struct hostapd_iface *iface);
-void hostapd_chan_switch_vht_config(struct hostapd_data *hapd, int vht_enabled);
 int hostapd_switch_channel(struct hostapd_data *hapd,
 			   struct csa_settings *settings);
 void
@@ -583,7 +546,6 @@ hostapd_switch_channel_fallback(struct hostapd_iface *iface,
 				const struct hostapd_freq_params *freq_params);
 void hostapd_cleanup_cs_params(struct hostapd_data *hapd);
 void hostapd_periodic_iface(struct hostapd_iface *iface);
-int hostapd_owe_trans_get_info(struct hostapd_data *hapd);
 
 /* utils.c */
 int hostapd_register_probereq_cb(struct hostapd_data *hapd,
@@ -620,9 +582,6 @@ hostapd_get_eap_user(struct hostapd_data *hapd, const u8 *identity,
 
 struct hostapd_data * hostapd_get_iface(struct hapd_interfaces *interfaces,
 					const char *ifname);
-void hostapd_event_sta_opmode_changed(struct hostapd_data *hapd, const u8 *addr,
-				      enum smps_mode smps_mode,
-				      enum chan_width chan_width, u8 rx_nss);
 
 #ifdef CONFIG_FST
 void fst_hostapd_fill_iface_obj(struct hostapd_data *hapd,

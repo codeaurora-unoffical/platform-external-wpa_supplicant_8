@@ -39,9 +39,6 @@
 
 #define MAXSC 16
 
-#define SAK_128_LEN	16
-#define SAK_256_LEN	32
-
 /* TCI field definition */
 #define TCI_ES                0x40
 #define TCI_SC                0x20
@@ -229,32 +226,19 @@ static int macsec_qca_set_replay_protect(void *priv, Boolean enabled,
 }
 
 
-static fal_cipher_suite_e macsec_qca_cs_type_get(u64 cs)
-{
-	if (cs == CS_ID_GCM_AES_128)
-		return FAL_CIPHER_SUITE_AES_GCM_128;
-	if (cs == CS_ID_GCM_AES_256)
-		return FAL_CIPHER_SUITE_AES_GCM_256;
-	return FAL_CIPHER_SUITE_MAX;
-}
-
-
 static int macsec_qca_set_current_cipher_suite(void *priv, u64 cs)
 {
-	struct macsec_qca_data *drv = priv;
-	fal_cipher_suite_e cs_type;
-
-	if (cs != CS_ID_GCM_AES_128 && cs != CS_ID_GCM_AES_256) {
+	if (cs != CS_ID_GCM_AES_128) {
 		wpa_printf(MSG_ERROR,
 			   "%s: NOT supported CipherSuite: %016" PRIx64,
 			   __func__, cs);
 		return -1;
 	}
 
-	wpa_printf(MSG_DEBUG, "%s: CipherSuite: %016" PRIx64, __func__, cs);
+	/* Support default Cipher Suite 0080020001000001 (GCM-AES-128) */
+	wpa_printf(MSG_DEBUG, "%s: default support aes-gcm-128", __func__);
 
-	cs_type = macsec_qca_cs_type_get(cs);
-	return nss_macsec_secy_cipher_suite_set(drv->secy_id, cs_type);
+	return 0;
 }
 
 
@@ -383,7 +367,7 @@ static int macsec_qca_get_transmit_next_pn(void *priv, struct transmit_sa *sa)
 }
 
 
-static int macsec_qca_set_transmit_next_pn(void *priv, struct transmit_sa *sa)
+int macsec_qca_set_transmit_next_pn(void *priv, struct transmit_sa *sa)
 {
 	struct macsec_qca_data *drv = priv;
 	int ret = 0;
@@ -452,8 +436,8 @@ static int macsec_qca_create_receive_sc(void *priv, struct receive_sc *sc,
 	os_memset(&entry, 0, sizeof(entry));
 
 	os_memcpy(entry.sci, sci_addr, ETH_ALEN);
-	entry.sci[6] = (sci_port >> 8) & 0xff;
-	entry.sci[7] = sci_port & 0xff;
+	entry.sci[6] = (sci_port >> 8) & 0xf;
+	entry.sci[7] = sci_port & 0xf;
 	entry.sci_mask = 0xf;
 
 	entry.valid = 1;
@@ -515,8 +499,6 @@ static int macsec_qca_create_receive_sa(void *priv, struct receive_sa *sa)
 	fal_rx_sak_t rx_sak;
 	int i = 0;
 	u32 channel;
-	fal_rx_prc_lut_t entry;
-	u32 offset;
 
 	ret = macsec_qca_lookup_receive_channel(priv, sa->sc, &channel);
 	if (ret != 0)
@@ -526,30 +508,9 @@ static int macsec_qca_create_receive_sa(void *priv, struct receive_sa *sa)
 		   __func__, channel, sa->an, sa->lowest_pn);
 
 	os_memset(&rx_sak, 0, sizeof(rx_sak));
-	rx_sak.sak_len = sa->pkey->key_len;
-	if (sa->pkey->key_len == SAK_128_LEN) {
-		for (i = 0; i < 16; i++)
-			rx_sak.sak[i] = sa->pkey->key[15 - i];
-	} else if (sa->pkey->key_len == SAK_256_LEN) {
-		for (i = 0; i < 16; i++) {
-			rx_sak.sak1[i] = sa->pkey->key[15 - i];
-			rx_sak.sak[i] = sa->pkey->key[31 - i];
-		}
-	} else {
-		return -1;
-	}
+	for (i = 0; i < 16; i++)
+		rx_sak.sak[i] = sa->pkey->key[15 - i];
 
-	if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_0)
-		offset = 0;
-	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_30)
-		offset = 30;
-	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_50)
-		offset = 50;
-	else
-		return -1;
-	ret += nss_macsec_secy_rx_prc_lut_get(drv->secy_id, channel, &entry);
-	entry.offset = offset;
-	ret += nss_macsec_secy_rx_prc_lut_set(drv->secy_id, channel, &entry);
 	ret += nss_macsec_secy_rx_sa_create(drv->secy_id, channel, sa->an);
 	ret += nss_macsec_secy_rx_sak_set(drv->secy_id, channel, sa->an,
 					  &rx_sak);
@@ -631,7 +592,6 @@ static int macsec_qca_create_transmit_sc(void *priv, struct transmit_sc *sc,
 	fal_tx_class_lut_t entry;
 	u8 psci[ETH_ALEN + 2];
 	u32 channel;
-	u16 sci_port = be_to_host16(sc->sci.port);
 
 	ret = macsec_qca_get_available_transmit_sc(priv, &channel);
 	if (ret != 0)
@@ -647,8 +607,8 @@ static int macsec_qca_create_transmit_sc(void *priv, struct transmit_sc *sc,
 	entry.channel = channel;
 
 	os_memcpy(psci, sc->sci.addr, ETH_ALEN);
-	psci[6] = (sci_port >> 8) & 0xff;
-	psci[7] = sci_port & 0xff;
+	psci[6] = (sc->sci.port >> 8) & 0xf;
+	psci[7] = sc->sci.port & 0xf;
 
 	ret += nss_macsec_secy_tx_class_lut_set(drv->secy_id, channel, &entry);
 	ret += nss_macsec_secy_tx_sc_create(drv->secy_id, channel, psci, 8);
@@ -695,7 +655,6 @@ static int macsec_qca_create_transmit_sa(void *priv, struct transmit_sa *sa)
 	fal_tx_sak_t tx_sak;
 	int i;
 	u32 channel;
-	u32 offset;
 
 	ret = macsec_qca_lookup_transmit_channel(priv, sa->sc, &channel);
 	if (ret != 0)
@@ -716,30 +675,9 @@ static int macsec_qca_create_transmit_sa(void *priv, struct transmit_sa *sa)
 		tci |= TCI_E | TCI_C;
 
 	os_memset(&tx_sak, 0, sizeof(tx_sak));
-	tx_sak.sak_len = sa->pkey->key_len;
-	if (sa->pkey->key_len == SAK_128_LEN) {
-		for (i = 0; i < 16; i++)
-			tx_sak.sak[i] = sa->pkey->key[15 - i];
-	} else if (sa->pkey->key_len == SAK_256_LEN) {
-		for (i = 0; i < 16; i++) {
-			tx_sak.sak1[i] = sa->pkey->key[15 - i];
-			tx_sak.sak[i] = sa->pkey->key[31 - i];
-		}
-	} else {
-		return -1;
-	}
+	for (i = 0; i < 16; i++)
+		tx_sak.sak[i] = sa->pkey->key[15 - i];
 
-	if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_0)
-		offset = 0;
-	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_30)
-		offset = 30;
-	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_50)
-		offset = 50;
-	else
-		return -1;
-	ret += nss_macsec_secy_tx_sc_confidentiality_offset_set(drv->secy_id,
-								channel,
-								offset);
 	ret += nss_macsec_secy_tx_sa_next_pn_set(drv->secy_id, channel, sa->an,
 						 sa->next_pn);
 	ret += nss_macsec_secy_tx_sak_set(drv->secy_id, channel, sa->an,

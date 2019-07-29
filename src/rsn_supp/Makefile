@@ -10,6 +10,7 @@ include ../lib.rules
 
 CFLAGS += -DCONFIG_IEEE80211W
 CFLAGS += -DCONFIG_IEEE80211R
+CFLAGS += -DCONFIG_PEERKEY
 CFLAGS += -DCONFIG_TDLS
 CFLAGS += -DCONFIG_WNM
 CFLAGS += -DIEEE8021X_EAPOL
@@ -17,6 +18,7 @@ CFLAGS += -DIEEE8021X_EAPOL
 LIB_OBJS= \
 	pmksa_cache.o \
 	wpa_ft.o \
+	peerkey.o \
 	tdls.o \
 	preauth.o \
 	wpa.o \

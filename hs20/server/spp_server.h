@@ -16,10 +16,6 @@ struct hs20_svc {
 	FILE *debug_log;
 	sqlite3 *db;
 	const char *addr;
-	const char *test;
-	const char *imsi;
-	const char *eap_method;
-	const char *id_hash;
 };
 
 

@@ -532,8 +532,6 @@ void x509_name_string(struct x509_name *name, char *buf, size_t len)
 	}
 
 done:
-	if (pos < end)
-		*pos = '\0';
 	end[-1] = '\0';
 }
 

@@ -189,9 +189,8 @@ static void eapol_port_timers_tick(void *eloop_ctx, void *timeout_ctx)
 	}
 
 	if (sm->authWhile | sm->heldWhile | sm->startWhen | sm->idleWhile) {
-		if (eloop_register_timeout(1, 0, eapol_port_timers_tick,
-					   eloop_ctx, sm) < 0)
-			sm->timer_tick_enabled = 0;
+		eloop_register_timeout(1, 0, eapol_port_timers_tick, eloop_ctx,
+				       sm);
 	} else {
 		wpa_printf(MSG_DEBUG, "EAPOL: disable timer tick");
 		sm->timer_tick_enabled = 0;
@@ -205,9 +204,9 @@ static void eapol_enable_timer_tick(struct eapol_sm *sm)
 	if (sm->timer_tick_enabled)
 		return;
 	wpa_printf(MSG_DEBUG, "EAPOL: enable timer tick");
+	sm->timer_tick_enabled = 1;
 	eloop_cancel_timeout(eapol_port_timers_tick, NULL, sm);
-	if (eloop_register_timeout(1, 0, eapol_port_timers_tick, NULL, sm) == 0)
-		sm->timer_tick_enabled = 1;
+	eloop_register_timeout(1, 0, eapol_port_timers_tick, NULL, sm);
 }
 
 
@@ -504,14 +503,10 @@ SM_STATE(SUPP_BE, SUCCESS)
 			session_id = eap_proxy_get_eap_session_id(
 				sm->eap_proxy, &session_id_len);
 			emsk = eap_proxy_get_emsk(sm->eap_proxy, &emsk_len);
-			if (sm->config->erp && session_id && emsk) {
+			if (sm->config->erp && session_id && emsk)
 				eap_peer_erp_init(sm->eap, session_id,
 						  session_id_len, emsk,
 						  emsk_len);
-			} else {
-				os_free(session_id);
-				bin_clear_free(emsk, emsk_len);
-			}
 		}
 		return;
 	}
@@ -2020,15 +2015,6 @@ static void eapol_sm_notify_status(void *ctx, const char *status,
 }
 
 
-static void eapol_sm_notify_eap_error(void *ctx, int error_code)
-{
-	struct eapol_sm *sm = ctx;
-
-	if (sm->ctx->eap_error_cb)
-		sm->ctx->eap_error_cb(sm->ctx->ctx, error_code);
-}
-
-
 #ifdef CONFIG_EAP_PROXY
 
 static void eapol_sm_eap_proxy_cb(void *ctx)
@@ -2076,7 +2062,6 @@ static const struct eapol_callbacks eapol_cb =
 	eapol_sm_eap_param_needed,
 	eapol_sm_notify_cert,
 	eapol_sm_notify_status,
-	eapol_sm_notify_eap_error,
 #ifdef CONFIG_EAP_PROXY
 	eapol_sm_eap_proxy_cb,
 	eapol_sm_eap_proxy_notify_sim_status,
@@ -2142,8 +2127,8 @@ struct eapol_sm *eapol_sm_init(struct eapol_ctx *ctx)
 	sm->initialize = FALSE;
 	eapol_sm_step(sm);
 
-	if (eloop_register_timeout(1, 0, eapol_port_timers_tick, NULL, sm) == 0)
-		sm->timer_tick_enabled = 1;
+	sm->timer_tick_enabled = 1;
+	eloop_register_timeout(1, 0, eapol_port_timers_tick, NULL, sm);
 
 	return sm;
 }

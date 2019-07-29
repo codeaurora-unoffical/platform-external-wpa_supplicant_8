@@ -172,8 +172,6 @@ struct radius_server_conf {
 
 	unsigned int tls_session_lifetime;
 
-	unsigned int tls_flags;
-
 	/**
 	 * wps - Wi-Fi Protected Setup context
 	 *
@@ -233,9 +231,6 @@ struct radius_server_conf {
 
 	char *subscr_remediation_url;
 	u8 subscr_remediation_method;
-	char *hs20_sim_provisioning_url;
-
-	char *t_c_server_url;
 };
 
 
@@ -249,6 +244,5 @@ int radius_server_get_mib(struct radius_server_data *data, char *buf,
 			  size_t buflen);
 
 void radius_server_eap_pending_cb(struct radius_server_data *data, void *ctx);
-int radius_server_dac_request(struct radius_server_data *data, const char *req);
 
 #endif /* RADIUS_SERVER_H */

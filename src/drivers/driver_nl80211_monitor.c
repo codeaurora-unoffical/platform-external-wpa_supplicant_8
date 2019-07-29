@@ -361,17 +361,8 @@ int nl80211_create_monitor_interface(struct wpa_driver_nl80211_data *drv)
 		 */
 		snprintf(buf, IFNAMSIZ, "mon-%s", drv->first_bss->ifname + 4);
 	} else {
-		int ret;
-
 		/* Non-P2P interface with AP functionality. */
-		ret = os_snprintf(buf, IFNAMSIZ, "mon.%s",
-				  drv->first_bss->ifname);
-		if (ret >= (int) sizeof(buf))
-			wpa_printf(MSG_DEBUG,
-				   "nl80211: Monitor interface name has been truncated to %s",
-				   buf);
-		else if (ret < 0)
-			return ret;
+		snprintf(buf, IFNAMSIZ, "mon.%s", drv->first_bss->ifname);
 	}
 
 	buf[IFNAMSIZ - 1] = '\0';
