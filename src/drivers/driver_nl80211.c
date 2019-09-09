@@ -63,6 +63,9 @@ enum nlmsgerr_attrs {
 #define SOL_NETLINK 270
 #endif
 
+#ifndef NETLINK_CAP_ACK
+#define NETLINK_CAP_ACK 10
+#endif /* NETLINK_CAP_ACK */
 #ifndef CONFIG_LIBNL20
 /*
  * libnl 1.1 has a bug, it tries to allocate socket numbers densely
@@ -392,7 +395,8 @@ static int send_and_recv(struct nl80211_global *global,
 			 void *valid_data)
 {
 	struct nl_cb *cb;
-	int err = -ENOMEM, opt;
+	int err = -ENOMEM;
+	int opt;
 
 	if (!msg)
 		return -ENOMEM;
@@ -5609,7 +5613,7 @@ skip_auth_type:
 	if (nl_connect)
 		ret = send_and_recv(drv->global, nl_connect, msg, NULL, NULL);
 	else
-		ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	        ret = send_and_recv_msgs(drv, msg, NULL, (void *) -1);
 
 	msg = NULL;
 	if (ret) {
@@ -5621,6 +5625,7 @@ skip_auth_type:
 	}
 
 fail:
+	nl80211_nlmsg_clear(msg);
 	nlmsg_free(msg);
 	return ret;
 
@@ -7798,11 +7803,12 @@ static int nl80211_pmkid(struct i802_bss *bss, int cmd,
 		     params->fils_cache_id)) ||
 	    (params->pmk_len && params->pmk_len <= PMK_MAX_LEN &&
 	     nla_put(msg, NL80211_ATTR_PMK, params->pmk_len, params->pmk))) {
+		nl80211_nlmsg_clear(msg);
 		nlmsg_free(msg);
 		return -ENOBUFS;
 	}
 
-	return send_and_recv_msgs(bss->drv, msg, NULL, NULL);
+	return send_and_recv_msgs(bss->drv, msg, NULL, (void *) -1);
 }
 
 
