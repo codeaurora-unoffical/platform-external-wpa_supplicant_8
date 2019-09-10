@@ -98,6 +98,9 @@ static inline pid_t gettid(void)
 #endif
 #endif
 
+// Lock to serialize concurrent calls to eloop_register_timeout.
+static pthread_mutex_t eloop_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void eap_proxy_qmi_deinit(struct eap_proxy_sm *eap_proxy);
 static void eap_proxy_eapol_sm_set_bool(struct eap_proxy_sm *sm,
                          enum eapol_bool_var var, Boolean value);
@@ -148,7 +151,7 @@ static unsigned int session_type;
 static Boolean wpa_qmi_register_events(int sim_num, wpa_uim_struct_type *wpa_uim);
 static Boolean wpa_qmi_read_card_imsi(int sim_num, wpa_uim_struct_type *wpa_uim);
 static Boolean wpa_qmi_read_card_status(int sim_num, wpa_uim_struct_type *wpa_uim);
-static Boolean wpa_qmi_register_auth_inds(struct eap_proxy_sm *eap_proxy);
+static Boolean wpa_qmi_register_auth_inds(int sim_num, struct eap_proxy_sm *eap_proxy);
 
 #endif
 #define EAP_SUB_TYPE_SIM_START     0x0a
@@ -242,9 +245,9 @@ fail:
 	return;
 }
 
-static Boolean wpa_qmi_register_auth_inds(struct eap_proxy_sm *eap_proxy)
+static Boolean wpa_qmi_register_auth_inds(int sim_num, struct eap_proxy_sm *eap_proxy)
 {
-        qmi_client_error_type               qmi_err_code      = 0;
+        qmi_client_error_type qmi_err_code = QMI_NO_ERR;
         auth_indication_register_resp_msg_v01  event_resp_msg;
         auth_indication_register_req_msg_v01 event_reg_params;
 
@@ -257,7 +260,7 @@ static Boolean wpa_qmi_register_auth_inds(struct eap_proxy_sm *eap_proxy)
 
         wpa_printf(MSG_ERROR, "registering for notification codes\n");
         qmi_err_code = qmi_client_send_msg_sync(
-                        eap_proxy->qmi_auth_svc_client_ptr[eap_proxy->user_selected_sim],
+                        eap_proxy->qmi_auth_svc_client_ptr[sim_num],
                         QMI_AUTH_INDICATION_REGISTER_REQ_V01,
                         (void *) &event_reg_params,
                         sizeof(auth_indication_register_req_msg_v01),
@@ -680,24 +683,18 @@ void wpa_qmi_handle_ssr(qmi_client_type user_handle, qmi_client_error_type error
 {
         struct eap_proxy_sm *eap_proxy = err_cb_data;
 
-        pthread_mutex_lock(&(eap_proxy->lock));       // Lock
+        pthread_mutex_lock(&eloop_lock);       // Lock
         wpa_printf(MSG_ERROR, "eap_proxy: %s eap_proxy=%p", __func__, eap_proxy);
-
-        if (eap_proxy->qmi_ssr_in_progress) {
-                wpa_printf(MSG_ERROR, "eap_proxy: qmi_ssr_in_progress for eap_proxy=%p Skip another.", eap_proxy);
-        } else {
-                eap_proxy->qmi_ssr_in_progress = TRUE;
-                eloop_register_timeout(0, 0, wpa_qmi_register_notification, eap_proxy, NULL);
-        }
-        pthread_mutex_unlock(&(eap_proxy->lock));      // Unlock
+        eloop_register_timeout(0, 0, wpa_qmi_register_notification, eap_proxy, NULL);
+        pthread_mutex_unlock(&eloop_lock);      // Unlock
 }
 
 static void eap_proxy_post_init(struct eap_proxy_sm *eap_proxy)
 {
-        int qmiErrorCode;
+        int qmiErrorCode = QMI_NO_ERR;
         qmi_idl_service_object_type qmi_client_service_obj[MAX_NO_OF_SIM_SUPPORTED];
         int index;
-        static Boolean flag = FALSE;
+        Boolean flag = FALSE;
         int ret = 0;
         wpa_uim_struct_type *wpa_uim = eap_proxy->wpa_uim;
 #ifdef CONFIG_EAP_PROXY_MDM_DETECT
@@ -764,25 +761,35 @@ static void eap_proxy_post_init(struct eap_proxy_sm *eap_proxy)
                                         10000,
                                         &wpa_uim[index].qmi_uim_svc_client_ptr);
 
-                        if ((wpa_uim[index].qmi_uim_svc_client_ptr == NULL) || (qmiErrorCode > 0)) {
+                        if ((wpa_uim[index].qmi_uim_svc_client_ptr == NULL) || (qmiErrorCode != QMI_NO_ERR)) {
                                 wpa_printf(MSG_ERROR, "eap_proxy: Could not register with QMI UIM"
-                                        "Service, qmi_uim_svc_client_ptr: %p,qmi_err_code: %d\n",
+                                        " Service, qmi_uim_svc_client_ptr: %p,qmi_err_code: %d\n",
                                         wpa_uim[index].qmi_uim_svc_client_ptr, qmiErrorCode);
                                 wpa_uim[index].qmi_uim_svc_client_ptr = NULL;
                                 flag = FALSE;
                                 continue;
                         }
+                        /* Register the card events with the QMI / UIM */
+                        // TODO: Should we treat sim read failure as eap_proxy_init failure ?
+                        wpa_qmi_register_events(index, wpa_uim);
+
+                        // register for SSR once per interface.
+                        if (flag == FALSE) {
+                                qmiErrorCode = qmi_client_register_error_cb(
+                                        wpa_uim[index].qmi_uim_svc_client_ptr, wpa_qmi_handle_ssr, eap_proxy);
+                                if (qmiErrorCode != QMI_NO_ERR) {
+                                        wpa_printf(MSG_ERROR, "eap_proxy: qmi_client_register_error_cb()-"
+                                                   " Failed to register callbacks %d\n", qmiErrorCode);
+                                        wpa_uim[index].qmi_uim_svc_client_ptr = NULL;
+                                        flag = FALSE;
+                                        continue;
+                                }
+                        }
                         eap_proxy->qmi_uim_svc_client_initialized[index] = TRUE;
 
                         wpa_printf (MSG_ERROR, "eap_proxy: QMI uim service client initialized with"
-                                "success tid is %d %p %d\n",
+                                " success tid is %d %p %d\n",
                                 gettid(), wpa_uim[index].qmi_uim_svc_client_ptr, qmiErrorCode);
-                        /* Register the card events with the QMI / UIM */
-                        wpa_qmi_register_events(index, wpa_uim);
-                        qmiErrorCode = qmi_client_register_error_cb(
-                                wpa_uim[index].qmi_uim_svc_client_ptr, wpa_qmi_handle_ssr, eap_proxy);
-                        wpa_printf(MSG_ERROR,
-                                "eap_proxy: qmi_client_register_error_cb() status %d\n", qmiErrorCode);
                 } else
                         wpa_printf (MSG_ERROR, "eap_proxy: QMI uim service client is already init"
                                 "ialized tid is %d \n", gettid());
@@ -800,20 +807,27 @@ static void eap_proxy_post_init(struct eap_proxy_sm *eap_proxy)
                                                         &eap_proxy->qmi_auth_svc_client_ptr[index]);
 
 
-                if ((eap_proxy->qmi_auth_svc_client_ptr[index] == NULL) || (qmiErrorCode > 0)) {
+                if ((eap_proxy->qmi_auth_svc_client_ptr[index] == NULL) || (qmiErrorCode != QMI_NO_ERR)) {
                         wpa_printf(MSG_ERROR, "eap_proxy: Could not register with QMI auth Service "
                                         "qmi_auth_svc_client_ptr: %p,qmi_err_code: %d\n",
                                         eap_proxy->qmi_auth_svc_client_ptr[index], qmiErrorCode);
                         eap_proxy->qmi_auth_svc_client_ptr[index] = NULL;
+                        eap_proxy->qmi_uim_svc_client_initialized[index] = FALSE;
                         flag = FALSE;
                         continue;
                 }
                 wpa_printf (MSG_ERROR, "eap_proxy: QMI auth service client initialized with success"
                         " tid is %d  %p eapol_proxy=%p\n", gettid(),
                                 eap_proxy->qmi_auth_svc_client_ptr[index], eap_proxy);
-                flag = TRUE;
                 /* Register for the notifications from QMI / AUTH */
-                wpa_qmi_register_auth_inds(eap_proxy);
+                if (wpa_qmi_register_auth_inds(index, eap_proxy) == FALSE) {
+                        eap_proxy->qmi_auth_svc_client_ptr[index] = NULL;
+                        eap_proxy->qmi_uim_svc_client_initialized[index] = FALSE;
+                        wpa_printf (MSG_ERROR, "eap_proxy: wpa_qmi_register_auth_inds failed");
+                        flag = FALSE;
+                        continue;
+                }
+                flag = TRUE;
 #endif /* SIM_AKA_IDENTITY_IMSI */
         }
 
@@ -823,7 +837,6 @@ static void eap_proxy_post_init(struct eap_proxy_sm *eap_proxy)
                 return;
         }
 
-        eap_proxy->qmi_ssr_in_progress = FALSE;
         eap_proxy->proxy_state = EAP_PROXY_IDLE;
         eap_proxy_eapol_sm_set_bool(eap_proxy, EAPOL_eapSuccess, FALSE);
         eap_proxy_eapol_sm_set_bool(eap_proxy, EAPOL_eapFail, FALSE);
@@ -872,20 +885,6 @@ int eap_auth_end_eap_session(qmi_client_type qmi_auth_svc_client_ptr)
         return 0;
 }
 
-static void eap_proxy_schedule_thread(void *eloop_ctx, void *timeout_ctx)
-{
-        struct eap_proxy_sm *eap_proxy = eloop_ctx;
-        int ret = -1;
-
-        // Make note of new thread creation, so that we can take care of joining.
-        if (eap_proxy != NULL)
-                eap_proxy->qmi_thread_joined = false;
-
-        ret = pthread_create(&eap_proxy->thread_id, NULL, eap_proxy_post_init, eap_proxy);
-        if(ret < 0)
-               wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
-}
-
 struct eap_proxy_sm *
 eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
                void *msg_ctx)
@@ -907,19 +906,26 @@ eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
 
         eap_proxy->proxy_state = EAP_PROXY_DISABLED;
 
-        ret = pthread_mutex_init(&(eap_proxy->lock), NULL);
-        if (ret != 0) {
-               wpa_printf(MSG_ERROR, "eap_proxy: mutex init failed ret=%d", ret);
-               return NULL;
-        }
-
         /* delay the qmi client initialization after the eloop_run starts,
         * in order to avoid the case of daemonize enabled, which exits the
         * parent process that created the qmi client context.
+        * NOTE: Spawn a new thread to allow eap_proxy initialization.
         */
 
-        eloop_register_timeout(0, 0, eap_proxy_schedule_thread, eap_proxy, NULL);
-        return eap_proxy;
+        // Make note of new thread creation, so that we can take care of joining.
+        eap_proxy->qmi_thread_joined = false;
+
+        ret = pthread_create(&eap_proxy->thread_id, NULL, eap_proxy_post_init, eap_proxy);
+        if(ret < 0) {
+               wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
+               goto fail;
+        }
+
+         return eap_proxy;
+fail:
+        os_free(eap_proxy);
+        eap_proxy = NULL;
+        return NULL;
 }
 
 
@@ -939,7 +945,7 @@ static void eap_proxy_qmi_deinit(struct eap_proxy_sm *eap_proxy)
         if (!eap_proxy->qmi_thread_joined) {
                 wpa_printf(MSG_ERROR, "eap_proxy: pthread_join on eap_proxy=%p", eap_proxy);
                 pthread_join(eap_proxy->thread_id, NULL);
-                eap_proxy->qmi_thread_joined = true;
+                eap_proxy->qmi_thread_joined = TRUE;
         }
         eap_proxy->proxy_state = EAP_PROXY_DISABLED;
         wpa_uim = eap_proxy->wpa_uim;
@@ -1010,7 +1016,6 @@ void eap_proxy_deinit(struct eap_proxy_sm *eap_proxy)
 {
         eap_proxy_qmi_deinit(eap_proxy);
         if (eap_proxy != NULL) {
-            pthread_mutex_destroy(&(eap_proxy->lock));
             os_free(eap_proxy);
             eap_proxy = NULL;
             wpa_printf(MSG_INFO, "eap_proxy: eap_proxy Deinitialzed\n");
@@ -1109,7 +1114,7 @@ static void handle_qmi_eap_reply(
         wpa_printf(MSG_ERROR, "eap_proxy: %s started\n", __func__);
         if (eap_proxy == NULL) {
                 wpa_printf(MSG_ERROR, "eap_proxy: eap_proxy is NULL");
-                return;
+                goto done;
         }
         if (QMI_STATE_RESP_PENDING == eap_proxy->qmi_state) {
 
@@ -1122,20 +1127,20 @@ static void handle_qmi_eap_reply(
                                         " the request: sysErrorCode=%d\n",
                                         sysErrCode);
                         eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
-                        return;
+                        goto done;
                 }
 
                 if (NULL == rspData) {
                         wpa_printf(MSG_ERROR, "eap_proxy: Response data is NULL\n");
                         eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
-                        return;
+                        goto done;
                 }
                 if((QMI_AUTH_SEND_EAP_PACKET_REQ_V01 != msg_id) &&
                    (QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 != msg_id))
                 {
                         wpa_printf(MSG_ERROR, "eap_proxy: Invalid msgId =%d\n", msg_id);
                         eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
-                        return;
+                        goto done;
                 }
 
                 /* ensure the reply packet exists  */
@@ -1145,7 +1150,7 @@ static void handle_qmi_eap_reply(
                                 " error %d result %d\n", rspData->eap_response_pkt_len,
                                 rspData->resp.error, rspData->resp.result);
                         eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
-                        return;
+                        goto done;
                 }
 
                 length = rspData->eap_response_pkt_len;
@@ -1161,8 +1166,7 @@ static void handle_qmi_eap_reply(
                         wpa_printf(MSG_ERROR, "eap_proxy: Unable to allocate memory for"
                                         " reply packet\n");
                         eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
-
-                        return;
+                        goto done;
                 }
 
                 /* copy the response data to the allocated buffer */
@@ -1175,6 +1179,11 @@ static void handle_qmi_eap_reply(
                 dump_buff(resp_data, length);
         }
 
+done:
+        if (rspData != NULL) {
+                os_free(rspData);
+                rspData = NULL;
+        }
         return;
 }
 
@@ -1185,11 +1194,11 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
         int qmiErrorCode = QMI_NO_ERR;
         enum eap_proxy_status proxy_status = EAP_PROXY_SUCCESS;
         auth_send_eap_packet_req_msg_v01 eap_send_packet_req;
-        auth_send_eap_packet_resp_msg_v01 eap_send_packet_resp;
+        auth_send_eap_packet_resp_msg_v01 *eap_send_packet_resp = NULL;
         qmi_txn_handle async_txn_hdl = 0;
 
         auth_send_eap_packet_ext_req_msg_v01 eap_send_packet_ext_req;
-        auth_send_eap_packet_ext_resp_msg_v01 eap_send_packet_ext_resp;
+        auth_send_eap_packet_ext_resp_msg_v01 *eap_send_packet_ext_resp = NULL;
 
 
         hdr = (struct eap_hdr *)eapReqData;
@@ -1231,21 +1240,11 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
         wpa_printf(MSG_ERROR, "eap_proxy: ***********Dump ReqData len %d***********",
                 eapReqDataLen);
         dump_buff(eapReqData, eapReqDataLen);
-        if (eapReqDataLen <= QMI_AUTH_EAP_REQ_PACKET_MAX_V01) {
-                os_memset(&eap_send_packet_req, 0, sizeof(auth_send_eap_packet_req_msg_v01));
-                os_memset(&eap_send_packet_resp, 0, sizeof(auth_send_eap_packet_resp_msg_v01));
-                eap_send_packet_req.eap_request_pkt_len = eapReqDataLen ;
-                memcpy(eap_send_packet_req.eap_request_pkt, eapReqData, eapReqDataLen);
-        } else if (eapReqDataLen <= QMI_AUTH_EAP_REQ_PACKET_EXT_MAX_V01) {
-                os_memset(&eap_send_packet_ext_req, 0,
-                        sizeof(auth_send_eap_packet_ext_req_msg_v01));
-                os_memset(&eap_send_packet_ext_resp, 0,
-                        sizeof(auth_send_eap_packet_ext_resp_msg_v01));
-                eap_send_packet_ext_req.eap_request_ext_pkt_len = eapReqDataLen;
-                memcpy(eap_send_packet_ext_req.eap_request_ext_pkt, eapReqData, eapReqDataLen);
-        } else {
-                        wpa_printf(MSG_ERROR, "eap_proxy: Error in eap_send_packet_req\n");
-                        return EAP_PROXY_FAILURE;
+
+        if ((eapReqDataLen > QMI_AUTH_EAP_REQ_PACKET_MAX_V01) &&
+            (eapReqDataLen > QMI_AUTH_EAP_REQ_PACKET_EXT_MAX_V01)) {
+                wpa_printf(MSG_ERROR, "eap_proxy: Error in eap_send_packet_req\n");
+                return EAP_PROXY_FAILURE;
         }
 
         wpa_printf(MSG_ERROR, "eap_proxy: SIM selected by User: Selected sim = %d\n",
@@ -1259,13 +1258,36 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
         wpa_printf (MSG_ERROR, "eap_proxy: In eap_proxy_process case %d\n", hdr->code);
         eap_proxy->qmi_state = QMI_STATE_RESP_PENDING;
 
+        if (eapReqDataLen <= QMI_AUTH_EAP_REQ_PACKET_MAX_V01) {
+                os_memset(&eap_send_packet_req, 0, sizeof(auth_send_eap_packet_req_msg_v01));
+                eap_send_packet_req.eap_request_pkt_len = eapReqDataLen ;
+                memcpy(eap_send_packet_req.eap_request_pkt, eapReqData, eapReqDataLen);
+
+                eap_send_packet_resp = os_zalloc(sizeof(auth_send_eap_packet_resp_msg_v01));
+                if (eap_send_packet_resp == NULL) {
+                        wpa_printf(MSG_ERROR, "Error allocating memory for eap_packet_resp_msg");
+                        return EAP_PROXY_FAILURE;
+                }
+        } else if (eapReqDataLen <= QMI_AUTH_EAP_REQ_PACKET_EXT_MAX_V01) {
+                os_memset(&eap_send_packet_ext_req, 0,
+                        sizeof(auth_send_eap_packet_ext_req_msg_v01));
+                eap_send_packet_ext_req.eap_request_ext_pkt_len = eapReqDataLen;
+                memcpy(eap_send_packet_ext_req.eap_request_ext_pkt, eapReqData, eapReqDataLen);
+
+                eap_send_packet_ext_resp = os_zalloc(sizeof(auth_send_eap_packet_ext_resp_msg_v01));
+                if (eap_send_packet_ext_resp == NULL) {
+                        wpa_printf(MSG_ERROR, "Error allocating memory for eap_send_packet_ext_resp");
+                        return EAP_PROXY_FAILURE;
+                }
+        }
+
         if(eapReqDataLen <= QMI_AUTH_EAP_REQ_PACKET_MAX_V01) {
                 qmiErrorCode = qmi_client_send_msg_async(
                                 eap_proxy->qmi_auth_svc_client_ptr[eap_proxy->user_selected_sim],
                                 QMI_AUTH_SEND_EAP_PACKET_REQ_V01,
                                 (void *) &eap_send_packet_req,
                                 sizeof(auth_send_eap_packet_req_msg_v01),
-                                (void *) &eap_send_packet_resp,
+                                (void *) eap_send_packet_resp,
                                 sizeof(auth_send_eap_packet_resp_msg_v01),
                                 &handle_qmi_eap_reply, eap_proxy,
                                 &async_txn_hdl);
@@ -1275,7 +1297,7 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
                                 QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01,
                                 (void *) &eap_send_packet_ext_req,
                                 sizeof(auth_send_eap_packet_ext_req_msg_v01),
-                                (void *) &eap_send_packet_ext_resp,
+                                (void *) eap_send_packet_ext_resp,
                                 sizeof(auth_send_eap_packet_ext_resp_msg_v01),
                                 &handle_qmi_eap_reply, eap_proxy,
                                 &async_txn_hdl);
@@ -1284,20 +1306,14 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
         if (QMI_NO_ERR != qmiErrorCode) {
                 wpa_printf(MSG_ERROR, "QMI-ERROR Error in sending EAP packet;"
                                 " error_code=%d\n", qmiErrorCode);
-                eap_proxy->proxy_state = EAP_PROXY_DISCARD;
-                eap_proxy_eapol_sm_set_bool(eap_proxy, EAPOL_eapNoResp, TRUE);
-                eap_proxy->qmi_state = QMI_STATE_RESP_PENDING;
-                return EAP_PROXY_FAILURE;
+                goto fail;
         } else {
                 wpa_printf (MSG_ERROR, "eap_proxy: In eap_proxy_process case %d\n", hdr->code);
                 switch (hdr->code) {
                 case EAP_CODE_SUCCESS:
                         if (EAP_PROXY_SUCCESS !=
                                 eap_proxy_qmi_response_wait(eap_proxy)) {
-                                eap_proxy->proxy_state = EAP_PROXY_DISCARD;
-                                eap_proxy_eapol_sm_set_bool(eap_proxy,
-                                                        EAPOL_eapNoResp, TRUE);
-                                return EAP_PROXY_FAILURE;
+                                goto fail;
                         } else if( eap_proxy->proxy_state == EAP_PROXY_AUTH_SUCCESS ) {
                                 eap_proxy_get_keys(eap_proxy);
                                 eap_proxy_eapol_sm_set_bool(eap_proxy,
@@ -1373,10 +1389,7 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
                                         eap_proxy->proxy_state = EAP_PROXY_SEND_RESPONSE;
                         if (EAP_PROXY_SUCCESS !=
                                 eap_proxy_qmi_response_wait(eap_proxy)) {
-                                eap_proxy->proxy_state = EAP_PROXY_DISCARD;
-                                eap_proxy_eapol_sm_set_bool(eap_proxy,
-                                                        EAPOL_eapNoResp, TRUE);
-                                return EAP_PROXY_FAILURE;
+                                goto fail;
                         } else {
                                 eap_proxy_eapol_sm_set_bool(eap_proxy,
                                                         EAPOL_eapResp, TRUE);
@@ -1392,14 +1405,22 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
                 default:
                         wpa_printf(MSG_ERROR, "eap_proxy: Error in sending EAP packet;"
                                          " error_code=%d\n", qmiErrorCode);
-                        eap_proxy->proxy_state = EAP_PROXY_DISCARD;
-                        eap_proxy_eapol_sm_set_bool(eap_proxy,
-                                EAPOL_eapNoResp, TRUE);
-                        return EAP_PROXY_FAILURE;
+                        goto fail;
                 }
         }
 
         return EAP_PROXY_SUCCESS;
+
+fail:
+        if (eap_send_packet_resp != NULL)
+            os_free(eap_send_packet_resp);
+        if (eap_send_packet_ext_resp != NULL)
+            os_free(eap_send_packet_ext_resp);
+
+        eap_proxy->proxy_state = EAP_PROXY_DISCARD;
+        eap_proxy_eapol_sm_set_bool(eap_proxy, EAPOL_eapNoResp, TRUE);
+
+        return EAP_PROXY_FAILURE;
 }
 
 
