@@ -9402,7 +9402,7 @@ static int nl80211_set_bssid_blacklist(void *priv, unsigned int num_bssid,
 			QCA_NL80211_VENDOR_SUBCMD_ROAM) ||
 	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)) ||
 	    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_ROAMING_SUBCMD,
-			QCA_WLAN_VENDOR_ATTR_ROAM_SUBCMD_SET_BLACKLIST_BSSID) ||
+			QCA_WLAN_VENDOR_ROAMING_SUBCMD_SET_BLACKLIST_BSSID) ||
 	    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_ROAMING_REQ_ID,
 			WPA_SUPPLICANT_CLIENT_ID) ||
 	    nla_put_u32(msg,
@@ -10793,6 +10793,14 @@ static int nl80211_update_connection_params(
 	struct nl_msg *msg;
 	int ret = -1;
 	enum nl80211_auth_type type;
+
+	/* Update Connection Params is intended for drivers that implement
+	 * internal SME and expect these updated connection params from
+	 * wpa_supplicant. Do not send this request for the drivers using
+	 * SME from wpa_supplicant.
+	 */
+	if (drv->capa.flags & WPA_DRIVER_FLAGS_SME)
+		return 0;
 
 	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_UPDATE_CONNECT_PARAMS);
 	if (!msg)
