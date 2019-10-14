@@ -1654,6 +1654,26 @@ SupplicantStatus P2pIface::addGroup_1_2Internal(
 		os_memset(p2p->passphrase, 0, sizeof(p2p->passphrase));
 		os_memcpy(p2p->passphrase, passphrase.c_str(), passphrase.length());
 		p2p->passphrase_set = 1;
+#ifdef CONFIG_ACS
+		if (wpa_s->drv_flags & WPA_DRIVER_FLAGS_ACS_OFFLOAD) {
+			if (freq == 0) {
+				wpa_s->p2p_go_acs_band = HOSTAPD_MODE_IEEE80211ANY;
+				wpa_s->p2p_go_do_acs = 1;
+			} else if (freq == 2) {
+				wpa_s->p2p_go_acs_band = HOSTAPD_MODE_IEEE80211G;
+				wpa_s->p2p_go_do_acs = 1;
+				freq = 0;
+			} else if (freq == 5) {
+				wpa_s->p2p_go_acs_band = HOSTAPD_MODE_IEEE80211A;
+				wpa_s->p2p_go_do_acs = 1;
+				freq = 0;
+			} else {
+				wpa_s->p2p_go_do_acs = 0;
+			}
+		} else {
+			wpa_s->p2p_go_do_acs = 0;
+		}
+#endif /* CONFIG_ACS */
 
 		if (wpas_p2p_group_add(
 		    wpa_s, persistent, freq, 0, ht40, vht,
