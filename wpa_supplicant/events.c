@@ -316,8 +316,9 @@ void wpa_supplicant_mark_disassoc(struct wpa_supplicant *wpa_s)
 	eapol_sm_notify_portValid(wpa_s->eapol, FALSE);
 	if (wpa_key_mgmt_wpa_psk(wpa_s->key_mgmt) ||
 	    wpa_s->key_mgmt == WPA_KEY_MGMT_OWE ||
-	    wpa_s->key_mgmt == WPA_KEY_MGMT_DPP)
+	    wpa_s->key_mgmt == WPA_KEY_MGMT_DPP || wpa_s->drv_authorized_port)
 		eapol_sm_notify_eap_success(wpa_s->eapol, FALSE);
+	wpa_s->drv_authorized_port = 0;
 	wpa_s->ap_ies_from_associnfo = 0;
 	wpa_s->current_ssid = NULL;
 	eapol_sm_notify_config(wpa_s->eapol, NULL, NULL);
@@ -326,6 +327,7 @@ void wpa_supplicant_mark_disassoc(struct wpa_supplicant *wpa_s)
 	wpas_rrm_reset(wpa_s);
 	wpa_s->wnmsleep_used = 0;
 	wnm_clear_coloc_intf_reporting(wpa_s);
+	wpa_s->disable_mbo_oce = 0;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	wpa_s->last_tk_alg = WPA_ALG_NONE;
@@ -629,17 +631,6 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 					"   skip RSN IE - no mgmt frame protection enabled but AP requires it");
 			break;
 		}
-#ifdef CONFIG_MBO
-		if (!(ie.capabilities & WPA_CAPABILITY_MFPC) &&
-		    wpas_mbo_get_bss_attr(bss, MBO_ATTR_ID_AP_CAPA_IND) &&
-		    wpas_get_ssid_pmf(wpa_s, ssid) !=
-		    NO_MGMT_FRAME_PROTECTION) {
-			if (debug_print)
-				wpa_dbg(wpa_s, MSG_DEBUG,
-					"   skip RSN IE - no mgmt frame protection enabled on MBO AP");
-			break;
-		}
-#endif /* CONFIG_MBO */
 
 		if (debug_print)
 			wpa_dbg(wpa_s, MSG_DEBUG,
@@ -2867,7 +2858,7 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 	if (wpa_key_mgmt_wpa_psk(wpa_s->key_mgmt) ||
 	    wpa_s->key_mgmt == WPA_KEY_MGMT_DPP ||
 	    wpa_s->key_mgmt == WPA_KEY_MGMT_OWE || ft_completed ||
-	    already_authorized)
+	    already_authorized || wpa_s->drv_authorized_port)
 		eapol_sm_notify_eap_success(wpa_s->eapol, FALSE);
 	/* 802.1X::portControl = Auto */
 	eapol_sm_notify_portEnabled(wpa_s->eapol, TRUE);
@@ -3970,6 +3961,7 @@ static void wpa_supplicant_event_port_authorized(struct wpa_supplicant *wpa_s)
 		wpa_supplicant_set_state(wpa_s, WPA_COMPLETED);
 		eapol_sm_notify_portValid(wpa_s->eapol, TRUE);
 		eapol_sm_notify_eap_success(wpa_s->eapol, TRUE);
+		wpa_s->drv_authorized_port = 1;
 	}
 }
 

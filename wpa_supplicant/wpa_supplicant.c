@@ -124,6 +124,9 @@ static void wpa_bss_tmp_disallow_timeout(void *eloop_ctx, void *timeout_ctx);
 #if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
 static void wpas_update_fils_connect_params(struct wpa_supplicant *wpa_s);
 #endif /* CONFIG_FILS && IEEE8021X_EAPOL */
+#ifdef CONFIG_OWE
+static void wpas_update_owe_connect_params(struct wpa_supplicant *wpa_s);
+#endif
 
 
 /* Configure default/group WEP keys for static WEP */
@@ -944,6 +947,10 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 		if (!fils_hlp_sent && ssid && ssid->eap.erp)
 			wpas_update_fils_connect_params(wpa_s);
 #endif /* CONFIG_FILS && IEEE8021X_EAPOL */
+#ifdef CONFIG_OWE
+		if (ssid && ssid->key_mgmt & WPA_KEY_MGMT_OWE)
+			wpas_update_owe_connect_params(wpa_s);
+#endif
 	} else if (state == WPA_DISCONNECTED || state == WPA_ASSOCIATING ||
 		   state == WPA_ASSOCIATED) {
 		wpa_s->new_connection = 1;
@@ -1410,7 +1417,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 
 #ifdef CONFIG_IEEE80211R
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_ADAPT_FT_KEY_MGMT, 0);
-	if ((sel & WPA_KEY_MGMT_PSK) || (sel & WPA_KEY_MGMT_IEEE8021X)) {
+	if (bss && ((sel & WPA_KEY_MGMT_PSK) || (sel & WPA_KEY_MGMT_IEEE8021X))) {
 		adaptive_11r_ie = wpa_bss_get_vendor_ie(bss, ADAPTIVE_11R_IE_VENDOR_TYPE);
 
 		if (adaptive_11r_ie) {
@@ -1730,7 +1737,7 @@ static void wpas_ext_capab_byte(struct wpa_supplicant *wpa_s, u8 *pos, int idx)
 	case 2: /* Bits 16-23 */
 #ifdef CONFIG_WNM
 		*pos |= 0x02; /* Bit 17 - WNM-Sleep Mode */
-		if (!wpa_s->conf->disable_btm)
+		if (!wpa_s->disable_mbo_oce && !wpa_s->conf->disable_btm)
 			*pos |= 0x08; /* Bit 19 - BSS Transition */
 #endif /* CONFIG_WNM */
 		break;
@@ -2083,6 +2090,10 @@ void wpa_supplicant_associate(struct wpa_supplicant *wpa_s,
 		wpa_tdls_ap_ies(wpa_s->wpa, (const u8 *) (bss + 1),
 				bss->ie_len);
 #endif /* CONFIG_TDLS */
+
+#ifdef CONFIG_MBO
+	wpas_mbo_check_pmf(wpa_s, bss, ssid);
+#endif /* CONFIG_MBO */
 
 	if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) &&
 	    ssid->mode == IEEE80211_MODE_INFRA) {
@@ -2829,7 +2840,7 @@ static u8 * wpas_populate_assoc_ies(
 
 #ifdef CONFIG_MBO
 	mbo_ie = bss ? wpa_bss_get_vendor_ie(bss, MBO_IE_VENDOR_TYPE) : NULL;
-	if (mbo_ie) {
+	if (!wpa_s->disable_mbo_oce && mbo_ie) {
 		int len;
 
 		len = wpas_mbo_ie(wpa_s, wpa_ie + wpa_ie_len,
@@ -2967,6 +2978,24 @@ pfs_fail:
 
 	return wpa_ie;
 }
+
+
+#ifdef CONFIG_OWE
+static void wpas_update_owe_connect_params(struct wpa_supplicant *wpa_s)
+{
+	struct wpa_driver_associate_params params;
+	u8 *wpa_ie;
+
+	os_memset(&params, 0, sizeof(params));
+	wpa_ie = wpas_populate_assoc_ies(wpa_s, wpa_s->current_bss,
+					 wpa_s->current_ssid, &params, NULL);
+	if (!wpa_ie)
+		return;
+
+	wpa_drv_update_connect_params(wpa_s, &params, WPA_DRV_UPDATE_ASSOC_IES);
+	os_free(wpa_ie);
+}
+#endif /* CONFIG_OWE */
 
 
 #if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
@@ -5964,7 +5993,7 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 	hs20_init(wpa_s);
 #endif /* CONFIG_HS20 */
 #ifdef CONFIG_MBO
-	if (wpa_s->conf->oce) {
+	if (!wpa_s->disable_mbo_oce && wpa_s->conf->oce) {
 		if ((wpa_s->conf->oce & OCE_STA) &&
 		    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_OCE_STA))
 			wpa_s->enable_oce = OCE_STA;
