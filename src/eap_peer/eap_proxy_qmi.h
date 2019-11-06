@@ -103,6 +103,26 @@ typedef struct {
         int                                   qmi_msg_lib_handle;
 } wpa_uim_struct_type;
 
+struct qmi_cb_data {
+        struct dl_list list;
+
+        /* Common data for a QMI callback */
+        qmi_client_type userHandle;
+        unsigned int msg_id;
+        void *buf;
+        unsigned int buflen;
+        void *userdata;
+
+        /* additional data for eap_reply */
+        qmi_client_error_type err_code;
+};
+
+typedef enum {
+        EAP_PROXY_MODEM_UNKNOWN = 0x00,
+        EAP_PROXY_MODEM_UIM_UP  = 0x01,
+        EAP_PROXY_MODEM_AUTH_UP = 0x02,
+        EAP_PROXY_MODEM_FULL_UP = 0x03,
+} qmi_modem_state;
 
 struct eap_proxy_sm {
         qmi_client_type qmi_auth_svc_client_ptr[MAX_NO_OF_SIM_SUPPORTED];
@@ -132,6 +152,15 @@ struct eap_proxy_sm {
         u8 *emsk;
         // To check if eap_proxy_sm for curernt interface is initialized/in use
         Boolean initialized;
+        /* list to maintain qmi_cb_data list */
+        struct dl_list callback;
+        // To trigger initialization post SSR based on modem UP state.
+        qmi_modem_state modem_state;
+        qmi_client_os_params uim_notifier_os_params;
+        qmi_client_os_params auth_notifier_os_params;
+        qmi_client_type uim_notifier_handle;
+        qmi_client_type auth_notifier_handle;
+        Boolean notifier_cb_initialized;
 };
 
 int eap_proxy_allowed_method(struct eap_peer_config *config, int vendor,
