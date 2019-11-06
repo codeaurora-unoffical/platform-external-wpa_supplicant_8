@@ -327,7 +327,6 @@ int joinGroup(
 	int ret = 0;
 	int vht = wpa_s->conf->p2p_go_vht;
 	int ht40 = wpa_s->conf->p2p_go_ht40 || vht;
-	int he = wpa_s->conf->p2p_go_he;
 
 	// Construct a network for adding group.
 	// Group client follows the persistent attribute of Group Owner.
@@ -344,7 +343,7 @@ int joinGroup(
 
 	if (wpas_p2p_group_add_persistent(
 		wpa_s, wpa_network, 0, 0, 0, 0, ht40, vht,
-		VHT_CHANWIDTH_USE_HT, he, NULL, 0, 1)) {
+		VHT_CHANWIDTH_USE_HT, 0, NULL, 0, 1)) {
 		ret = -1;
 	}
 
@@ -1057,13 +1056,12 @@ std::pair<SupplicantStatus, std::string> P2pIface::connectInternal(
 	}
 	int vht = wpa_s->conf->p2p_go_vht;
 	int ht40 = wpa_s->conf->p2p_go_ht40 || vht;
-	int he = wpa_s->conf->p2p_go_he;
 	const char* pin =
 	    pre_selected_pin.length() > 0 ? pre_selected_pin.data() : nullptr;
 	int new_pin = wpas_p2p_connect(
 	    wpa_s, peer_address.data(), pin, wps_method, persistent, false,
 	    join_existing_group, false, go_intent_signed, 0, 0, -1, false, ht40,
-	    vht, VHT_CHANWIDTH_USE_HT, he, nullptr, 0);
+	    vht, VHT_CHANWIDTH_USE_HT, 0, nullptr, 0);
 	if (new_pin < 0) {
 		return {{SupplicantStatusCode::FAILURE_UNKNOWN, ""}, {}};
 	}
@@ -1121,13 +1119,12 @@ SupplicantStatus P2pIface::addGroupInternal(
 	struct wpa_supplicant* wpa_s = retrieveIfacePtr();
 	int vht = wpa_s->conf->p2p_go_vht;
 	int ht40 = wpa_s->conf->p2p_go_ht40 || vht;
-	int he = wpa_s->conf->p2p_go_he;
 	struct wpa_ssid* ssid =
 	    wpa_config_get_network(wpa_s->conf, persistent_network_id);
 	if (ssid == NULL) {
 		if (wpas_p2p_group_add(
 			wpa_s, persistent, 0, 0, ht40, vht,
-			VHT_CHANWIDTH_USE_HT, he)) {
+			VHT_CHANWIDTH_USE_HT, 0)) {
 			return {SupplicantStatusCode::FAILURE_UNKNOWN, ""};
 		} else {
 			return {SupplicantStatusCode::SUCCESS, ""};
@@ -1135,7 +1132,7 @@ SupplicantStatus P2pIface::addGroupInternal(
 	} else if (ssid->disabled == 2) {
 		if (wpas_p2p_group_add_persistent(
 			wpa_s, ssid, 0, 0, 0, 0, ht40, vht,
-			VHT_CHANWIDTH_USE_HT, he, NULL, 0, 0)) {
+			VHT_CHANWIDTH_USE_HT, 0, NULL, 0, 0)) {
 			return {SupplicantStatusCode::FAILURE_NETWORK_UNKNOWN,
 				""};
 		} else {
@@ -1192,7 +1189,6 @@ SupplicantStatus P2pIface::reinvokeInternal(
 	struct wpa_supplicant* wpa_s = retrieveIfacePtr();
 	int vht = wpa_s->conf->p2p_go_vht;
 	int ht40 = wpa_s->conf->p2p_go_ht40 || vht;
-	int he = wpa_s->conf->p2p_go_he;
 	struct wpa_ssid* ssid =
 	    wpa_config_get_network(wpa_s->conf, persistent_network_id);
 	if (ssid == NULL || ssid->disabled != 2) {
@@ -1200,7 +1196,7 @@ SupplicantStatus P2pIface::reinvokeInternal(
 	}
 	if (wpas_p2p_invite(
 		wpa_s, peer_address.data(), ssid, NULL, 0, 0, ht40, vht,
-		VHT_CHANWIDTH_USE_HT, 0, he)) {
+		VHT_CHANWIDTH_USE_HT, 0, 0)) {
 		return {SupplicantStatusCode::FAILURE_UNKNOWN, ""};
 	}
 	return {SupplicantStatusCode::SUCCESS, ""};
@@ -1631,7 +1627,6 @@ SupplicantStatus P2pIface::addGroup_1_2Internal(
 	struct wpa_supplicant* wpa_s = retrieveIfacePtr();
 	int vht = wpa_s->conf->p2p_go_vht;
 	int ht40 = wpa_s->conf->p2p_go_ht40 || vht;
-	int he = wpa_s->conf->p2p_go_he;
 
 	if (!isSsidValid(ssid)) {
 		return {SupplicantStatusCode::FAILURE_ARGS_INVALID, "SSID is invalid."};
@@ -1657,7 +1652,7 @@ SupplicantStatus P2pIface::addGroup_1_2Internal(
 
 		if (wpas_p2p_group_add(
 		    wpa_s, persistent, freq, 0, ht40, vht,
-		    VHT_CHANWIDTH_USE_HT, he)) {
+		    VHT_CHANWIDTH_USE_HT, 0)) {
 			return {SupplicantStatusCode::FAILURE_UNKNOWN, ""};
 		}
 		return {SupplicantStatusCode::SUCCESS, ""};
