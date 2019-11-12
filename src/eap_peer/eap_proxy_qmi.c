@@ -872,26 +872,13 @@ int eap_auth_end_eap_session(qmi_client_type qmi_auth_svc_client_ptr)
         return 0;
 }
 
-static void eap_proxy_schedule_thread(void *eloop_ctx, void *timeout_ctx)
-{
-        struct eap_proxy_sm *eap_proxy = eloop_ctx;
-        int ret = -1;
-
-        // Make note of new thread creation, so that we can take care of joining.
-        if (eap_proxy != NULL)
-                eap_proxy->qmi_thread_joined = FALSE;
-
-        ret = pthread_create(&eap_proxy->thread_id, NULL, eap_proxy_post_init, eap_proxy);
-        if(ret < 0)
-               wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
-}
-
 struct eap_proxy_sm *
 eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
                void *msg_ctx)
 {
         struct eap_proxy_sm *eap_proxy;
-        int ret;
+        pthread_attr_t attr;
+        int ret = -1;
 
         wpa_printf(MSG_ERROR, "eap_proxy: %s", __func__);
         eap_proxy =  os_zalloc(sizeof(struct eap_proxy_sm));
@@ -916,10 +903,21 @@ eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
         /* delay the qmi client initialization after the eloop_run starts,
         * in order to avoid the case of daemonize enabled, which exits the
         * parent process that created the qmi client context.
+        * NOTE: Spawn a new thread to allow eap_proxy initialization.
         */
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        ret = pthread_create(&eap_proxy->thread_id, &attr, eap_proxy_post_init, eap_proxy);
+        if(ret < 0) {
+                wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
+                goto fail;
+        }
 
-        eloop_register_timeout(0, 0, eap_proxy_schedule_thread, eap_proxy, NULL);
         return eap_proxy;
+fail:
+        os_free(eap_proxy);
+        eap_proxy = NULL;
+        return NULL;
 }
 
 
