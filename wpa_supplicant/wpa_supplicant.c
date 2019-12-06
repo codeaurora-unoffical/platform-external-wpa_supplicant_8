@@ -848,6 +848,9 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 			      enum wpa_states state)
 {
 	enum wpa_states old_state = wpa_s->wpa_state;
+#if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
+	Boolean update_fils_connect_params = FALSE;
+#endif /* CONFIG_FILS && IEEE8021X_EAPOL */
 
 	wpa_dbg(wpa_s, MSG_DEBUG, "State: %s -> %s",
 		wpa_supplicant_state_txt(wpa_s->wpa_state),
@@ -945,7 +948,7 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 
 #if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
 		if (!fils_hlp_sent && ssid && ssid->eap.erp)
-			wpas_update_fils_connect_params(wpa_s);
+			update_fils_connect_params = TRUE;
 #endif /* CONFIG_FILS && IEEE8021X_EAPOL */
 #ifdef CONFIG_OWE
 		if (ssid && ssid->key_mgmt & WPA_KEY_MGMT_OWE)
@@ -991,6 +994,10 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 		    old_state == WPA_COMPLETED)
 			wpas_notify_auth_changed(wpa_s);
 	}
+#if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
+	if (update_fils_connect_params)
+		wpas_update_fils_connect_params(wpa_s);
+#endif /* CONFIG_FILS && IEEE8021X_EAPOL */
 }
 
 
@@ -1420,9 +1427,8 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 	if (bss && ((sel & WPA_KEY_MGMT_PSK) || (sel & WPA_KEY_MGMT_IEEE8021X))) {
 		adaptive_11r_ie = wpa_bss_get_vendor_ie(bss, ADAPTIVE_11R_IE_VENDOR_TYPE);
 
-		if (adaptive_11r_ie) {
-			/* TODO : Check for further IE Data ? Not an issue for now */
-			wpa_msg(wpa_s, MSG_ERROR, "Adapt 11r Enabled for BSS " MACSTR "",
+		if (adaptive_11r_ie && (adaptive_11r_ie[6] & 0x1)) {
+			wpa_msg(wpa_s, MSG_ERROR, "Adaptive 11r is Enabled for BSS " MACSTR "",
 				MAC2STR(bss->bssid));
 			sel = (sel & WPA_KEY_MGMT_PSK) ? WPA_KEY_MGMT_FT_PSK : WPA_KEY_MGMT_FT_IEEE8021X;
 			wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_ADAPT_FT_KEY_MGMT, 1);
