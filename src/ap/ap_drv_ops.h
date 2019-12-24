@@ -60,8 +60,8 @@ int hostapd_get_seqnum(const char *ifname, struct hostapd_data *hapd,
 		       const u8 *addr, int idx, u8 *seq);
 int hostapd_flush(struct hostapd_data *hapd);
 int hostapd_set_freq(struct hostapd_data *hapd, enum hostapd_hw_mode mode,
-		     int freq, int channel, int ht_enabled, int vht_enabled,
-		     int sec_channel_offset, int vht_oper_chwidth,
+		     int freq, int channel, int edmg, u8 edmg_channel, int ht_enabled,
+		     int vht_enabled, int sec_channel_offset, int vht_oper_chwidth,
 		     int center_segment0, int center_segment1);
 int hostapd_set_rts(struct hostapd_data *hapd, int rts);
 int hostapd_set_frag(struct hostapd_data *hapd, int frag);
@@ -384,6 +384,14 @@ hostapd_drv_send_external_auth_status(struct hostapd_data *hapd,
 	    !hapd->driver->send_external_auth_status)
 		return -1;
 	return hapd->driver->send_external_auth_status(hapd->drv_priv, params);
+}
+
+static inline int
+hostapd_drv_set_band(struct hostapd_data *hapd, enum set_band band)
+{
+	if (!hapd->driver || !hapd->drv_priv || !hapd->driver->set_band)
+		return -1;
+	return hapd->driver->set_band(hapd->drv_priv, band);
 }
 
 #endif /* AP_DRV_OPS */
