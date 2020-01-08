@@ -2235,6 +2235,16 @@ void wpas_wps_update_config(struct wpa_supplicant *wpa_s)
 }
 
 
+void wpas_wps_update_mac_addr(struct wpa_supplicant *wpa_s)
+{
+	struct wps_context *wps;
+
+	wps = wpa_s->wps;
+	if (wps)
+		os_memcpy(wps->dev.mac_addr, wpa_s->own_addr, ETH_ALEN);
+}
+
+
 #ifdef CONFIG_WPS_NFC
 
 #ifdef CONFIG_WPS_ER
@@ -2681,7 +2691,7 @@ static int wpas_wps_nfc_rx_handover_sel(struct wpa_supplicant *wpa_s,
 			 (attr.rf_bands == NULL ||
 			  *attr.rf_bands & WPS_RF_50GHZ))
 			freq = 5000 + 5 * chan;
-		else if (chan >= 1 && chan <= 4 &&
+		else if (chan >= 1 && chan <= 6 &&
 			 (attr.rf_bands == NULL ||
 			  *attr.rf_bands & WPS_RF_60GHZ))
 			freq = 56160 + 2160 * chan;
