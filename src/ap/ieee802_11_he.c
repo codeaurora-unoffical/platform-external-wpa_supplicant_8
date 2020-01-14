@@ -19,9 +19,10 @@
 u8 * hostapd_eid_he_capab(struct hostapd_data *hapd, u8 *eid)
 {
 	struct ieee80211_he_capabilities *cap;
+	struct hostapd_hw_modes *mode = hapd->iface->current_mode;
 	u8 *pos = eid;
 
-	if (!hapd->iface->current_mode)
+	if (!mode)
 		return eid;
 
 	*pos++ = WLAN_EID_EXTENSION;
@@ -30,6 +31,13 @@ u8 * hostapd_eid_he_capab(struct hostapd_data *hapd, u8 *eid)
 
 	cap = (struct ieee80211_he_capabilities *) pos;
 	os_memset(cap, 0, sizeof(*cap));
+
+	os_memcpy(cap->he_mac_capab_info, mode->he_capab.mac_cap,
+		  HE_MAX_MAC_CAPAB_SIZE);
+	os_memcpy(cap->he_phy_capab_info, mode->he_capab.phy_cap,
+		  HE_MAX_PHY_CAPAB_SIZE);
+	os_memcpy(cap->he_txrx_mcs_support, mode->he_capab.mcs,
+		  HE_MAX_MCS_CAPAB_SIZE);
 
 	if (hapd->iface->conf->he_phy_capab.he_su_beamformer)
 		cap->he_phy_capab_info[HE_PHYCAP_SU_BEAMFORMER_CAPAB_IDX] |=
@@ -117,6 +125,45 @@ u8 * hostapd_eid_he_mu_edca_parameter_set(struct hostapd_data *hapd, u8 *eid)
 		    pos, sizeof(*edca));
 
 	pos += sizeof(*edca);
+
+	return pos;
+}
+
+
+u8 * hostapd_eid_spatial_reuse(struct hostapd_data *hapd, u8 *eid)
+{
+	struct ieee80211_spatial_reuse *spr;
+	u8 *pos = eid, *spr_param;
+	u8 sz = 1;
+
+	if (hapd->iface->conf->spr.sr_control &
+	    SPATIAL_REUSE_NON_SRG_OFFSET_PRESENT)
+		sz++;
+
+	if (hapd->iface->conf->spr.sr_control &
+	    SPATIAL_REUSE_SRG_INFORMATION_PRESENT)
+		sz += 18;
+
+	*pos++ = WLAN_EID_EXTENSION;
+	*pos++ = 1 + sz;
+	*pos++ = WLAN_EID_EXT_SPATIAL_REUSE;
+
+	spr = (struct ieee80211_spatial_reuse *) pos;
+	os_memset(spr, 0, sizeof(*spr));
+
+	spr->sr_ctrl = hapd->iface->conf->spr.sr_control;
+	pos++;
+	spr_param = spr->params;
+	if (spr->sr_ctrl & SPATIAL_REUSE_NON_SRG_OFFSET_PRESENT) {
+		*spr_param++ =
+			hapd->iface->conf->spr.non_srg_obss_pd_max_offset;
+		pos++;
+	}
+	if (spr->sr_ctrl & SPATIAL_REUSE_SRG_INFORMATION_PRESENT) {
+		*spr_param++ = hapd->iface->conf->spr.srg_obss_pd_min_offset;
+		*spr_param++ = hapd->iface->conf->spr.srg_obss_pd_max_offset;
+		pos += 18;
+	}
 
 	return pos;
 }
