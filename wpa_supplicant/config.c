@@ -2240,8 +2240,8 @@ static const struct parse_data ssid_fields[] = {
 	{ INT_RANGE(ht, 0, 1) },
 	{ INT_RANGE(vht, 0, 1) },
 	{ INT_RANGE(ht40, -1, 1) },
-	{ INT_RANGE(max_oper_chwidth, VHT_CHANWIDTH_USE_HT,
-		    VHT_CHANWIDTH_80P80MHZ) },
+	{ INT_RANGE(max_oper_chwidth, CHANWIDTH_USE_HT,
+		    CHANWIDTH_80P80MHZ) },
 	{ INT(vht_center_freq1) },
 	{ INT(vht_center_freq2) },
 #ifdef IEEE8021X_EAPOL
@@ -4782,6 +4782,7 @@ static const struct global_parse_data global_fields[] = {
 	{ INT(p2p_go_ht40), 0 },
 	{ INT(p2p_go_vht), 0 },
 	{ INT(p2p_go_he), 0 },
+	{ INT(p2p_go_edmg), 0 },
 	{ INT(p2p_disabled), 0 },
 	{ INT_RANGE(p2p_go_ctwindow, 0, 127), 0 },
 	{ INT(p2p_no_group_iface), 0 },
