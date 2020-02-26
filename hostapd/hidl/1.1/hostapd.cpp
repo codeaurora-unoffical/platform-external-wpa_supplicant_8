@@ -20,6 +20,10 @@
 extern "C"
 {
 #include "utils/eloop.h"
+
+#define VENDOR_ENCRYPTION_TYPE_SAE 6
+#define VENDOR_ENCRYPTION_TYPE_OWE 7
+
 }
 
 // The HIDL implementation for hostapd creates a hostapd.conf dynamically for
@@ -76,7 +80,10 @@ std::string CreateHostapdConfig(
 		    MSG_ERROR, "Invalid SSID size: %zu", nw_params.ssid.size());
 		return "";
 	}
-	if ((nw_params.encryptionType != IHostapd::EncryptionType::NONE) &&
+	if ((nw_params.encryptionType != IHostapd::EncryptionType::NONE &&
+#ifdef CONFIG_OWE
+	     static_cast<uint32_t>(nw_params.encryptionType) != VENDOR_ENCRYPTION_TYPE_OWE) &&
+#endif
 	    (nw_params.pskPassphrase.size() <
 		 static_cast<uint32_t>(
 		     IHostapd::ParamSizeLimits::
@@ -102,24 +109,45 @@ std::string CreateHostapdConfig(
 
 	// Encryption config string
 	std::string encryption_config_as_string;
-	switch (nw_params.encryptionType) {
-	case IHostapd::EncryptionType::NONE:
+	switch (static_cast<uint32_t>(nw_params.encryptionType)) {
+	case static_cast<uint32_t>(IHostapd::EncryptionType::NONE):
 		// no security params
 		break;
-	case IHostapd::EncryptionType::WPA:
+	case static_cast<uint32_t>(IHostapd::EncryptionType::WPA):
 		encryption_config_as_string = StringPrintf(
 		    "wpa=3\n"
 		    "wpa_pairwise=TKIP CCMP\n"
 		    "wpa_passphrase=%s",
 		    nw_params.pskPassphrase.c_str());
 		break;
-	case IHostapd::EncryptionType::WPA2:
+	case static_cast<uint32_t>(IHostapd::EncryptionType::WPA2):
 		encryption_config_as_string = StringPrintf(
 		    "wpa=2\n"
 		    "rsn_pairwise=CCMP\n"
 		    "wpa_passphrase=%s",
 		    nw_params.pskPassphrase.c_str());
 		break;
+#ifdef CONFIG_OWE
+	case VENDOR_ENCRYPTION_TYPE_OWE:
+		encryption_config_as_string =
+		    "wpa=2\n"
+		    "rsn_pairwise=CCMP\n"
+		    "wpa_key_mgmt=OWE\n"
+		    "ieee80211w=2";
+		break;
+#endif
+#ifdef CONFIG_SAE
+	case VENDOR_ENCRYPTION_TYPE_SAE:
+		encryption_config_as_string = StringPrintf(
+		    "wpa=2\n"
+		    "wpa_pairwise=CCMP\n"
+		    "wpa_key_mgmt=SAE WPA-PSK\n"
+		    "ieee80211w=1\n"
+		    "sae_require_mfp=1\n"
+		    "wpa_passphrase=%s",
+		    nw_params.pskPassphrase.c_str());
+		break;
+#endif
 	default:
 		wpa_printf(MSG_ERROR, "Unknown encryption type");
 		return "";
