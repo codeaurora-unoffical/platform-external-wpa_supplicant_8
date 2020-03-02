@@ -1276,11 +1276,15 @@ struct ieee80211_ampe_ie {
 
 #define VHT_RX_NSS_MAX_STREAMS			    8
 
-/* VHT channel widths */
-#define VHT_CHANWIDTH_USE_HT	0
-#define VHT_CHANWIDTH_80MHZ	1
-#define VHT_CHANWIDTH_160MHZ	2
-#define VHT_CHANWIDTH_80P80MHZ	3
+/* VHT/EDMG channel widths */
+#define CHANWIDTH_USE_HT	0
+#define CHANWIDTH_80MHZ		1
+#define CHANWIDTH_160MHZ	2
+#define CHANWIDTH_80P80MHZ	3
+#define CHANWIDTH_2160MHZ	4
+#define CHANWIDTH_4320MHZ	5
+#define CHANWIDTH_6480MHZ	6
+#define CHANWIDTH_8640MHZ	7
 
 #define OUI_MICROSOFT 0x0050f2 /* Microsoft (also used in Wi-Fi specs)
 				* 00:50:F2 */
@@ -2096,7 +2100,7 @@ enum phy_type {
 /*
  * IEEE P802.11-REVmc/D5.0 Table 9-152 - HT/VHT Operation Information
  * subfields.
- * Note: These definitions are not the same as other VHT_CHANWIDTH_*.
+ * Note: These definitions are not the same as other CHANWIDTH_*.
  */
 enum nr_chan_width {
 	NR_CHAN_WIDTH_20 = 0,
