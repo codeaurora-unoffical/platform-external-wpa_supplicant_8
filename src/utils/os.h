@@ -640,4 +640,6 @@ int os_exec(const char *program, const char *arg, int wait_completion);
 #define strcpy OS_DO_NOT_USE_strcpy
 #endif /* OS_REJECT_C_LIB_FUNCTIONS */
 
+#define TEST_FAIL() 0
+
 #endif /* OS_H */
