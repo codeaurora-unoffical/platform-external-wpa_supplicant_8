@@ -24,6 +24,7 @@
 #endif /* CONFIG_ECC */
 
 #include "common.h"
+#include "utils/const_time.h"
 #include "wpabuf.h"
 #include "dh_group5.h"
 #include "sha1.h"
@@ -333,7 +334,8 @@ int crypto_mod_exp(const u8 *base, size_t base_len,
 	    bn_result == NULL)
 		goto error;
 
-	if (BN_mod_exp(bn_result, bn_base, bn_exp, bn_modulus, ctx) != 1)
+	if (BN_mod_exp_mont_consttime(bn_result, bn_base, bn_exp, bn_modulus,
+				      ctx, NULL) != 1)
 		goto error;
 
 	*result_len = BN_bn2bin(bn_result, result);
@@ -908,8 +910,9 @@ int crypto_bignum_exptmod(const struct crypto_bignum *a,
 	bnctx = BN_CTX_new();
 	if (bnctx == NULL)
 		return -1;
-	res = BN_mod_exp((BIGNUM *) d, (const BIGNUM *) a, (const BIGNUM *) b,
-			 (const BIGNUM *) c, bnctx);
+	res = BN_mod_exp_mont_consttime((BIGNUM *) d, (const BIGNUM *) a,
+					(const BIGNUM *) b, (const BIGNUM *) c,
+					bnctx, NULL);
 	BN_CTX_free(bnctx);
 
 	return res ? 0 : -1;
@@ -926,6 +929,11 @@ int crypto_bignum_inverse(const struct crypto_bignum *a,
 	bnctx = BN_CTX_new();
 	if (bnctx == NULL)
 		return -1;
+#ifdef OPENSSL_IS_BORINGSSL
+	/* TODO: use BN_mod_inverse_blinded() ? */
+#else /* OPENSSL_IS_BORINGSSL */
+	BN_set_flags((BIGNUM *) a, BN_FLG_CONSTTIME);
+#endif /* OPENSSL_IS_BORINGSSL */
 	res = BN_mod_inverse((BIGNUM *) c, (const BIGNUM *) a,
 			     (const BIGNUM *) b, bnctx);
 	BN_CTX_free(bnctx);
@@ -954,6 +962,9 @@ int crypto_bignum_div(const struct crypto_bignum *a,
 	bnctx = BN_CTX_new();
 	if (bnctx == NULL)
 		return -1;
+#ifndef OPENSSL_IS_BORINGSSL
+	BN_set_flags((BIGNUM *) a, BN_FLG_CONSTTIME);
+#endif /* OPENSSL_IS_BORINGSSL */
 	res = BN_div((BIGNUM *) c, NULL, (const BIGNUM *) a,
 		     (const BIGNUM *) b, bnctx);
 	BN_CTX_free(bnctx);
@@ -1004,6 +1015,53 @@ int crypto_bignum_is_zero(const struct crypto_bignum *a)
 int crypto_bignum_is_one(const struct crypto_bignum *a)
 {
 	return BN_is_one((const BIGNUM *) a);
+}
+
+
+int crypto_bignum_is_odd(const struct crypto_bignum *a)
+{
+	return BN_is_odd((const BIGNUM *) a);
+}
+
+
+int crypto_bignum_legendre(const struct crypto_bignum *a,
+			   const struct crypto_bignum *p)
+{
+	BN_CTX *bnctx;
+	BIGNUM *exp = NULL, *tmp = NULL;
+	int res = -2;
+	unsigned int mask;
+
+	if (TEST_FAIL())
+		return -2;
+
+	bnctx = BN_CTX_new();
+	if (bnctx == NULL)
+		return -2;
+
+	exp = BN_new();
+	tmp = BN_new();
+	if (!exp || !tmp ||
+	    /* exp = (p-1) / 2 */
+	    !BN_sub(exp, (const BIGNUM *) p, BN_value_one()) ||
+	    !BN_rshift1(exp, exp) ||
+	    !BN_mod_exp_mont_consttime(tmp, (const BIGNUM *) a, exp,
+				       (const BIGNUM *) p, bnctx, NULL))
+		goto fail;
+
+	/* Return 1 if tmp == 1, 0 if tmp == 0, or -1 otherwise. Need to use
+	 * constant time selection to avoid branches here. */
+	res = -1;
+	mask = const_time_eq(BN_is_word(tmp, 1), 1);
+	res = const_time_select_int(mask, 1, res);
+	mask = const_time_eq(BN_is_zero(tmp), 1);
+	res = const_time_select_int(mask, 0, res);
+
+fail:
+	BN_clear_free(tmp);
+	BN_clear_free(exp);
+	BN_CTX_free(bnctx);
+	return res;
 }
 
 
