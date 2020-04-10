@@ -27,6 +27,7 @@
 
 #ifdef SUPPLICANT_VENDOR_HIDL
 #include "supplicantvendor.h"
+#include "vendorp2p_iface.h"
 #endif
 
 extern "C"
@@ -100,7 +101,8 @@ public:
 	void notifyP2pDeviceFound(
 	    struct wpa_supplicant *wpa_s, const u8 *addr,
 	    const struct p2p_peer_info *info, const u8 *peer_wfd_device_info,
-	    u8 peer_wfd_device_info_len);
+	    u8 peer_wfd_device_info_len, const u8 *peer_wfd_r2_device_info,
+	    u8 peer_wfd_r2_device_info_len);
 	void notifyP2pDeviceLost(
 	    struct wpa_supplicant *wpa_s, const u8 *p2p_device_addr);
 	void notifyP2pFindStopped(struct wpa_supplicant *wpa_s);
@@ -176,6 +178,12 @@ public:
 #ifdef SUPPLICANT_VENDOR_HIDL
 	//method for qti.hardware.wifi.supplicant@2.0
 	int registerVendorHidlService(struct wpa_global *global);
+	int addVendorP2pIfaceCallbackHidlObject(
+	    const std::string &ifname,
+	    const android::sp<ISupplicantVendorP2PIfaceCallback> &callback);
+	int getVendorP2pIfaceHidlObjectByIfname(
+	    const std::string &ifname,
+	    android::sp<ISupplicantVendorP2PIface> *iface_object);
 #endif
 
 private:
@@ -226,6 +234,16 @@ private:
 	    const std::string &ifname, int network_id,
 	    const std::function<android::hardware::Return<void>(
 		android::sp<ISupplicantStaNetworkCallback>)> &method);
+#ifdef SUPPLICANT_VENDOR_HIDL
+	void removeVendorP2pIfaceCallbackHidlObject(
+	    const std::string &ifname,
+	    const android::sp<ISupplicantVendorP2PIfaceCallback> &callback);
+	bool checkForVendorP2pIfaceCallback(const std::string &ifname);
+	void callWithEachVendorP2pIfaceCallback(
+	    const std::string &ifname,
+	    const std::function<android::hardware::Return<void>(
+	    android::sp<ISupplicantVendorP2PIfaceCallback>)> &method);
+#endif
 
 	// Singleton instance of this class.
 	static HidlManager *instance_;
@@ -286,6 +304,18 @@ private:
 #ifdef SUPPLICANT_VENDOR_HIDL
 	// The main vendor hidl service object.
 	android::sp<SupplicantVendor> supplicantvendor_object_;
+	// Map of all the Vendor P2P interface specific hidl objects controlled by
+	// wpa_supplicant. This map is keyed in by the corresponding
+	// |ifname|.
+	std::map<const std::string, android::sp<VendorP2pIface>>
+	    vendor_p2p_iface_object_map_;
+	// Map of all the vendor callbacks registered for P2P interface specific
+	// hidl objects controlled by wpa_supplicant.  This map is keyed in by
+	// the corresponding |ifname|.
+	std::map<
+	    const std::string,
+	    std::vector<android::sp<ISupplicantVendorP2PIfaceCallback>>>
+	    vendor_p2p_iface_callbacks_map_;
 #endif
 
 #if 0  // TODO(b/31632518): HIDL object death notifications.

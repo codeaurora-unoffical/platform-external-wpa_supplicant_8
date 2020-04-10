@@ -1805,7 +1805,8 @@ LOCAL_SRC_FILES := \
 
 ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
 LOCAL_SRC_FILES += \
-    hidl/$(HIDL_INTERFACE_VERSION)/supplicantvendor.cpp
+    hidl/$(HIDL_INTERFACE_VERSION)/supplicantvendor.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/vendorp2p_iface.cpp
 endif
 
 LOCAL_SHARED_LIBRARIES := \
