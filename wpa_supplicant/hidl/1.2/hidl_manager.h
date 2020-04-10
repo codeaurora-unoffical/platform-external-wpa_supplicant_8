@@ -25,6 +25,10 @@
 #include "sta_network.h"
 #include "supplicant.h"
 
+#ifdef SUPPLICANT_VENDOR_HIDL
+#include "supplicantvendor.h"
+#endif
+
 extern "C"
 {
 #include "utils/common.h"
@@ -44,6 +48,10 @@ using V1_0::ISupplicantP2pIface;
 using V1_0::ISupplicantStaIfaceCallback;
 using V1_1::ISupplicant;
 using V1_1::ISupplicantStaIface;
+#ifdef SUPPLICANT_VENDOR_HIDL
+using namespace vendor::qti::hardware::wifi::supplicantvendor::V2_0::Implementation;
+using namespace vendor::qti::hardware::wifi::supplicant::V2_0;
+#endif
 
 /**
  * HidlManager is responsible for managing the lifetime of all
@@ -165,6 +173,10 @@ public:
 	int addStaNetworkCallbackHidlObject(
 	    const std::string &ifname, int network_id,
 	    const android::sp<ISupplicantStaNetworkCallback> &callback);
+#ifdef SUPPLICANT_VENDOR_HIDL
+	//method for qti.hardware.wifi.supplicant@2.0
+	int registerVendorHidlService(struct wpa_global *global);
+#endif
 
 private:
 	HidlManager() = default;
@@ -270,6 +282,11 @@ private:
 	    const std::string,
 	    std::vector<android::sp<ISupplicantStaNetworkCallback>>>
 	    sta_network_callbacks_map_;
+
+#ifdef SUPPLICANT_VENDOR_HIDL
+	// The main vendor hidl service object.
+	android::sp<SupplicantVendor> supplicantvendor_object_;
+#endif
 
 #if 0  // TODO(b/31632518): HIDL object death notifications.
 	/**

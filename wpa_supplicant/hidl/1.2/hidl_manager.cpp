@@ -1985,6 +1985,23 @@ void HidlManager::callWithEachStaNetworkCallback(
 	callWithEachNetworkCallback(
 	    ifname, network_id, method, sta_network_callbacks_map_);
 }
+
+#ifdef SUPPLICANT_VENDOR_HIDL
+// Method for vendor.qti.hardware.wifi.supplicant@2.0 HAL interface
+
+int HidlManager::registerVendorHidlService(struct wpa_global *global)
+{
+       // Create the vendor hidl service object and register it.
+       supplicantvendor_object_ = new SupplicantVendor(global);
+       if (supplicantvendor_object_->registerAsService() != android::NO_ERROR) {
+               wpa_printf(MSG_ERROR,"Failed to Register Vendor HIDL service");
+               return 1;
+       }
+       wpa_printf(MSG_INFO,"Register Vendor HIDL default service");
+       return 0;
+}
+#endif
+
 }  // namespace implementation
 }  // namespace V1_2
 }  // namespace supplicant
