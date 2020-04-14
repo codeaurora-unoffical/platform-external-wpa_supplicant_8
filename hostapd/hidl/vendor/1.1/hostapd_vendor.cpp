@@ -49,6 +49,9 @@
 extern "C"
 {
 #include "utils/eloop.h"
+
+extern int hostapd_ctrl_iface_deauthenticate(struct hostapd_data *hapd,
+			    const char *txtaddr);
 }
 
 // This HIDL implementation for hostapd add or update a hostapd.conf dynamically
@@ -198,18 +201,21 @@ std::string AddOrUpdateHostapdConfig(
 	case IHostapdVendor::VendorEncryptionType::NONE:
 		// no security params
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "0"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "0"));
 		break;
 	case IHostapdVendor::VendorEncryptionType::WPA:
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "4"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "WPA-PSK"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_passphrase", nw_params.pskPassphrase.c_str()));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_pairwise", isWigig ? "GCMP" : "TKIP CCMP"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "0"));
 		break;
 	case IHostapdVendor::VendorEncryptionType::WPA2:
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "security_mode", "3"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_key_mgmt", "WPA-PSK"));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "wpa_passphrase", nw_params.pskPassphrase.c_str()));
 		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "rsn_pairwise", isWigig ? "GCMP" : "CCMP"));
+		qsap_cmd(StringPrintf(kQsapSetFmt, dual_mode_str, "ieee80211w", "0"));
 		break;
 #ifdef CONFIG_SAE
 	case IHostapdVendor::VendorEncryptionType::SAE:
@@ -596,6 +602,18 @@ HostapdStatus HostapdVendor::removeVendorAccessPointInternal(const std::string& 
 
 HostapdStatus HostapdVendor::setHostapdParamsInternal(const std::string& cmd)
 {
+	wpa_printf(MSG_INFO, "setHostapdParams - cmd=%s", cmd.c_str());
+
+	if (cmd == "deauth_all") {
+		if (!interfaces_ || !interfaces_->iface)
+			return {HostapdStatusCode::FAILURE_UNKNOWN, ""};
+
+		for (int i = 0; i < interfaces_->count; i++) {
+			hostapd_ctrl_iface_deauthenticate(
+				interfaces_->iface[i]->bss[0], "ff:ff:ff:ff:ff:ff");
+		}
+		return {HostapdStatusCode::SUCCESS, ""};
+	}
 	if (qsap_cmd(cmd))
 		return {HostapdStatusCode::FAILURE_UNKNOWN, ""};
 
