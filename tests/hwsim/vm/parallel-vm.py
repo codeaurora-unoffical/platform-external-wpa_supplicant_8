@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # Parallel VM test case executor
-# Copyright (c) 2014-2018, Jouni Malinen <j@w1.fi>
+# Copyright (c) 2014-2019, Jouni Malinen <j@w1.fi>
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
@@ -10,7 +10,9 @@ from __future__ import print_function
 import curses
 import fcntl
 import logging
+import multiprocessing
 import os
+import selectors
 import subprocess
 import sys
 import time
@@ -50,10 +52,13 @@ long_tests = ["ap_roam_open",
               "discovery_pd_retries",
               "ap_wps_setup_locked_timeout",
               "ap_vht160",
+              'he160',
+              'he160b',
               "dfs_radar",
               "dfs",
               "dfs_ht40_minus",
               "dfs_etsi",
+              "dfs_radar_vht80_downgrade",
               "ap_acs_dfs",
               "grpform_cred_ready_timeout",
               "hostapd_oom_wpa2_eap_connect",
@@ -71,6 +76,8 @@ long_tests = ["ap_roam_open",
               "ap_wps_iteration",
               "ap_wps_iteration_error",
               "ap_wps_pbc_timeout",
+              "ap_wps_pbc_ap_timeout",
+              "ap_wps_pin_ap_timeout",
               "ap_wps_http_timeout",
               "p2p_go_move_reg_change",
               "p2p_go_move_active",
@@ -85,9 +92,10 @@ def get_failed(vm):
         failed += vm[i]['failed']
     return failed
 
-def vm_read_stdout(vm, i):
+def vm_read_stdout(vm, test_queue):
     global total_started, total_passed, total_failed, total_skipped
     global rerun_failures
+    global first_run_failures
 
     ready = False
     try:
@@ -99,7 +107,7 @@ def vm_read_stdout(vm, i):
         if e.errno == errno.EAGAIN:
             return False
         raise
-    logger.debug("VM[%d] stdout.read[%s]" % (i, out))
+    logger.debug("VM[%d] stdout.read[%s]" % (vm['idx'], out.rstrip()))
     pending = vm['pending'] + out
     lines = []
     while True:
@@ -108,8 +116,10 @@ def vm_read_stdout(vm, i):
             break
         line = pending[0:pos].rstrip()
         pending = pending[(pos + 1):]
-        logger.debug("VM[%d] stdout full line[%s]" % (i, line))
+        logger.debug("VM[%d] stdout full line[%s]" % (vm['idx'], line))
         if line.startswith("READY"):
+            vm['starting'] = False
+            vm['started'] = True
             ready = True
         elif line.startswith("PASS"):
             ready = True
@@ -119,19 +129,31 @@ def vm_read_stdout(vm, i):
             total_failed += 1
             vals = line.split(' ')
             if len(vals) < 2:
-                logger.info("VM[%d] incomplete FAIL line: %s" % (i, line))
+                logger.info("VM[%d] incomplete FAIL line: %s" % (vm['idx'],
+                                                                 line))
                 name = line
             else:
                 name = vals[1]
-            logger.debug("VM[%d] test case failed: %s" % (i, name))
+            logger.debug("VM[%d] test case failed: %s" % (vm['idx'], name))
             vm['failed'].append(name)
+            if name != vm['current_name']:
+                logger.info("VM[%d] test result mismatch: %s (expected %s)" % (vm['idx'], name, vm['current_name']))
+            else:
+                count = vm['current_count']
+                if count == 0:
+                    first_run_failures.append(name)
+                if rerun_failures and count < 1:
+                    logger.debug("Requeue test case %s" % name)
+                    test_queue.append((name, vm['current_count'] + 1))
         elif line.startswith("NOT-FOUND"):
             ready = True
             total_failed += 1
-            logger.info("VM[%d] test case not found" % i)
+            logger.info("VM[%d] test case not found" % vm['idx'])
         elif line.startswith("SKIP"):
             ready = True
             total_skipped += 1
+        elif line.startswith("REASON"):
+            vm['skip_reason'].append(line[7:])
         elif line.startswith("START"):
             total_started += 1
             if len(vm['failed']) == 0:
@@ -143,6 +165,124 @@ def vm_read_stdout(vm, i):
     vm['pending'] = pending
     return ready
 
+def start_vm(vm, sel):
+    logger.info("VM[%d] starting up" % (vm['idx'] + 1))
+    vm['starting'] = True
+    vm['proc'] = subprocess.Popen(vm['cmd'],
+                                  stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+    vm['cmd'] = None
+    for stream in [vm['proc'].stdout, vm['proc'].stderr]:
+        fd = stream.fileno()
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        sel.register(stream, selectors.EVENT_READ, vm)
+
+def num_vm_starting():
+    count = 0
+    for i in range(num_servers):
+        if vm[i]['starting']:
+            count += 1
+    return count
+
+def vm_read_stderr(vm):
+    try:
+        err = vm['proc'].stderr.read()
+        if err != None:
+            err = err.decode()
+            if len(err) > 0:
+                vm['err'] += err
+                logger.info("VM[%d] stderr.read[%s]" % (vm['idx'], err))
+    except IOError as e:
+        if e.errno != errno.EAGAIN:
+            raise
+
+def vm_next_step(_vm, scr, test_queue):
+    scr.move(_vm['idx'] + 1, 10)
+    scr.clrtoeol()
+    if not test_queue:
+        _vm['proc'].stdin.write(b'\n')
+        _vm['proc'].stdin.flush()
+        scr.addstr("shutting down")
+        logger.info("VM[%d] shutting down" % _vm['idx'])
+        return
+    (name, count) = test_queue.pop(0)
+    _vm['current_name'] = name
+    _vm['current_count'] = count
+    _vm['proc'].stdin.write(name.encode() + b'\n')
+    _vm['proc'].stdin.flush()
+    scr.addstr(name)
+    logger.debug("VM[%d] start test %s" % (_vm['idx'], name))
+
+def check_vm_start(scr, sel, test_queue):
+    running = False
+    for i in range(num_servers):
+        if vm[i]['proc']:
+            running = True
+            continue
+
+        # Either not yet started or already stopped VM
+        max_start = multiprocessing.cpu_count()
+        if max_start > 4:
+            max_start /= 2
+        num_starting = num_vm_starting()
+        if vm[i]['cmd'] and len(test_queue) > num_starting and \
+           num_starting < max_start:
+            scr.move(i + 1, 10)
+            scr.clrtoeol()
+            scr.addstr(i + 1, 10, "starting VM")
+            start_vm(vm[i], sel)
+            return True, True
+
+    return running, False
+
+def vm_terminated(_vm, scr, sel, test_queue):
+    updated = False
+    for stream in [_vm['proc'].stdout, _vm['proc'].stderr]:
+        sel.unregister(stream)
+    _vm['proc'] = None
+    scr.move(_vm['idx'] + 1, 10)
+    scr.clrtoeol()
+    log = '{}/{}.srv.{}/console'.format(dir, timestamp, _vm['idx'] + 1)
+    with open(log, 'r') as f:
+        if "Kernel panic" in f.read():
+            scr.addstr("kernel panic")
+            logger.info("VM[%d] kernel panic" % _vm['idx'])
+            updated = True
+    if test_queue:
+        num_vm = 0
+        for i in range(num_servers):
+            if _vm['proc']:
+                num_vm += 1
+        if len(test_queue) > num_vm:
+            scr.addstr("unexpected exit")
+            logger.info("VM[%d] unexpected exit" % i)
+            updated = True
+    return updated
+
+def update_screen(scr, total_tests):
+    scr.move(num_servers + 1, 10)
+    scr.clrtoeol()
+    scr.addstr("{} %".format(int(100.0 * (total_passed + total_failed + total_skipped) / total_tests)))
+    scr.addstr(num_servers + 1, 20,
+               "TOTAL={} STARTED={} PASS={} FAIL={} SKIP={}".format(total_tests, total_started, total_passed, total_failed, total_skipped))
+    failed = get_failed(vm)
+    if len(failed) > 0:
+        scr.move(num_servers + 2, 0)
+        scr.clrtoeol()
+        scr.addstr("Failed test cases: ")
+        count = 0
+        for f in failed:
+            count += 1
+            if count > 30:
+                scr.addstr('...')
+                scr.clrtoeol()
+                break
+            scr.addstr(f)
+            scr.addstr(' ')
+    scr.refresh()
+
 def show_progress(scr):
     global num_servers
     global vm
@@ -151,176 +291,55 @@ def show_progress(scr):
     global tests
     global first_run_failures
     global total_started, total_passed, total_failed, total_skipped
+    global rerun_failures
 
+    sel = selectors.DefaultSelector()
     total_tests = len(tests)
     logger.info("Total tests: %d" % total_tests)
+    test_queue = [(t, 0) for t in tests]
+    start_vm(vm[0], sel)
 
     scr.leaveok(1)
     scr.addstr(0, 0, "Parallel test execution status", curses.A_BOLD)
     for i in range(0, num_servers):
         scr.addstr(i + 1, 0, "VM %d:" % (i + 1), curses.A_BOLD)
-        scr.addstr(i + 1, 10, "starting VM")
+        status = "starting VM" if vm[i]['proc'] else "not yet started"
+        scr.addstr(i + 1, 10, status)
     scr.addstr(num_servers + 1, 0, "Total:", curses.A_BOLD)
     scr.addstr(num_servers + 1, 20, "TOTAL={} STARTED=0 PASS=0 FAIL=0 SKIP=0".format(total_tests))
     scr.refresh()
 
-    completed_first_pass = False
-    rerun_tests = []
-
     while True:
-        running = False
-        first_running = False
         updated = False
-
-        for i in range(0, num_servers):
-            if completed_first_pass:
+        events = sel.select(timeout=1)
+        for key, mask in events:
+            _vm = key.data
+            if not _vm['proc']:
                 continue
-            if vm[i]['first_run_done']:
-                continue
-            if not vm[i]['proc']:
-                continue
-            if vm[i]['proc'].poll() is not None:
-                vm[i]['proc'] = None
-                scr.move(i + 1, 10)
-                scr.clrtoeol()
-                log = '{}/{}.srv.{}/console'.format(dir, timestamp, i + 1)
-                with open(log, 'r') as f:
-                    if "Kernel panic" in f.read():
-                        scr.addstr("kernel panic")
-                        logger.info("VM[%d] kernel panic" % i)
-                    else:
-                        scr.addstr("unexpected exit")
-                        logger.info("VM[%d] unexpected exit" % i)
+            vm_read_stderr(_vm)
+            if vm_read_stdout(_vm, test_queue):
+                vm_next_step(_vm, scr, test_queue)
                 updated = True
-                continue
+            vm_read_stderr(_vm)
+            if _vm['proc'].poll() is not None:
+                if vm_terminated(_vm, scr, sel, test_queue):
+                    updated = True
 
-            running = True
-            first_running = True
-            try:
-                err = vm[i]['proc'].stderr.read()
-                if err != None:
-                    err = err.decode()
-                    vm[i]['err'] += err
-                    logger.debug("VM[%d] stderr.read[%s]" % (i, err))
-            except IOError as e:
-                if e.errno != errno.EAGAIN:
-                    raise
-
-            if vm_read_stdout(vm[i], i):
-                scr.move(i + 1, 10)
-                scr.clrtoeol()
-                updated = True
-                if not tests:
-                    vm[i]['first_run_done'] = True
-                    scr.addstr("completed first round")
-                    logger.info("VM[%d] completed first round" % i)
-                    continue
-                else:
-                    name = tests.pop(0)
-                    vm[i]['proc'].stdin.write(name.encode() + b'\n')
-                    vm[i]['proc'].stdin.flush()
-                    scr.addstr(name)
-                    logger.debug("VM[%d] start test %s" % (i, name))
-
-        if not first_running and not completed_first_pass:
-            logger.info("First round of testing completed")
-            if tests:
-                logger.info("Unexpected test cases remaining from first round: " + str(tests))
-                raise Exception("Unexpected test cases remaining from first round")
-            completed_first_pass = True
-            for name in get_failed(vm):
-                if rerun_failures:
-                    rerun_tests.append(name)
-                first_run_failures.append(name)
-
-        for i in range(num_servers):
-            if not completed_first_pass:
-                continue
-            if not vm[i]['proc']:
-                continue
-            if vm[i]['proc'].poll() is not None:
-                vm[i]['proc'] = None
-                scr.move(i + 1, 10)
-                scr.clrtoeol()
-                log = '{}/{}.srv.{}/console'.format(dir, timestamp, i + 1)
-                with open(log, 'r') as f:
-                    if "Kernel panic" in f.read():
-                        scr.addstr("kernel panic")
-                        logger.info("VM[%d] kernel panic" % i)
-                    else:
-                        scr.addstr("completed run")
-                        logger.info("VM[%d] completed run" % i)
-                updated = True
-                continue
-
-            running = True
-            try:
-                err = vm[i]['proc'].stderr.read()
-                if err != None:
-                    err = err.decode()
-                    vm[i]['err'] += err
-                    logger.debug("VM[%d] stderr.read[%s]" % (i, err))
-            except IOError as e:
-                if e.errno != errno.EAGAIN:
-                    raise
-
-            ready = False
-            if vm[i]['first_run_done']:
-                vm[i]['first_run_done'] = False
-                ready = True
-            else:
-                ready = vm_read_stdout(vm[i], i)
-            if ready:
-                scr.move(i + 1, 10)
-                scr.clrtoeol()
-                updated = True
-                if not rerun_tests:
-                    vm[i]['proc'].stdin.write(b'\n')
-                    vm[i]['proc'].stdin.flush()
-                    scr.addstr("shutting down")
-                    logger.info("VM[%d] shutting down" % i)
-                else:
-                    name = rerun_tests.pop(0)
-                    vm[i]['proc'].stdin.write(name.encode() + b'\n')
-                    vm[i]['proc'].stdin.flush()
-                    scr.addstr(name + "(*)")
-                    logger.debug("VM[%d] start test %s (*)" % (i, name))
-
+        running, run_update = check_vm_start(scr, sel, test_queue)
+        if updated or run_update:
+            update_screen(scr, total_tests)
         if not running:
             break
+    sel.close()
 
-        if updated:
-            scr.move(num_servers + 1, 10)
-            scr.clrtoeol()
-            scr.addstr("{} %".format(int(100.0 * (total_passed + total_failed + total_skipped) / total_tests)))
-            scr.addstr(num_servers + 1, 20, "TOTAL={} STARTED={} PASS={} FAIL={} SKIP={}".format(total_tests, total_started, total_passed, total_failed, total_skipped))
-            failed = get_failed(vm)
-            if len(failed) > 0:
-                scr.move(num_servers + 2, 0)
-                scr.clrtoeol()
-                scr.addstr("Failed test cases: ")
-                count = 0
-                for f in failed:
-                    count += 1
-                    if count > 30:
-                        scr.addstr('...')
-                        scr.clrtoeol()
-                        break
-                    scr.addstr(f)
-                    scr.addstr(' ')
-
-            scr.move(0, 35)
-            scr.clrtoeol()
-            if rerun_tests:
-                scr.addstr("(RETRY FAILED %d)" % len(rerun_tests))
-            elif rerun_failures:
-                pass
-            elif first_run_failures:
-                scr.addstr("(RETRY FAILED)")
-
-            scr.refresh()
-
-        time.sleep(0.25)
+    for i in range(num_servers):
+        if not vm[i]['proc']:
+            continue
+        vm[i]['proc'] = None
+        scr.move(i + 1, 10)
+        scr.clrtoeol()
+        scr.addstr("still running")
+        logger.info("VM[%d] still running" % i)
 
     scr.refresh()
     time.sleep(0.3)
@@ -373,6 +392,8 @@ def main():
                    help="run tests under valgrind")
     p.add_argument('--telnet', dest='telnet', metavar='<baseport>', type=int,
                    help="enable telnet server inside VMs, specify the base port here")
+    p.add_argument('--nocurses', dest='nocurses', action='store_const',
+                   const=True, default=False, help="Don't use curses for output")
     p.add_argument('params', nargs='*')
     args = p.parse_args()
 
@@ -436,7 +457,10 @@ def main():
         tests = [t for t in tests if t not in long_tests]
 
     logger.setLevel(debug_level)
-    log_handler = logging.FileHandler('parallel-vm.log')
+    if not args.nocurses:
+        log_handler = logging.FileHandler('parallel-vm.log')
+    else:
+        log_handler = logging.StreamHandler(sys.stdout)
     log_handler.setLevel(debug_level)
     fmt = "%(asctime)s %(levelname)s %(message)s"
     log_formatter = logging.Formatter(fmt)
@@ -445,33 +469,41 @@ def main():
 
     vm = {}
     for i in range(0, num_servers):
-        print("\rStarting virtual machine {}/{}".format(i + 1, num_servers),
-              end='')
-        logger.info("Starting virtual machine {}/{}".format(i + 1, num_servers))
-        cmd = [os.path.join(scriptsdir, 'vm-run.sh'), '--delay', str(i),
+        cmd = [os.path.join(scriptsdir, 'vm-run.sh'),
                '--timestamp', str(timestamp),
                '--ext', 'srv.%d' % (i + 1),
                '-i'] + codecov_args + extra_args
         if args.telnet:
             cmd += ['--telnet', str(args.telnet + i)]
         vm[i] = {}
-        vm[i]['first_run_done'] = False
-        vm[i]['proc'] = subprocess.Popen(cmd,
-                                         stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE)
+        vm[i]['idx'] = i
+        vm[i]['starting'] = False
+        vm[i]['started'] = False
+        vm[i]['cmd'] = cmd
+        vm[i]['proc'] = None
         vm[i]['out'] = ""
         vm[i]['pending'] = ""
         vm[i]['err'] = ""
         vm[i]['failed'] = []
         vm[i]['fail_seq'] = []
-        for stream in [vm[i]['proc'].stdout, vm[i]['proc'].stderr]:
-            fd = stream.fileno()
-            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        vm[i]['skip_reason'] = []
     print('')
 
-    curses.wrapper(show_progress)
+    if not args.nocurses:
+        curses.wrapper(show_progress)
+    else:
+        class FakeScreen:
+            def leaveok(self, n):
+                pass
+            def refresh(self):
+                pass
+            def addstr(self, *args, **kw):
+                pass
+            def move(self, x, y):
+                pass
+            def clrtoeol(self):
+                pass
+        show_progress(FakeScreen())
 
     with open('{}/{}-parallel.log'.format(dir, timestamp), 'w') as f:
         for i in range(0, num_servers):
@@ -537,7 +569,11 @@ def main():
     print("Logs: " + dir + '/' + str(timestamp))
     logger.info("Logs: " + dir + '/' + str(timestamp))
 
-    for i in range(0, num_servers):
+    skip_reason = []
+    for i in range(num_servers):
+        if not vm[i]['started']:
+            continue
+        skip_reason += vm[i]['skip_reason']
         if len(vm[i]['pending']) > 0:
             logger.info("Unprocessed stdout from VM[%d]: '%s'" %
                         (i, vm[i]['pending']))
@@ -546,6 +582,40 @@ def main():
             if "Kernel panic" in f.read():
                 print("Kernel panic in " + log)
                 logger.info("Kernel panic in " + log)
+    missing = {}
+    missing['OCV not supported'] = 'OCV'
+    missing['sigma_dut not available'] = 'sigma_dut'
+    missing['Skip test case with long duration due to --long not specified'] = 'long'
+    missing['TEST_ALLOC_FAIL not supported' ] = 'TEST_FAIL'
+    missing['TEST_ALLOC_FAIL not supported in the build'] = 'TEST_FAIL'
+    missing['TEST_FAIL not supported' ] = 'TEST_FAIL'
+    missing['veth not supported (kernel CONFIG_VETH)'] = 'KERNEL:CONFIG_VETH'
+    missing['WPA-EAP-SUITE-B-192 not supported'] = 'CONFIG_SUITEB192'
+    missing['WPA-EAP-SUITE-B not supported'] = 'CONFIG_SUITEB'
+    missing['wmediumd not available'] = 'wmediumd'
+    missing['DPP not supported'] = 'CONFIG_DPP'
+    missing['DPP version 2 not supported'] = 'CONFIG_DPP2'
+    missing['EAP method PWD not supported in the build'] = 'CONFIG_EAP_PWD'
+    missing['EAP method TEAP not supported in the build'] = 'CONFIG_EAP_TEAP'
+    missing['FILS not supported'] = 'CONFIG_FILS'
+    missing['FILS-SK-PFS not supported'] = 'CONFIG_FILS_SK_PFS'
+    missing['OWE not supported'] = 'CONFIG_OWE'
+    missing['SAE not supported'] = 'CONFIG_SAE'
+    missing['Not using OpenSSL'] = 'CONFIG_TLS=openssl'
+    missing['wpa_supplicant TLS library is not OpenSSL: internal'] = 'CONFIG_TLS=openssl'
+    missing_items = []
+    other_reasons = []
+    for reason in sorted(set(skip_reason)):
+        if reason in missing:
+            missing_items.append(missing[reason])
+        elif reason.startswith('OCSP-multi not supported with this TLS library'):
+            missing_items.append('OCSP-MULTI')
+        else:
+            other_reasons.append(reason)
+    if missing_items:
+        print("Missing items (SKIP):", missing_items)
+    if other_reasons:
+        print("Other skip reasons:", other_reasons)
 
     if codecov:
         print("Code coverage - preparing report")

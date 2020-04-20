@@ -15,7 +15,7 @@ import hwsim_utils
 from utils import HwsimSkip
 
 from test_ap_ht import set_world_reg
-from test_ap_psk import parse_eapol, build_eapol, pmk_to_ptk, eapol_key_mic, recv_eapol, send_eapol, reply_eapol, hapd_connected, build_eapol_key_3_4, aes_wrap, pad_key_data
+from test_ap_psk import parse_eapol, build_eapol, pmk_to_ptk, eapol_key_mic, recv_eapol, send_eapol, reply_eapol, build_eapol_key_3_4, aes_wrap, pad_key_data
 
 #TODO: Refuse setting up AP with OCV but without MFP support
 #TODO: Refuse to connect to AP that advertises OCV but not MFP
@@ -424,7 +424,7 @@ class APConnection:
 
         reply_eapol("4/4", self.hapd, self.addr, self.msg, 0x030a, None, None,
                     self.kck)
-        hapd_connected(self.hapd)
+        self.hapd.wait_sta(timeout=15)
 
 @remote_compatible
 def test_wpa2_ocv_ap_mismatch(dev, apdev):
@@ -648,6 +648,7 @@ def test_wpa2_ocv_ap_group_hs(dev, apdev):
     conn.hapd.request("SET ext_eapol_frame_io 0")
     dev[1].connect(conn.ssid, psk=conn.passphrase, scan_freq="2412", ocv="1",
                    ieee80211w="1")
+    conn.hapd.wait_sta()
     conn.hapd.request("SET ext_eapol_frame_io 1")
 
     # Trigger a group key handshake
@@ -892,3 +893,14 @@ def test_wpa2_ocv_sta_group_hs(dev, apdev):
     conn.msg = recv_eapol(dev[0])
     if conn.msg["rsn_key_info"] != 0x0302:
         raise Exception("Didn't receive 2/2 of group key handshake")
+
+def test_wpa2_ocv_auto_enable_pmf(dev, apdev):
+    """OCV on 2.4 GHz with PMF getting enabled automatically"""
+    params = {"channel": "1",
+              "ocv": "1"}
+    hapd, ssid, passphrase = ocv_setup_ap(apdev[0], params)
+    for ocv in range(2):
+        dev[0].connect(ssid, psk=passphrase, scan_freq="2412", ocv=str(ocv),
+                       ieee80211w="2")
+        dev[0].request("REMOVE_NETWORK all")
+        dev[0].wait_disconnected()

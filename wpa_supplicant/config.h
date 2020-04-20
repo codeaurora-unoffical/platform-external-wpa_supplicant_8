@@ -44,6 +44,7 @@
 #define DEFAULT_MBO_CELL_CAPA MBO_CELL_CAPA_NOT_SUPPORTED
 #define DEFAULT_DISASSOC_IMMINENT_RSSI_THRESHOLD -75
 #define DEFAULT_OCE_SUPPORT OCE_STA
+#define DEFAULT_EXTENDED_KEY_ID 0
 
 #include "config_ssid.h"
 #include "wps/wps.h"
@@ -332,7 +333,7 @@ struct wpa_cred {
 	 */
 	unsigned int max_bss_load;
 
-	unsigned int num_req_conn_capab;
+	size_t num_req_conn_capab;
 	u8 *req_conn_capab_proto;
 	int **req_conn_capab_port;
 
@@ -403,7 +404,7 @@ struct wpa_config {
 	 * This indicates how many per-priority network lists are included in
 	 * pssid.
 	 */
-	int num_prio;
+	size_t num_prio;
 
 	/**
 	 * cred - Head of the credential list
@@ -1090,6 +1091,16 @@ struct wpa_config {
 	int p2p_go_vht;
 
 	/**
+	 * p2p_go_edmg - Default mode for EDMG enable when operating as GO
+	 *
+	 * This will take effect for p2p_group_add, p2p_connect, and p2p_invite.
+	 * Note that regulatory constraints and driver capabilities are
+	 * consulted anyway, so setting it to 1 can't do real harm.
+	 * By default: 0 (disabled)
+	 */
+	int p2p_go_edmg;
+
+	/**
 	 * p2p_go_he - Default mode for 11ax HE enable when operating as GO
 	 *
 	 * This will take effect for p2p_group_add, p2p_connect, and p2p_invite.
@@ -1163,6 +1174,19 @@ struct wpa_config {
 	 * groups will be tried in the indicated order.
 	 */
 	int *sae_groups;
+
+	/**
+	 * sae_pwe - SAE mechanism for PWE derivation
+	 * 0 = hunting-and-pecking loop only
+	 * 1 = hash-to-element only
+	 * 2 = both hunting-and-pecking loop and hash-to-element enabled
+	 */
+	int sae_pwe;
+
+	/**
+	 * sae_pmkid_in_assoc - Whether to include PMKID in SAE Assoc Req
+	 */
+	int sae_pmkid_in_assoc;
 
 	/**
 	 * dtim_period - Default DTIM period in Beacon intervals
@@ -1492,6 +1516,16 @@ struct wpa_config {
 	int dpp_config_processing;
 
 	/**
+	 * dpp_name - Name for Enrollee's DPP Configuration Request
+	 */
+	char *dpp_name;
+
+	/**
+	 * dpp_mud_url - MUD URL for Enrollee's DPP Configuration Request
+	 */
+	char *dpp_mud_url;
+
+	/**
 	 * coloc_intf_reporting - Colocated interference reporting
 	 *
 	 * dot11CoLocIntfReportingActivated
@@ -1537,6 +1571,17 @@ struct wpa_config {
 	 * By default BSS transition management is enabled
 	 */
 	int disable_btm;
+
+	/**
+	 * extended_key_id - Extended Key ID support
+	 *
+	 * IEEE Std 802.11-2016 optionally allows to use Key ID 0 and 1 for PTK
+	 * keys with Extended Key ID.
+	 *
+	 * 0 = don't use Extended Key ID
+	 * 1 = use Extended Key ID when possible
+	 */
+	int extended_key_id;
 };
 
 

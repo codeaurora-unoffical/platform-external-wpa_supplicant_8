@@ -24,7 +24,7 @@ except ImportError:
 
 import hostapd
 from wpasupplicant import WpaSupplicant
-from utils import HwsimSkip, alloc_fail, fail_test
+from utils import *
 from p2p_utils import *
 from test_ap_tdls import connect_2sta_open
 from test_ap_eap import check_altsubject_match_support
@@ -1152,6 +1152,85 @@ def test_dbus_scan(dev, apdev):
     if len(res) != 0:
         raise Exception("FlushBSS() did not remove scan results from BSSs property")
     iface.FlushBSS(1)
+
+def test_dbus_scan_rand(dev, apdev):
+    """D-Bus MACAddressRandomizationMask property Get/Set"""
+    try:
+        run_dbus_scan_rand(dev, apdev)
+    finally:
+        dev[0].request("MAC_RAND_SCAN all enable=0")
+
+def run_dbus_scan_rand(dev, apdev):
+    (bus, wpas_obj, path, if_obj) = prepare_dbus(dev[0])
+    iface = dbus.Interface(if_obj, WPAS_DBUS_IFACE)
+
+    res = if_obj.Get(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                     dbus_interface=dbus.PROPERTIES_IFACE)
+    if len(res) != 0:
+        logger.info(str(res))
+        raise Exception("Unexpected initial MACAddressRandomizationMask value")
+
+    try:
+        if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask", "foo",
+                   dbus_interface=dbus.PROPERTIES_IFACE)
+        raise Exception("Invalid Set accepted")
+    except dbus.exceptions.DBusException as e:
+        if "InvalidArgs: invalid message format" not in str(e):
+            raise Exception("Unexpected error message: " + str(e))
+
+    try:
+        if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                   {"foo": "bar"},
+                   dbus_interface=dbus.PROPERTIES_IFACE)
+        raise Exception("Invalid Set accepted")
+    except dbus.exceptions.DBusException as e:
+        if "wpas_dbus_setter_mac_address_randomization_mask: mask was not a byte array" not in str(e):
+            raise Exception("Unexpected error message: " + str(e))
+
+    try:
+        if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                   {"foo": dbus.ByteArray(b'123456')},
+                   dbus_interface=dbus.PROPERTIES_IFACE)
+        raise Exception("Invalid Set accepted")
+    except dbus.exceptions.DBusException as e:
+        if 'wpas_dbus_setter_mac_address_randomization_mask: bad scan type "foo"' not in str(e):
+            raise Exception("Unexpected error message: " + str(e))
+
+    try:
+        if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                   {"scan": dbus.ByteArray(b'12345')},
+                   dbus_interface=dbus.PROPERTIES_IFACE)
+        raise Exception("Invalid Set accepted")
+    except dbus.exceptions.DBusException as e:
+        if 'wpas_dbus_setter_mac_address_randomization_mask: malformed MAC mask given' not in str(e):
+            raise Exception("Unexpected error message: " + str(e))
+
+    if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+               {"scan": dbus.ByteArray(b'123456')},
+               dbus_interface=dbus.PROPERTIES_IFACE)
+    res = if_obj.Get(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                     dbus_interface=dbus.PROPERTIES_IFACE)
+    if len(res) != 1:
+        logger.info(str(res))
+        raise Exception("Unexpected MACAddressRandomizationMask value")
+
+    try:
+        if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                   {"scan": dbus.ByteArray(b'123456'),
+                    "sched_scan": dbus.ByteArray(b'987654')},
+                   dbus_interface=dbus.PROPERTIES_IFACE)
+    except dbus.exceptions.DBusException as e:
+        # sched_scan is unlikely to be supported
+        pass
+
+    if_obj.Set(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+               dbus.Dictionary({}, signature='sv'),
+               dbus_interface=dbus.PROPERTIES_IFACE)
+    res = if_obj.Get(WPAS_DBUS_IFACE, "MACAddressRandomizationMask",
+                     dbus_interface=dbus.PROPERTIES_IFACE)
+    if len(res) != 0:
+        logger.info(str(res))
+        raise Exception("Unexpected MACAddressRandomizationMask value")
 
 def test_dbus_scan_busy(dev, apdev):
     """D-Bus scan trigger rejection when busy with previous scan"""
@@ -5411,8 +5490,70 @@ def test_dbus_ap(dev, apdev):
         if not t.success():
             raise Exception("Expected signals not seen")
 
+def test_dbus_ap_scan(dev, apdev):
+    """D-Bus AddNetwork for AP mode and scan"""
+    (bus, wpas_obj, path, if_obj) = prepare_dbus(dev[0])
+    iface = dbus.Interface(if_obj, WPAS_DBUS_IFACE)
+
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+
+    hapd = hostapd.add_ap(apdev[0], {"ssid": "open"})
+    bssid = hapd.own_addr()
+
+    class TestDbusConnect(TestDbus):
+        def __init__(self, bus):
+            TestDbus.__init__(self, bus)
+            self.started = False
+            self.scan_completed = False
+
+        def __enter__(self):
+            gobject.timeout_add(1, self.run_connect)
+            gobject.timeout_add(15000, self.timeout)
+            self.add_signal(self.propertiesChanged, WPAS_DBUS_IFACE,
+                            "PropertiesChanged")
+            self.add_signal(self.scanDone, WPAS_DBUS_IFACE, "ScanDone")
+            self.loop.run()
+            return self
+
+        def propertiesChanged(self, properties):
+            logger.debug("propertiesChanged: %s" % str(properties))
+            if 'State' in properties and properties['State'] == "completed":
+                self.started = True
+                logger.info("Try to scan in AP mode")
+                iface.Scan({'Type': 'active',
+                            'Channels': [(dbus.UInt32(2412), dbus.UInt32(20))]})
+                logger.info("Scan() returned")
+
+        def scanDone(self, success):
+            logger.debug("scanDone: success=%s" % success)
+            if self.started:
+                self.scan_completed = True
+                self.loop.quit()
+
+        def run_connect(self, *args):
+            logger.debug("run_connect")
+            args = dbus.Dictionary({'ssid': ssid,
+                                    'key_mgmt': 'WPA-PSK',
+                                    'psk': passphrase,
+                                    'mode': 2,
+                                    'frequency': 2412,
+                                    'scan_freq': 2412},
+                                   signature='sv')
+            self.netw = iface.AddNetwork(args)
+            iface.SelectNetwork(self.netw)
+            return False
+
+        def success(self):
+            return self.started and self.scan_completed
+
+    with TestDbusConnect(bus) as t:
+        if not t.success():
+            raise Exception("Expected signals not seen")
+
 def test_dbus_connect_wpa_eap(dev, apdev):
     """D-Bus AddNetwork and connection with WPA+WPA2-Enterprise AP"""
+    skip_without_tkip(dev[0])
     (bus, wpas_obj, path, if_obj) = prepare_dbus(dev[0])
     iface = dbus.Interface(if_obj, WPAS_DBUS_IFACE)
 

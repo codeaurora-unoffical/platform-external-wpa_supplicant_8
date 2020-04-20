@@ -2,7 +2,6 @@ all: eapol-key-auth
 include ../rules.include
 
 CFLAGS += -DCONFIG_IEEE80211R_AP
-CFLAGS += -DCONFIG_IEEE80211W
 CFLAGS += -DCONFIG_IEEE80211R
 CFLAGS += -DCONFIG_TDLS
 
@@ -17,6 +16,8 @@ LIBS += $(SRC)/eapol_auth/libeapol_auth.a
 LIBS += $(SRC)/eap_server/libeap_server.a
 LIBS += $(SRC)/ap/libap.a
 LIBS += $(SRC)/radius/libradius.a
+
+OBJS += $(SRC)/drivers/driver_common.o
 
 eapol-key-auth: eapol-key-auth.o $(OBJS) $(LIBS)
 	$(LDO) $(LDFLAGS) -o $@ $^ -Wl,--start-group $(LIBS) -Wl,--end-group

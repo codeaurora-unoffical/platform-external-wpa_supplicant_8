@@ -204,6 +204,7 @@
 #define WLAN_STATUS_FILS_AUTHENTICATION_FAILURE 112
 #define WLAN_STATUS_UNKNOWN_AUTHENTICATION_SERVER 113
 #define WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER 123
+#define WLAN_STATUS_SAE_HASH_TO_ELEMENT 126
 
 /* Reason codes (IEEE Std 802.11-2016, 9.4.1.7, Table 9-45) */
 #define WLAN_REASON_UNSPECIFIED 1
@@ -446,6 +447,7 @@
 #define WLAN_EID_FILS_INDICATION 240
 #define WLAN_EID_DILS 241
 #define WLAN_EID_FRAGMENT 242
+#define WLAN_EID_RSNX 244
 #define WLAN_EID_EXTENSION 255
 
 /* Element ID Extension (EID 255) values */
@@ -456,7 +458,7 @@
 #define WLAN_EID_EXT_FILS_HLP_CONTAINER 5
 #define WLAN_EID_EXT_FILS_IP_ADDR_ASSIGN 6
 #define WLAN_EID_EXT_KEY_DELIVERY 7
-#define WLAN_EID_EXT_FILS_WRAPPED_DATA 8
+#define WLAN_EID_EXT_WRAPPED_DATA 8
 #define WLAN_EID_EXT_FTM_SYNC_INFO 9
 #define WLAN_EID_EXT_EXTENDED_REQUEST 10
 #define WLAN_EID_EXT_ESTIMATED_SERVICE_PARAMS 11
@@ -470,6 +472,11 @@
 #define WLAN_EID_EXT_HE_MU_EDCA_PARAMS 38
 #define WLAN_EID_EXT_SPATIAL_REUSE 39
 #define WLAN_EID_EXT_OCV_OCI 54
+#define WLAN_EID_EXT_SHORT_SSID_LIST 58
+#define WLAN_EID_EXT_EDMG_CAPABILITIES 61
+#define WLAN_EID_EXT_EDMG_OPERATION 62
+#define WLAN_EID_EXT_REJECTED_GROUPS 92
+#define WLAN_EID_EXT_ANTI_CLOGGING_TOKEN 93
 
 /* Extended Capabilities field */
 #define WLAN_EXT_CAPAB_20_40_COEX 0
@@ -551,6 +558,12 @@
 #define WLAN_EXT_CAPAB_COMPLETE_NON_TX_BSSID_PROFILE 80
 #define WLAN_EXT_CAPAB_SAE_PW_ID 81
 #define WLAN_EXT_CAPAB_SAE_PW_ID_EXCLUSIVELY 82
+#define WLAN_EXT_CAPAB_BEACON_PROTECTION 84
+
+/* Extended RSN Capabilities */
+/* bits 0-3: Field length (n-1) */
+#define WLAN_RSNX_CAPAB_PROTECTED_TWT 4
+#define WLAN_RSNX_CAPAB_SAE_H2E 5
 
 /* Action frame categories (IEEE Std 802.11-2016, 9.4.1.11, Table 9-76) */
 #define WLAN_ACTION_SPECTRUM_MGMT 0
@@ -1217,6 +1230,7 @@ struct ieee80211_ampe_ie {
 
 #define BSS_MEMBERSHIP_SELECTOR_VHT_PHY 126
 #define BSS_MEMBERSHIP_SELECTOR_HT_PHY 127
+#define BSS_MEMBERSHIP_SELECTOR_SAE_H2E_ONLY 123
 
 /* VHT Defines */
 #define VHT_CAP_MAX_MPDU_LENGTH_7991                ((u32) BIT(0))
@@ -1274,11 +1288,15 @@ struct ieee80211_ampe_ie {
 
 #define VHT_RX_NSS_MAX_STREAMS			    8
 
-/* VHT channel widths */
+/* VHT/EDMG channel widths */
 #define CHANWIDTH_USE_HT	0
 #define CHANWIDTH_80MHZ		1
 #define CHANWIDTH_160MHZ	2
 #define CHANWIDTH_80P80MHZ	3
+#define CHANWIDTH_2160MHZ	4
+#define CHANWIDTH_4320MHZ	5
+#define CHANWIDTH_6480MHZ	6
+#define CHANWIDTH_8640MHZ	7
 
 #define HE_NSS_MAX_STREAMS			    8
 
@@ -1298,6 +1316,8 @@ struct ieee80211_ampe_ie {
 #define OWE_IE_VENDOR_TYPE 0x506f9a1c
 #define OWE_OUI_TYPE 28
 #define MULTI_AP_OUI_TYPE 0x1B
+#define DPP_CC_IE_VENDOR_TYPE 0x506f9a1e
+#define DPP_CC_OUI_TYPE 0x1e
 
 #define MULTI_AP_SUB_ELEM_TYPE 0x06
 #define MULTI_AP_TEAR_DOWN BIT(4)
@@ -1857,7 +1877,15 @@ enum wnm_sleep_mode_response_status {
 /* WNM-Sleep Mode subelement IDs */
 enum wnm_sleep_mode_subelement_id {
 	WNM_SLEEP_SUBELEM_GTK = 0,
-	WNM_SLEEP_SUBELEM_IGTK = 1
+	WNM_SLEEP_SUBELEM_IGTK = 1,
+	WNM_SLEEP_SUBELEM_BIGTK = 2,
+};
+
+/* WNM notification type (IEEE P802.11-REVmd/D3.0, Table 9-430) */
+enum wnm_notification_Type {
+	WNM_NOTIF_TYPE_FIRMWARE_UPDATE = 0,
+	WNM_NOTIF_TYPE_BEACON_PROTECTION_FAILURE = 2,
+	WNM_NOTIF_TYPE_VENDOR_SPECIFIC = 221,
 };
 
 /* Channel Switch modes (802.11h) */
@@ -2073,7 +2101,7 @@ enum phy_type {
 	PHY_TYPE_VHT = 9,
 };
 
-/* IEEE P802.11-REVmc/D5.0, 9.4.2.37 - Neighbor Report element */
+/* IEEE P802.11-REVmd/D3.0, 9.4.2.36 - Neighbor Report element */
 /* BSSID Information Field */
 #define NEI_REP_BSSID_INFO_AP_NOT_REACH BIT(0)
 #define NEI_REP_BSSID_INFO_AP_UNKNOWN_REACH BIT(1)
@@ -2090,6 +2118,7 @@ enum phy_type {
 #define NEI_REP_BSSID_INFO_HT BIT(11)
 #define NEI_REP_BSSID_INFO_VHT BIT(12)
 #define NEI_REP_BSSID_INFO_FTM BIT(13)
+#define NEI_REP_BSSID_INFO_HE BIT(14)
 
 /*
  * IEEE P802.11-REVmc/D5.0 Table 9-152 - HT/VHT Operation Information
@@ -2109,7 +2138,7 @@ struct ieee80211_he_capabilities {
 	u8 he_phy_capab_info[11];
 	/* Followed by 4, 8, or 12 octets of Supported HE-MCS And NSS Set field
 	* and optional variable length PPE Thresholds field. */
-	u8 optional[];
+	u8 optional[37];
 } STRUCT_PACKED;
 
 struct ieee80211_he_operation {
@@ -2138,6 +2167,8 @@ struct ieee80211_spatial_reuse {
 } STRUCT_PACKED;
 
 /* HE Capabilities Information defines */
+
+#define HE_MACCAP_TWT_RESPONDER			((u8) BIT(2))
 
 #define HE_PHYCAP_CHANNEL_WIDTH_SET_IDX		0
 #define HE_PHYCAP_CHANNEL_WIDTH_MASK		((u8) (BIT(1) | BIT(2) | \
@@ -2174,10 +2205,14 @@ struct ieee80211_spatial_reuse {
 						BIT(10) | BIT(11) | \
 						BIT(12) | BIT(13)))
 #define HE_OPERATION_RTS_THRESHOLD_OFFSET	4
+#define HE_OPERATION_VHT_OPER_INFO		((u32) BIT(14))
+#define HE_OPERATION_COHOSTED_BSS		((u32) BIT(15))
+#define HE_OPERATION_ER_SU_DISABLE		((u32) BIT(16))
+#define HE_OPERATION_6GHZ_OPER_INFO		((u32) BIT(17))
 #define HE_OPERATION_BSS_COLOR_MASK		((u32) (BIT(24) | BIT(25) | \
 							BIT(26) | BIT(27) | \
 							BIT(28) | BIT(29)))
-#define HE_OPERATION_PARTIAL_BSS_COLOR		((u32) BIT(30))
+#define HE_OPERATION_BSS_COLOR_PARTIAL		((u32) BIT(30))
 #define HE_OPERATION_BSS_COLOR_DISABLED		((u32) BIT(31))
 #define HE_OPERATION_BSS_COLOR_OFFSET		24
 
@@ -2220,6 +2255,39 @@ struct ieee80211_he_mu_edca_parameter_set {
 #define HE_QOS_INFO_TXOP_REQUEST ((u8) (BIT(6)))
 /* B7: Reserved if sent by an AP; More Data Ack if sent by a non-AP STA */
 #define HE_QOS_INFO_MORE_DATA_ACK ((u8) (BIT(7)))
+
+/* IEEE P802.11ay/D4.0, 9.4.2.251 - EDMG Operation element */
+#define EDMG_BSS_OPERATING_CHANNELS_OFFSET	6
+#define EDMG_OPERATING_CHANNEL_WIDTH_OFFSET	7
+
+/* IEEE P802.11ay/D4.0, 29.3.4 - Channelization */
+enum edmg_channel {
+	EDMG_CHANNEL_9	= 9,
+	EDMG_CHANNEL_10	= 10,
+	EDMG_CHANNEL_11	= 11,
+	EDMG_CHANNEL_12	= 12,
+	EDMG_CHANNEL_13	= 13,
+};
+
+/* Represent CB2 contiguous channels */
+#define EDMG_CHANNEL_9_SUBCHANNELS	(BIT(0) | BIT(1)) /* channels 1 and 2 */
+#define EDMG_CHANNEL_10_SUBCHANNELS	(BIT(1) | BIT(2)) /* channels 2 and 3 */
+#define EDMG_CHANNEL_11_SUBCHANNELS	(BIT(2) | BIT(3)) /* channels 3 and 4 */
+#define EDMG_CHANNEL_12_SUBCHANNELS	(BIT(3) | BIT(4)) /* channels 4 and 5 */
+#define EDMG_CHANNEL_13_SUBCHANNELS	(BIT(4) | BIT(5)) /* channels 5 and 6 */
+
+/**
+ * enum edmg_bw_config - Allowed channel bandwidth configurations
+ * @EDMG_BW_CONFIG_4: 2.16 GHz
+ * @EDMG_BW_CONFIG_5: 2.16 GHz and 4.32 GHz
+ *
+ * IEEE P802.11ay/D4.0, 9.4.2.251 (EDMG Operation element),
+ * Table 13 (Channel BW Configuration subfield definition)
+ */
+enum edmg_bw_config {
+	EDMG_BW_CONFIG_4	= 4,
+	EDMG_BW_CONFIG_5	= 5,
+};
 
 /* DPP Public Action frame identifiers - OUI_WFA */
 #define DPP_OUI_TYPE 0x1A

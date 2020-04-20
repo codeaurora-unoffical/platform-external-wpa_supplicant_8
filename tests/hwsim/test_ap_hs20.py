@@ -17,11 +17,12 @@ import socket
 import subprocess
 
 import hostapd
-from utils import HwsimSkip, skip_with_fips, alloc_fail, fail_test, wait_fail_trigger
+from utils import *
 import hwsim_utils
 from tshark import run_tshark
 from wlantest import Wlantest
 from wpasupplicant import WpaSupplicant
+from wlantest import WlantestCapture
 from test_ap_eap import check_eap_capa, check_domain_match_full
 from test_gas import gas_rx, parse_gas, action_response, anqp_initial_resp, send_gas_resp, ACTION_CATEG_PUBLIC, GAS_INITIAL_RESPONSE
 
@@ -795,8 +796,9 @@ def eap_test(dev, ap, eap_params, method, user, release=0):
     params['nai_realm'] = ["0,example.com," + eap_params]
     if release > 0:
         params['hs20_release'] = str(release)
-    hostapd.add_ap(ap, params)
+    hapd = hostapd.add_ap(ap, params)
 
+    dev.flush_scan_cache()
     dev.hs20_enable()
     dev.add_cred_values({'realm': "example.com",
                          'ca_cert': "auth_serv/ca.pem",
@@ -804,6 +806,7 @@ def eap_test(dev, ap, eap_params, method, user, release=0):
                          'password': "password"})
     interworking_select(dev, bssid, freq="2412")
     interworking_connect(dev, bssid, method)
+    return hapd
 
 @remote_compatible
 def test_ap_hs20_eap_unknown(dev, apdev):
@@ -916,6 +919,7 @@ def test_ap_hs20_eap_tls(dev, apdev):
     params['nai_realm'] = ["0,example.com,13[5:6]"]
     hostapd.add_ap(apdev[0], params)
 
+    dev[0].flush_scan_cache()
     dev[0].hs20_enable()
     dev[0].add_cred_values({'realm': "example.com",
                             'username': "certificate-user",
@@ -978,6 +982,7 @@ def test_ap_hs20_nai_realms(dev, apdev):
     params['nai_realm'] = ["0,no.match.here;example.com;no.match.here.either,21[2:1][5:7]"]
     hostapd.add_ap(apdev[0], params)
 
+    dev[0].flush_scan_cache()
     dev[0].hs20_enable()
     id = dev[0].add_cred_values({'realm': "example.com",
                                  'ca_cert': "auth_serv/ca.pem",
@@ -995,6 +1000,7 @@ def test_ap_hs20_roaming_consortium(dev, apdev):
     params['hessid'] = bssid
     hostapd.add_ap(apdev[0], params)
 
+    dev[0].flush_scan_cache()
     dev[0].hs20_enable()
     for consortium in ["112233", "1020304050", "010203040506", "fedcba"]:
         id = dev[0].add_cred_values({'username': "user",
@@ -1019,6 +1025,7 @@ def test_ap_hs20_roaming_consortiums_match(dev, apdev):
     params['hessid'] = bssid
     hostapd.add_ap(apdev[0], params)
 
+    dev[0].flush_scan_cache()
     dev[0].hs20_enable()
     tests = [("112233", "112233"),
              ("ffffff,1020304050,eeeeee", "1020304050")]
@@ -1266,6 +1273,7 @@ def test_ap_hs20_connect_no_full_match(dev, apdev):
     params['anqp_3gpp_cell_net'] = "555,444"
     hostapd.add_ap(apdev[0], params)
 
+    dev[0].flush_scan_cache()
     dev[0].hs20_enable()
 
     vals = {'username': "user",
@@ -1440,6 +1448,7 @@ def _test_ap_hs20_gas_while_associated_with_pmf(dev, apdev):
     params['nai_realm'] = ["0,no-match.example.org,13[5:6],21[2:4][5:7]"]
     hostapd.add_ap(apdev[1], params)
 
+    dev[0].flush_scan_cache()
     dev[0].hs20_enable()
     dev[0].request("SET pmf 2")
     id = dev[0].add_cred_values({'realm': "example.com",
@@ -1469,7 +1478,7 @@ def _test_ap_hs20_gas_with_another_ap_while_using_pmf(dev, apdev):
     bssid = apdev[0]['bssid']
     params = hs20_ap_params()
     params['hessid'] = bssid
-    hostapd.add_ap(apdev[0], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     bssid2 = apdev[1]['bssid']
     params = hs20_ap_params()
@@ -1487,6 +1496,7 @@ def _test_ap_hs20_gas_with_another_ap_while_using_pmf(dev, apdev):
     interworking_select(dev[0], bssid, "home", freq="2412")
     interworking_connect(dev[0], bssid, "TTLS")
     dev[0].dump_monitor()
+    hapd.wait_sta()
 
     logger.info("Verifying GAS query with same AP while associated")
     dev[0].request("ANQP_GET " + bssid + " 263")
@@ -1519,6 +1529,7 @@ def test_ap_hs20_gas_frag_while_associated(dev, apdev):
                                  'domain': "example.com"})
     interworking_select(dev[0], bssid, "home", freq="2412")
     interworking_connect(dev[0], bssid, "TTLS")
+    hapd.wait_sta()
 
     logger.info("Verifying GAS query while associated")
     dev[0].request("FETCH_ANQP")
@@ -2433,10 +2444,10 @@ def test_ap_hs20_deauth_req_ess(dev, apdev):
 
 def _test_ap_hs20_deauth_req_ess(dev, apdev):
     dev[0].request("SET pmf 2")
-    eap_test(dev[0], apdev[0], "21[3:26]", "TTLS", "user")
+    hapd = eap_test(dev[0], apdev[0], "21[3:26]", "TTLS", "user")
     dev[0].dump_monitor()
     addr = dev[0].p2p_interface_addr()
-    hapd = hostapd.Hostapd(apdev[0]['ifname'])
+    hapd.wait_sta()
     hapd.request("HS20_DEAUTH_REQ " + addr + " 1 120 http://example.com/")
     ev = dev[0].wait_event(["HS20-DEAUTH-IMMINENT-NOTICE"])
     if ev is None:
@@ -2463,10 +2474,10 @@ def test_ap_hs20_deauth_req_bss(dev, apdev):
 
 def _test_ap_hs20_deauth_req_bss(dev, apdev):
     dev[0].request("SET pmf 2")
-    eap_test(dev[0], apdev[0], "21[3:26]", "TTLS", "user")
+    hapd = eap_test(dev[0], apdev[0], "21[3:26]", "TTLS", "user")
     dev[0].dump_monitor()
     addr = dev[0].p2p_interface_addr()
-    hapd = hostapd.Hostapd(apdev[0]['ifname'])
+    hapd.wait_sta()
     hapd.request("HS20_DEAUTH_REQ " + addr + " 0 120 http://example.com/")
     ev = dev[0].wait_event(["HS20-DEAUTH-IMMINENT-NOTICE"])
     if ev is None:
@@ -2518,7 +2529,7 @@ def test_ap_hs20_deauth_req_without_pmf(dev, apdev):
     """Hotspot 2.0 connection and deauthentication request without PMF"""
     check_eap_capa(dev[0], "MSCHAPV2")
     dev[0].request("SET pmf 0")
-    eap_test(dev[0], apdev[0], "21[3:26]", "TTLS", "user", release=1)
+    hapd = eap_test(dev[0], apdev[0], "21[3:26]", "TTLS", "user", release=1)
     dev[0].dump_monitor()
     id = int(dev[0].get_status_field("id"))
     dev[0].set_network(id, "ieee80211w", "0")
@@ -2527,7 +2538,7 @@ def test_ap_hs20_deauth_req_without_pmf(dev, apdev):
     dev[0].select_network(id, freq=2412)
     dev[0].wait_connected()
     addr = dev[0].own_addr()
-    hapd = hostapd.Hostapd(apdev[0]['ifname'])
+    hapd.wait_sta()
     hapd.request("HS20_DEAUTH_REQ " + addr + " 1 120 http://example.com/")
     ev = dev[0].wait_event(["HS20-DEAUTH-IMMINENT-NOTICE"], timeout=0.2)
     if ev is not None:
@@ -2651,8 +2662,9 @@ def test_ap_hs20_osen(dev, apdev):
 
     dev[1].connect("osen", key_mgmt="NONE", scan_freq="2412",
                    wait_connect=False)
-    dev[2].connect("osen", key_mgmt="NONE", wep_key0='"hello"',
-                   scan_freq="2412", wait_connect=False)
+    if "WEP40" in dev[2].get_capability("group"):
+        dev[2].connect("osen", key_mgmt="NONE", wep_key0='"hello"',
+                       scan_freq="2412", wait_connect=False)
     dev[0].flush_scan_cache()
     dev[0].connect("osen", proto="OSEN", key_mgmt="OSEN", pairwise="CCMP",
                    group="GTK_NOT_USED CCMP",
@@ -4668,18 +4680,10 @@ def _test_proxyarp_open(dev, apdev, params, ebtables=False):
 
     time.sleep(0.5)
     cmd = {}
-    cmd[0] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', 'ap-br0',
-                               '-w', cap_br, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
-    cmd[1] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', dev[0].ifname,
-                               '-w', cap_dev0, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
-    cmd[2] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', dev[1].ifname,
-                               '-w', cap_dev1, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
-    cmd[3] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', dev[2].ifname,
-                               '-w', cap_dev2, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
+    cmd[0] = WlantestCapture('ap-br0', cap_br)
+    cmd[1] = WlantestCapture(dev[0].ifname, cap_dev0)
+    cmd[2] = WlantestCapture(dev[1].ifname, cap_dev1)
+    cmd[3] = WlantestCapture(dev[2].ifname, cap_dev2)
 
     dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
     dev[1].connect("open", key_mgmt="NONE", scan_freq="2412")
@@ -4872,7 +4876,7 @@ def _test_proxyarp_open(dev, apdev, params, ebtables=False):
     dev[1].request("DISCONNECT")
     time.sleep(1.5)
     for i in range(len(cmd)):
-        cmd[i].terminate()
+        cmd[i].close()
     time.sleep(0.1)
     macs = get_bridge_macs("ap-br0")
     logger.info("After disconnect (showmacs): " + str(macs))
@@ -5016,18 +5020,10 @@ def _test_proxyarp_open_ipv6(dev, apdev, params, ebtables=False):
 
     time.sleep(0.5)
     cmd = {}
-    cmd[0] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', 'ap-br0',
-                               '-w', cap_br, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
-    cmd[1] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', dev[0].ifname,
-                               '-w', cap_dev0, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
-    cmd[2] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', dev[1].ifname,
-                               '-w', cap_dev1, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
-    cmd[3] = subprocess.Popen(['tcpdump', '-p', '-U', '-i', dev[2].ifname,
-                               '-w', cap_dev2, '-s', '2000'],
-                              stderr=open('/dev/null', 'w'))
+    cmd[0] = WlantestCapture('ap-br0', cap_br)
+    cmd[1] = WlantestCapture(dev[0].ifname, cap_dev0)
+    cmd[2] = WlantestCapture(dev[1].ifname, cap_dev1)
+    cmd[3] = WlantestCapture(dev[2].ifname, cap_dev2)
 
     dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
     dev[1].connect("open", key_mgmt="NONE", scan_freq="2412")
@@ -5131,7 +5127,7 @@ def _test_proxyarp_open_ipv6(dev, apdev, params, ebtables=False):
     dev[1].request("DISCONNECT")
     time.sleep(0.5)
     for i in range(len(cmd)):
-        cmd[i].terminate()
+        cmd[i].close()
     macs = get_bridge_macs("ap-br0")
     logger.info("After disconnect (showmacs): " + str(macs))
     matches = get_permanent_neighbors("ap-br0")
@@ -5159,7 +5155,12 @@ def _test_proxyarp_open_ipv6(dev, apdev, params, ebtables=False):
 
     if ebtables:
         for req in ns:
-            if req[1] != addr0:
+            if req[1] == bssid and req[0] == "33:33:ff:" + bssid[9:] and \
+               req[3] == 'ff02::1:ff00:300' and req[4] == 'fe80::ff:fe00:300':
+                # At least for now, ignore this special case until the kernel
+                # can be prevented from sending it out.
+                logger.info("dev0: Ignore NS from AP to own local addr: " + str(req))
+            elif req[1] != addr0:
                 raise Exception("Unexpected foreign NS on dev0: " + str(req))
 
     ns = tshark_get_ns(cap_dev1)
@@ -5173,7 +5174,12 @@ def _test_proxyarp_open_ipv6(dev, apdev, params, ebtables=False):
 
     if ebtables:
         for req in ns:
-            if req[1] != addr1:
+            if req[1] == bssid and req[0] == "33:33:ff:" + bssid[9:] and \
+               req[3] == 'ff02::1:ff00:300' and req[4] == 'fe80::ff:fe00:300':
+                # At least for now, ignore this special case until the kernel
+                # can be prevented from sending it out.
+                logger.info("dev1: Ignore NS from AP to own local addr: " + str(req))
+            elif req[1] != addr1:
                 raise Exception("Unexpected foreign NS on dev1: " + str(req))
 
     ns = tshark_get_ns(cap_dev2)
@@ -5434,7 +5440,7 @@ def test_ap_hs20_cred_and_no_roaming_consortium(dev, apdev):
                                  'domain': "example.com",
                                  'roaming_consortium': "112234",
                                  'eap': 'TTLS'})
-    interworking_select(dev[0], bssid, "home", freq=2412, no_match=True)
+    interworking_select(dev[0], bssid, "home", freq=2412)
 
 def test_ap_hs20_interworking_oom(dev, apdev):
     """Hotspot 2.0 network selection and OOM"""
@@ -5983,6 +5989,9 @@ def test_ap_hs20_set_profile_failures(dev, apdev):
 
 def test_ap_hs20_unexpected(dev, apdev):
     """Unexpected Hotspot 2.0 AP configuration"""
+    skip_without_tkip(dev[0])
+    skip_without_tkip(dev[1])
+    skip_without_tkip(dev[2])
     check_eap_capa(dev[0], "MSCHAPV2")
     bssid = apdev[0]['bssid']
     params = hostapd.wpa_eap_params(ssid="test-hs20-fake")
@@ -6374,3 +6383,21 @@ def test_ap_hs20_missing_pmf(dev, apdev):
         raise Exception("Association rejection not reported")
     if "status_code=31" not in ev:
         raise Exception("Unexpected rejection reason: " + ev)
+
+def test_ap_hs20_open_osu_association(dev, apdev):
+    """Hotspot 2.0 open OSU association"""
+    try:
+        run_ap_hs20_open_osu_association(dev, apdev)
+    finally:
+        dev[0].request("VENDOR_ELEM_REMOVE 13 *")
+
+def run_ap_hs20_open_osu_association(dev, apdev):
+    params = {"ssid": "HS 2.0 OSU open"}
+    hostapd.add_ap(apdev[0], params)
+    dev[0].connect("HS 2.0 OSU open", key_mgmt="NONE", scan_freq="2412")
+    dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
+    dev[0].dump_monitor()
+    # Test with unexpected Hotspot 2.0 Indication element in Assoc Req
+    dev[0].request("VENDOR_ELEM_ADD 13 dd07506f9a10220000")
+    dev[0].connect("HS 2.0 OSU open", key_mgmt="NONE", scan_freq="2412")

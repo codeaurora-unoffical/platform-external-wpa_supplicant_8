@@ -257,7 +257,17 @@ def main():
     if args.tests:
         fail = False
         for t in args.tests:
-            if t not in test_names:
+            if t.endswith('*'):
+                prefix = t.rstrip('*')
+                found = False
+                for tn in test_names:
+                    if tn.startswith(prefix):
+                        found = True
+                        break
+                if not found:
+                    print('Invalid arguments - test "%s" wildcard did not match' % t)
+                    fail = True
+            elif t not in test_names:
                 print('Invalid arguments - test "%s" not known' % t)
                 fail = True
         if fail:
@@ -292,7 +302,11 @@ def main():
         for selected in args.tests:
             for t in tests:
                 name = t.__name__.replace('test_', '', 1)
-                if name == selected:
+                if selected.endswith('*'):
+                    prefix = selected.rstrip('*')
+                    if name.startswith(prefix):
+                        tests_to_run.append(t)
+                elif name == selected:
                     tests_to_run.append(t)
     else:
         for t in tests:
@@ -496,11 +510,14 @@ def main():
                     if args.stdin_ctrl:
                         set_term_echo(sys.stdin.fileno(), True)
                     sys.exit(1)
+            skip_reason = None
             try:
                 if t.__code__.co_argcount > 2:
                     params = {}
                     params['logdir'] = args.logdir
                     params['long'] = args.long
+                    params['name'] = name
+                    params['prefix'] = os.path.join(args.logdir, name)
                     t(dev, apdev, params)
                 elif t.__code__.co_argcount > 1:
                     t(dev, apdev)
@@ -533,6 +550,7 @@ def main():
                             break
             except HwsimSkip as e:
                 logger.info("Skip test case: %s" % e)
+                skip_reason = e
                 result = "SKIP"
             except NameError as e:
                 import traceback
@@ -621,6 +639,8 @@ def main():
         logger.info(result)
         if args.loglevel == logging.WARNING:
             print(result)
+            if skip_reason:
+                print("REASON", skip_reason)
             sys.stdout.flush()
 
         if not reset_ok:
