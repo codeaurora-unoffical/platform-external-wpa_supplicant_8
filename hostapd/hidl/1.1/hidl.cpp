@@ -11,6 +11,9 @@
 #include <hidl/HidlTransportSupport.h>
 
 #include "hostapd.h"
+#ifdef CONFIG_USE_VENDOR_HIDL
+#include "hostapd_vendor.h"
+#endif /* CONFIG_USE_VENDOR_HIDL */
 
 extern "C"
 {
@@ -29,6 +32,13 @@ using android::hardware::wifi::hostapd::V1_1::implementation::Hostapd;
 // interface in C++. So, using "C" style static globals here!
 static int hidl_fd = -1;
 static android::sp<IHostapd> service;
+
+#ifdef CONFIG_USE_VENDOR_HIDL
+using vendor::qti::hardware::wifi::hostapd::V1_2::IHostapdVendor;
+using vendor::qti::hardware::wifi::hostapd::V1_2::implementation::HostapdVendor;
+
+static android::sp<IHostapdVendor> vendor_service;
+#endif /* CONFIG_USE_VENDOR_HIDL */
 
 void hostapd_hidl_sock_handler(
     int /* sock */, void * /* eloop_ctx */, void * /* sock_ctx */)
@@ -54,6 +64,13 @@ int hostapd_hidl_init(struct hapd_interfaces *interfaces)
 		goto err;
 	if (service->registerAsService() != android::NO_ERROR)
 		goto err;
+#ifdef CONFIG_USE_VENDOR_HIDL
+	vendor_service = new HostapdVendor(interfaces);
+	if (!vendor_service)
+		goto err;
+	if (vendor_service->registerAsService() != android::NO_ERROR)
+		goto err;
+#endif /* CONFIG_USE_VENDOR_HIDL */
 	return 0;
 err:
 	hostapd_hidl_deinit(interfaces);
@@ -66,5 +83,8 @@ void hostapd_hidl_deinit(struct hapd_interfaces *interfaces)
 	eloop_unregister_read_sock(hidl_fd);
 	IPCThreadState::shutdown();
 	hidl_fd = -1;
+#ifdef CONFIG_USE_VENDOR_HIDL
+	vendor_service.clear();
+#endif /* CONFIG_USE_VENDOR_HIDL */
 	service.clear();
 }

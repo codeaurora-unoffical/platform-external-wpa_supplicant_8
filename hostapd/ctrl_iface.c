@@ -83,6 +83,9 @@ static int hostapd_ctrl_iface_attach(struct hostapd_data *hapd,
 				     struct sockaddr_storage *from,
 				     socklen_t fromlen, const char *input)
 {
+	if (from == NULL || fromlen == 0) {
+		return -1;
+	}
 	return ctrl_iface_attach(&hapd->ctrl_dst, from, fromlen, input);
 }
 
@@ -91,6 +94,9 @@ static int hostapd_ctrl_iface_detach(struct hostapd_data *hapd,
 				     struct sockaddr_storage *from,
 				     socklen_t fromlen)
 {
+	if (from == NULL || fromlen == 0) {
+		return -1;
+	}
 	return ctrl_iface_detach(&hapd->ctrl_dst, from, fromlen);
 }
 
@@ -100,6 +106,9 @@ static int hostapd_ctrl_iface_level(struct hostapd_data *hapd,
 				    socklen_t fromlen,
 				    char *level)
 {
+	if (from == NULL || fromlen == 0) {
+		return -1;
+	}
 	return ctrl_iface_level(&hapd->ctrl_dst, from, fromlen, level);
 }
 
@@ -2911,7 +2920,7 @@ static int hostapd_ctrl_iface_get_capability(struct hostapd_data *hapd,
 }
 
 
-static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
+int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 					      char *buf, char *reply,
 					      int reply_size,
 					      struct sockaddr_storage *from,
