@@ -69,11 +69,18 @@ private:
 	HostapdStatus removeAccessPointInternal(const std::string& iface_name);
 	HostapdStatus registerCallbackInternal(
 	    const sp<IHostapdCallback>& callback);
+	HostapdStatus addSingleAccessPoint(
+	    const IfaceParams& IfaceParams, const NetworkParams& nw_params,
+	    std::string br_name);
+	HostapdStatus addDualAccessPoint(
+	    const IfaceParams& IfaceParams, const NetworkParams& nw_params);
 
 	// Raw pointer to the global structure maintained by the core.
 	struct hapd_interfaces* interfaces_;
 	// Callbacks registered.
 	std::vector<sp<IHostapdCallback>> callbacks_;
+	// Bridge and its managed interfaces.
+	std::map<std::string, std::vector<std::string>> br_interfaces_;
 
 	DISALLOW_COPY_AND_ASSIGN(Hostapd);
 };
