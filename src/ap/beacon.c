@@ -1391,7 +1391,8 @@ void ieee802_11_free_ap_params(struct wpa_driver_ap_params *params)
 	params->proberesp = NULL;
 }
 
-
+#define AP_SET_BEACON_DELAY_MS 500
+#define AP_SET_BEACON_MAX_RETRY 10
 int ieee802_11_set_beacon(struct hostapd_data *hapd)
 {
 	struct wpa_driver_ap_params params;
@@ -1399,7 +1400,7 @@ int ieee802_11_set_beacon(struct hostapd_data *hapd)
 	struct hostapd_iface *iface = hapd->iface;
 	struct hostapd_config *iconf = iface->conf;
 	struct wpabuf *beacon, *proberesp, *assocresp;
-	int res, ret = -1;
+	int res, ret = -1, retry = 0;
 
 	if (hapd->csa_in_progress) {
 		wpa_printf(MSG_ERROR, "Cannot set beacons during CSA period");
@@ -1432,7 +1433,17 @@ int ieee802_11_set_beacon(struct hostapd_data *hapd)
 				    iface->current_mode->vht_capab) == 0)
 		params.freq = &freq;
 
-	res = hostapd_drv_set_ap(hapd, &params);
+	while (retry++ < AP_SET_BEACON_MAX_RETRY) {
+		res = hostapd_drv_set_ap(hapd, &params);
+		if (res != -EAGAIN)
+			break;
+
+		wpa_printf(MSG_WARNING,
+			   "Got EAGAIN when setting AP, have tried %d time(s)",
+			   retry);
+		os_sleep(0, AP_SET_BEACON_DELAY_MS * 1000);
+	}
+
 	hostapd_free_ap_extra_ies(hapd, beacon, proberesp, assocresp);
 	if (res)
 		wpa_printf(MSG_ERROR, "Failed to set beacon parameters");
