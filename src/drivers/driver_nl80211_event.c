@@ -137,6 +137,7 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_STA_OPMODE_CHANGED)
 	C2S(NL80211_CMD_CONTROL_PORT_FRAME)
 	C2S(NL80211_CMD_UPDATE_OWE_INFO)
+	C2S(NL80211_CMD_UNPROT_BEACON)
 	default:
 		return "NL80211_CMD_UNKNOWN";
 	}
@@ -893,6 +894,23 @@ static void mlme_event_unprot_disconnect(struct wpa_driver_nl80211_data *drv,
 }
 
 
+static void mlme_event_unprot_beacon(struct wpa_driver_nl80211_data *drv,
+				     const u8 *frame, size_t len)
+{
+	const struct ieee80211_mgmt *mgmt;
+	union wpa_event_data event;
+
+	if (len < 24)
+		return;
+
+	mgmt = (const struct ieee80211_mgmt *) frame;
+
+	os_memset(&event, 0, sizeof(event));
+	event.unprot_beacon.sa = mgmt->sa;
+	wpa_supplicant_event(drv->ctx, EVENT_UNPROT_BEACON, &event);
+}
+
+
 static void mlme_event(struct i802_bss *bss,
 		       enum nl80211_commands cmd, struct nlattr *frame,
 		       struct nlattr *addr, struct nlattr *timed_out,
@@ -973,6 +991,9 @@ static void mlme_event(struct i802_bss *bss,
 	case NL80211_CMD_UNPROT_DISASSOCIATE:
 		mlme_event_unprot_disconnect(drv, EVENT_UNPROT_DISASSOC,
 					     nla_data(frame), nla_len(frame));
+		break;
+	case NL80211_CMD_UNPROT_BEACON:
+		mlme_event_unprot_beacon(drv, nla_data(frame), nla_len(frame));
 		break;
 	default:
 		break;
@@ -2505,12 +2526,34 @@ static void nl80211_sta_opmode_change_event(struct wpa_driver_nl80211_data *drv,
 static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
 				       struct nlattr **tb)
 {
-	if (!tb[NL80211_ATTR_MAC] || !tb[NL80211_ATTR_FRAME])
+	u8 *src_addr;
+	u16 ethertype;
+
+	if (!tb[NL80211_ATTR_MAC] ||
+	    !tb[NL80211_ATTR_FRAME] ||
+	    !tb[NL80211_ATTR_CONTROL_PORT_ETHERTYPE])
 		return;
 
-	drv_event_eapol_rx(drv->ctx, nla_data(tb[NL80211_ATTR_MAC]),
-			   nla_data(tb[NL80211_ATTR_FRAME]),
-			   nla_len(tb[NL80211_ATTR_FRAME]));
+	src_addr = nla_data(tb[NL80211_ATTR_MAC]);
+	ethertype = nla_get_u16(tb[NL80211_ATTR_CONTROL_PORT_ETHERTYPE]);
+
+	switch (ethertype) {
+	case ETH_P_RSN_PREAUTH:
+		wpa_printf(MSG_INFO, "nl80211: Got pre-auth frame from "
+			   MACSTR " over control port unexpectedly",
+			   MAC2STR(src_addr));
+		break;
+	case ETH_P_PAE:
+		drv_event_eapol_rx(drv->ctx, src_addr,
+				   nla_data(tb[NL80211_ATTR_FRAME]),
+				   nla_len(tb[NL80211_ATTR_FRAME]));
+		break;
+	default:
+		wpa_printf(MSG_INFO, "nl80211: Unxpected ethertype 0x%04x from "
+			   MACSTR " over control port",
+			   ethertype, MAC2STR(src_addr));
+		break;
+	}
 }
 
 
@@ -2519,6 +2562,7 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 {
 	struct wpa_driver_nl80211_data *drv = bss->drv;
 	int external_scan_event = 0;
+	struct nlattr *frame = tb[NL80211_ATTR_FRAME];
 
 	wpa_printf(MSG_DEBUG, "nl80211: Drv Event %d (%s) received for %s",
 		   cmd, nl80211_command_to_string(cmd), bss->ifname);
@@ -2729,8 +2773,10 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 	case NL80211_CMD_UPDATE_OWE_INFO:
 		mlme_event_dh_event(drv, bss, tb);
 		break;
-	case NL80211_CMD_CONTROL_PORT_FRAME:
-		nl80211_control_port_frame(drv, tb);
+	case NL80211_CMD_UNPROT_BEACON:
+		if (frame)
+			mlme_event_unprot_beacon(drv, nla_data(frame),
+						 nla_len(frame));
 		break;
 	default:
 		wpa_dbg(drv->ctx, MSG_DEBUG, "nl80211: Ignored unknown event "
@@ -2820,6 +2866,9 @@ int process_bss_event(struct nl_msg *msg, void *arg)
 		break;
 	case NL80211_CMD_EXTERNAL_AUTH:
 		nl80211_external_auth(bss->drv, tb);
+		break;
+	case NL80211_CMD_CONTROL_PORT_FRAME:
+		nl80211_control_port_frame(bss->drv, tb);
 		break;
 	default:
 		wpa_printf(MSG_DEBUG, "nl80211: Ignored unknown event "
