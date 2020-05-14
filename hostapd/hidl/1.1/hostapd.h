@@ -30,6 +30,12 @@ namespace hardware {
 namespace wifi {
 namespace hostapd {
 namespace V1_1 {
+
+struct VendorParams {
+	std::string bridgeIfaceName;
+	std::string oweTransIfaceName;
+};
+
 namespace implementation {
 using namespace android::hardware::wifi::hostapd::V1_0;
 
@@ -71,7 +77,7 @@ private:
 	    const sp<IHostapdCallback>& callback);
 	HostapdStatus addSingleAccessPoint(
 	    const IfaceParams& IfaceParams, const NetworkParams& nw_params,
-	    std::string br_name);
+	    const VendorParams& vendor_params);
 	HostapdStatus addDualAccessPoint(
 	    const IfaceParams& IfaceParams, const NetworkParams& nw_params);
 
