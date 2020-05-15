@@ -14,6 +14,8 @@
 #include "eap_peer/eap.h"
 #include "eap_common/eap_common.h"
 
+#define NO_EAP_METHOD_ERROR (-1)
+
 /* RFC 4137 - EAP Peer state machine */
 
 typedef enum {
@@ -70,7 +72,7 @@ struct eap_method {
 	/**
 	 * method - EAP type number (EAP_TYPE_*)
 	 */
-	EapType method;
+	enum eap_type method;
 
 	/**
 	 * name - Name of the method (e.g., "TLS")
@@ -206,6 +208,17 @@ struct eap_method {
 	const u8 * (*get_identity)(struct eap_sm *sm, void *priv, size_t *len);
 
 	/**
+	 * get_error_code - Get the latest EAP method error code
+	 * @priv: Pointer to private EAP method data from eap_method::init()
+	 * Returns: An int for the EAP method specific error code if exists or
+	 * NO_EAP_METHOD_ERROR otherwise.
+	 *
+	 * This method is an optional handler that only EAP methods that need to
+	 * report their error code need to implement.
+	 */
+	int (*get_error_code)(void *priv);
+
+	/**
 	 * free - Free EAP method data
 	 * @method: Pointer to the method data registered with
 	 * eap_peer_method_register().
@@ -299,7 +312,7 @@ struct eap_sm {
 		EAP_FAILURE
 	} EAP_state;
 	/* Long-term local variables */
-	EapType selectedMethod;
+	enum eap_type selectedMethod;
 	EapMethodState methodState;
 	int lastId;
 	struct wpabuf *lastRespData;
@@ -309,7 +322,7 @@ struct eap_sm {
 	Boolean rxSuccess;
 	Boolean rxFailure;
 	int reqId;
-	EapType reqMethod;
+	enum eap_type reqMethod;
 	int reqVendor;
 	u32 reqVendorMethod;
 	Boolean ignore;
@@ -338,9 +351,9 @@ struct eap_sm {
 	Boolean rxResp /* LEAP only */;
 	Boolean leap_done;
 	Boolean peap_done;
-	u8 req_md5[16]; /* MD5() of the current EAP packet */
-	u8 last_md5[16]; /* MD5() of the previously received EAP packet; used
-			  * in duplicate request detection. */
+	u8 req_sha1[20]; /* SHA1() of the current EAP packet */
+	u8 last_sha1[20]; /* SHA1() of the previously received EAP packet; used
+			   * in duplicate request detection. */
 
 	void *msg_ctx;
 	void *scard_ctx;
@@ -353,6 +366,7 @@ struct eap_sm {
 	u8 *peer_challenge, *auth_challenge;
 
 	int num_rounds;
+	int num_rounds_short;
 	int force_disabled;
 
 	struct wps_context *wps;
@@ -366,6 +380,8 @@ struct eap_sm {
 	int external_sim;
 
 	unsigned int expected_failure:1;
+	unsigned int ext_cert_check:1;
+	unsigned int waiting_ext_cert_check:1;
 
 	struct dl_list erp_keys; /* struct eap_erp_key */
 };
