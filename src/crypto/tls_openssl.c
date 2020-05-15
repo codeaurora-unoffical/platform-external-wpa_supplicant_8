@@ -2681,7 +2681,7 @@ static int tls_connection_ca_cert(struct tls_data *data,
 				      (const unsigned char **) &ca_cert_blob,
 				      ca_cert_blob_len);
 		if (cert == NULL) {
-			BIO *bio = BIO_new_mem_buf(ca_cert_blob,
+			BIO *bio = BIO_new_mem_buf((void *)ca_cert_blob,
 						   ca_cert_blob_len);
 
 			if (bio) {
@@ -5160,6 +5160,7 @@ static const char * openssl_pkey_type_str(const EVP_PKEY *pkey)
 
 static void openssl_debug_dump_certificate(int i, X509 *cert)
 {
+#ifdef  DUMP_CERTIFICATE
 	char buf[256];
 	EVP_PKEY *pkey;
 	ASN1_INTEGER *ser;
@@ -5179,11 +5180,14 @@ static void openssl_debug_dump_certificate(int i, X509 *cert)
 	wpa_printf(MSG_DEBUG, "%d: %s (%s) %s", i, buf,
 		   openssl_pkey_type_str(pkey), serial_num);
 	EVP_PKEY_free(pkey);
+#endif
 }
 
 
 static void openssl_debug_dump_certificates(SSL_CTX *ssl_ctx)
 {
+#ifdef DUMP_CERTIFICATE
+
 	STACK_OF(X509) *certs;
 
 	wpa_printf(MSG_DEBUG, "OpenSSL: Configured certificate chain");
@@ -5195,6 +5199,7 @@ static void openssl_debug_dump_certificates(SSL_CTX *ssl_ctx)
 									i - 1));
 	}
 	openssl_debug_dump_certificate(0, SSL_CTX_get0_certificate(ssl_ctx));
+#endif
 }
 
 #endif
@@ -5203,6 +5208,7 @@ static void openssl_debug_dump_certificates(SSL_CTX *ssl_ctx)
 static void openssl_debug_dump_certificate_chains(SSL_CTX *ssl_ctx)
 {
 #if !defined(LIBRESSL_VERSION_NUMBER) && !defined(BORINGSSL_API_VERSION)
+#ifdef DUMP_CERTIFICATE
 	int res;
 
 	for (res = SSL_CTX_set_current_cert(ssl_ctx, SSL_CERT_SET_FIRST);
@@ -5211,6 +5217,7 @@ static void openssl_debug_dump_certificate_chains(SSL_CTX *ssl_ctx)
 		openssl_debug_dump_certificates(ssl_ctx);
 
 	SSL_CTX_set_current_cert(ssl_ctx, SSL_CERT_SET_FIRST);
+#endif
 #endif
 }
 
