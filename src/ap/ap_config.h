@@ -686,6 +686,7 @@ struct hostapd_bss_config {
 	struct wpabuf *igtk_rsc_override;
 	int no_beacon_rsnxe;
 	int skip_prune_assoc;
+	int ft_rsnxe_used;
 #endif /* CONFIG_TESTING_OPTIONS */
 
 #define MESH_ENABLED BIT(0)
@@ -864,9 +865,9 @@ struct hostapd_bss_config {
  * struct he_phy_capabilities_info - HE PHY capabilities
  */
 struct he_phy_capabilities_info {
-	Boolean he_su_beamformer;
-	Boolean he_su_beamformee;
-	Boolean he_mu_beamformer;
+	bool he_su_beamformer;
+	bool he_su_beamformee;
+	bool he_mu_beamformer;
 };
 
 /**
