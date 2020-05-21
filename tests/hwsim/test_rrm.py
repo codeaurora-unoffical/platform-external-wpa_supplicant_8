@@ -17,6 +17,7 @@ import time
 import hostapd
 from wpasupplicant import WpaSupplicant
 from utils import HwsimSkip, alloc_fail, fail_test, wait_fail_trigger
+from utils import disable_hapd, clear_regdom_dev, clear_regdom
 from test_ap_ht import clear_scan_cache
 from remotehost import remote_compatible
 from test_ap_vht import vht_supported
@@ -67,6 +68,22 @@ def test_rrm_neighbor_db(dev, apdev):
     """hostapd ctrl_iface SET_NEIGHBOR"""
     params = {"ssid": "test", "rrm_neighbor_report": "1"}
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    params = {"ssid": "test2", "rrm_neighbor_report": "1"}
+    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+
+    res = hapd.request("SHOW_NEIGHBOR")
+    if len(res.splitlines()) != 1:
+        raise Exception("Unexpected SHOW_NEIGHBOR output(1): " + res)
+    if apdev[0]['bssid'] not in res:
+        raise Exception("Own BSS not visible in SHOW_NEIGHBOR output")
+
+    if "OK" not in hapd2.request("SET_NEIGHBOR " + res.strip()):
+        raise Exception("Failed to copy neighbor entry to another hostapd")
+    res2 = hapd2.request("SHOW_NEIGHBOR")
+    if len(res2.splitlines()) != 2:
+        raise Exception("Unexpected SHOW_NEIGHBOR output: " + res2)
+    if res not in res2:
+        raise Exception("Copied entry not visible")
 
     # Bad BSSID
     if "FAIL" not in hapd.request("SET_NEIGHBOR 00:11:22:33:44:gg ssid=\"test1\" nr=" + nr):
@@ -104,9 +121,27 @@ def test_rrm_neighbor_db(dev, apdev):
     if "OK" not in hapd.request("SET_NEIGHBOR 00:11:22:33:44:55 ssid=\"test1\" nr=" + nr + " lci=" + lci + " civic=" + civic):
         raise Exception("Set neighbor failed")
 
+    res = hapd.request("SHOW_NEIGHBOR")
+    if len(res.splitlines()) != 2:
+        raise Exception("Unexpected SHOW_NEIGHBOR output(2): " + res)
+    if apdev[0]['bssid'] not in res:
+        raise Exception("Own BSS not visible in SHOW_NEIGHBOR output")
+    if "00:11:22:33:44:55" not in res:
+        raise Exception("Added BSS not visible in SHOW_NEIGHBOR output")
+
     # Another BSSID with the same SSID
     if "OK" not in hapd.request("SET_NEIGHBOR 00:11:22:33:44:56 ssid=\"test1\" nr=" + nr + " lci=" + lci + " civic=" + civic):
         raise Exception("Set neighbor failed")
+
+    res = hapd.request("SHOW_NEIGHBOR")
+    if len(res.splitlines()) != 3:
+        raise Exception("Unexpected SHOW_NEIGHBOR output(3): " + res)
+    if apdev[0]['bssid'] not in res:
+        raise Exception("Own BSS not visible in SHOW_NEIGHBOR output")
+    if "00:11:22:33:44:55" not in res:
+        raise Exception("Added BSS not visible in SHOW_NEIGHBOR output")
+    if "00:11:22:33:44:56" not in res:
+        raise Exception("Second added BSS not visible in SHOW_NEIGHBOR output")
 
     # Fewer parameters
     if "OK" not in hapd.request("SET_NEIGHBOR 00:11:22:33:44:55 ssid=\"test1\" nr=" + nr):
@@ -145,8 +180,18 @@ def test_rrm_neighbor_db(dev, apdev):
     if "OK" not in hapd.request("SET_NEIGHBOR 00:11:22:33:44:55 ssid=\"test3\" nr=" + nr + " lci=" + lci + " civic=" + civic + " stat"):
         raise Exception("Set neighbor failed")
 
+    res = hapd.request("SHOW_NEIGHBOR")
+    if len(res.splitlines()) != 2:
+        raise Exception("Unexpected SHOW_NEIGHBOR output(4): " + res)
+    if "00:11:22:33:44:55" not in res or " stat" not in res:
+        raise Exception("Unexpected SHOW_NEIGHBOR output(4b): " + res)
+
     if "OK" not in hapd.request("REMOVE_NEIGHBOR 00:11:22:33:44:55 ssid=\"test3\""):
         raise Exception("Remove neighbor failed")
+
+    # Add an entry for following REMOVE_NEIGHBOR tests
+    if "OK" not in hapd.request("SET_NEIGHBOR 00:11:22:33:44:55 ssid=7465737431 nr=" + nr):
+        raise Exception("Set neighbor failed")
 
     # Invalid remove - bad BSSID
     if "FAIL" not in hapd.request("REMOVE_NEIGHBOR 00:11:22:33:44:5 ssid=\"test1\""):
@@ -156,9 +201,15 @@ def test_rrm_neighbor_db(dev, apdev):
     if "FAIL" not in hapd.request("REMOVE_NEIGHBOR 00:11:22:33:44:55 ssid=\"test1"):
         raise Exception("Remove neighbor succeeded unexpectedly")
 
-    # Invalid remove - missing SSID
-    if "FAIL" not in hapd.request("REMOVE_NEIGHBOR 00:11:22:33:44:55"):
-        raise Exception("Remove neighbor succeeded unexpectedly")
+    # Remove without specifying SSID
+    if "OK" not in hapd.request("REMOVE_NEIGHBOR 00:11:22:33:44:55"):
+        raise Exception("Remove neighbor without SSID failed")
+
+    res = hapd.request("SHOW_NEIGHBOR")
+    if len(res.splitlines()) != 1:
+        raise Exception("Unexpected SHOW_NEIGHBOR output(5): " + res)
+    if apdev[0]['bssid'] not in res:
+        raise Exception("Own BSS not visible in SHOW_NEIGHBOR output")
 
 def test_rrm_neighbor_rep_req(dev, apdev):
     """wpa_supplicant ctrl_iface NEIGHBOR_REP_REQUEST"""
@@ -968,6 +1019,7 @@ def test_rrm_beacon_req_table_request(dev, apdev):
     params = {"ssid": "rrm", "rrm_beacon_report": "1"}
     hapd = hostapd.add_ap(apdev[0], params)
 
+    dev[0].flush_scan_cache()
     dev[0].connect("rrm", key_mgmt="NONE", scan_freq="2412")
     addr = dev[0].own_addr()
 
@@ -1254,10 +1306,9 @@ def test_rrm_beacon_req_table_vht(dev, apdev):
         raise
     finally:
         dev[0].request("DISCONNECT")
-        if hapd:
-            hapd.request("DISABLE")
-        subprocess.call(['iw', 'reg', 'set', '00'])
-        dev[0].flush_scan_cache()
+        disable_hapd(hapd)
+        disable_hapd(hapd2)
+        clear_regdom_dev(dev)
 
 @remote_compatible
 def test_rrm_beacon_req_active(dev, apdev):
@@ -1668,12 +1719,7 @@ def test_rrm_beacon_req_passive_scan_vht(dev, apdev):
                 raise HwsimSkip("80 MHz channel not supported in regulatory information")
         raise
     finally:
-        if hapd:
-            hapd.request("DISABLE")
-        dev[0].disconnect_and_stop_scan()
-        subprocess.call(['iw', 'reg', 'set', '00'])
-        dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
-        dev[0].flush_scan_cache()
+        clear_regdom(hapd, dev)
 
 def test_rrm_beacon_req_passive_scan_vht160(dev, apdev):
     """Beacon request - passive scan mode - VHT160"""
@@ -1715,12 +1761,7 @@ def test_rrm_beacon_req_passive_scan_vht160(dev, apdev):
             raise HwsimSkip("ZA regulatory rule likely did not have DFS requirement removed")
         raise
     finally:
-        if hapd:
-            hapd.request("DISABLE")
-        dev[0].disconnect_and_stop_scan()
-        subprocess.call(['iw', 'reg', 'set', '00'])
-        dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
-        dev[0].flush_scan_cache()
+        clear_regdom(hapd, dev)
 
 def test_rrm_beacon_req_ap_errors(dev, apdev):
     """Beacon request - AP error cases"""
@@ -2056,6 +2097,7 @@ def test_rrm_reassociation(dev, apdev):
     bssid = hapd.own_addr()
 
     addr = dev[0].own_addr()
+    dev[0].flush_scan_cache()
     dev[0].connect("rrm", key_mgmt="NONE", scan_freq="2412")
     check_beacon_req(hapd, addr, 1)
 

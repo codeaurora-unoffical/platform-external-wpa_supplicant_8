@@ -58,13 +58,14 @@ class fail_test(object):
             if self._dev.request("GET_FAIL") != "0:%s" % self._funcs:
                 raise Exception("Test failure did not trigger")
 
-def wait_fail_trigger(dev, cmd, note="Failure not triggered", max_iter=40):
+def wait_fail_trigger(dev, cmd, note="Failure not triggered", max_iter=40,
+		      timeout=0.05):
     for i in range(0, max_iter):
         if dev.request(cmd).startswith("0:"):
             break
         if i == max_iter - 1:
             raise Exception(note)
-        time.sleep(0.05)
+        time.sleep(timeout)
 
 def require_under_vm():
     with open('/proc/1/cmdline', 'r') as f:
@@ -87,6 +88,17 @@ def skip_with_fips(dev, reason="Not supported in FIPS mode"):
     res = dev.get_capability("fips")
     if res and 'FIPS' in res:
         raise HwsimSkip(reason)
+
+def check_ext_key_id_capa(dev):
+    res = dev.get_driver_status_field('capa.flags')
+    if (int(res, 0) & 0x8000000000000000) == 0:
+        raise HwsimSkip("Extended Key ID not supported")
+
+def skip_without_tkip(dev):
+    res = dev.get_capability("fips")
+    if "TKIP" not in dev.get_capability("pairwise") or \
+       "TKIP" not in dev.get_capability("group"):
+        raise HwsimSkip("Cipher TKIP not supported")
 
 def get_phy(ap, ifname=None):
     phy = "phy3"
@@ -148,17 +160,20 @@ def clear_country(dev):
         dev[1].dump_monitor()
 
 def clear_regdom(hapd, dev, count=1):
+    disable_hapd(hapd)
+    clear_regdom_dev(dev, count)
+
+def disable_hapd(hapd):
     if hapd:
         hapd.request("DISABLE")
         time.sleep(0.1)
-    clear_regdom_dev(dev, count)
 
 def clear_regdom_dev(dev, count=1):
     for i in range(count):
         dev[i].request("DISCONNECT")
     for i in range(count):
         dev[i].disconnect_and_stop_scan()
-    subprocess.call(['iw', 'reg', 'set', '00'])
+    dev[0].cmd_execute(['iw', 'reg', 'set', '00'])
     wait_regdom_changes(dev[0])
     country = dev[0].get_driver_status_field("country")
     logger.info("Country code at the end: " + country)
