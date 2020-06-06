@@ -354,6 +354,16 @@ static int hapd_wps_reconfig_in_memory(struct hostapd_data *hapd,
 							    bss->wpa_pairwise,
 							    bss->rsn_pairwise);
 
+		if (hapd->conf->wps_cred_add_sae &&
+		    (cred->auth_type & WPS_AUTH_WPA2PSK) &&
+		    cred->key_len != 2 * PMK_LEN) {
+			bss->wpa_key_mgmt |= WPA_KEY_MGMT_SAE;
+			if (bss->ieee80211w == NO_MGMT_FRAME_PROTECTION)
+				bss->ieee80211w =
+					MGMT_FRAME_PROTECTION_OPTIONAL;
+			bss->sae_require_mfp = 1;
+		}
+
 		if (cred->key_len >= 8 && cred->key_len < 64) {
 			os_free(bss->ssid.wpa_passphrase);
 			bss->ssid.wpa_passphrase = os_zalloc(cred->key_len + 1);
@@ -401,6 +411,7 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 	char buf[1024];
 	int multi_bss;
 	int wpa;
+	int pmf_changed = 0;
 
 	if (hapd->wps == NULL)
 		return 0;
@@ -520,6 +531,8 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 
 	if (wpa) {
 		char *prefix;
+		int sae = 0;
+
 		fprintf(nconf, "wpa=%d\n", wpa);
 
 		fprintf(nconf, "wpa_key_mgmt=");
@@ -528,9 +541,25 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 			fprintf(nconf, "WPA-EAP");
 			prefix = " ";
 		}
-		if (cred->auth_type & (WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK))
+		if (cred->auth_type & (WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK)) {
 			fprintf(nconf, "%sWPA-PSK", prefix);
+			prefix = " ";
+		}
+		if (hapd->conf->wps_cred_add_sae &&
+		    (cred->auth_type & WPS_AUTH_WPA2PSK) &&
+		    cred->key_len != 2 * PMK_LEN) {
+			fprintf(nconf, "%sSAE", prefix);
+			sae = 1;
+		}
 		fprintf(nconf, "\n");
+
+		if (sae && hapd->conf->ieee80211w == NO_MGMT_FRAME_PROTECTION) {
+			fprintf(nconf, "ieee80211w=%d\n",
+				MGMT_FRAME_PROTECTION_OPTIONAL);
+			pmf_changed = 1;
+		}
+		if (sae)
+			fprintf(nconf, "sae_require_mfp=1\n");
 
 		fprintf(nconf, "wpa_pairwise=");
 		prefix = "";
@@ -585,6 +614,7 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 		     str_starts(buf, "wep_default_key=") ||
 		     str_starts(buf, "wep_key") ||
 		     str_starts(buf, "wps_state=") ||
+		     (pmf_changed && str_starts(buf, "ieee80211w=")) ||
 		     str_starts(buf, "wpa=") ||
 		     str_starts(buf, "wpa_psk=") ||
 		     str_starts(buf, "wpa_pairwise=") ||
@@ -955,6 +985,21 @@ static int hostapd_wps_set_vendor_ext(struct hostapd_data *hapd,
 }
 
 
+static int hostapd_wps_set_application_ext(struct hostapd_data *hapd,
+					   struct wps_context *wps)
+{
+	wpabuf_free(wps->dev.application_ext);
+
+	if (!hapd->conf->wps_application_ext) {
+		wps->dev.application_ext = NULL;
+		return 0;
+	}
+
+	wps->dev.application_ext = wpabuf_dup(hapd->conf->wps_application_ext);
+	return wps->dev.application_ext ? 0 : -1;
+}
+
+
 static void hostapd_free_wps(struct wps_context *wps)
 {
 	int i;
@@ -975,6 +1020,7 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 {
 	struct wps_context *wps;
 	struct wps_registrar_config cfg;
+	u8 *multi_ap_netw_key = NULL;
 
 	if (conf->wps_state == 0) {
 		hostapd_wps_clear_ies(hapd, 0);
@@ -1043,7 +1089,8 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 	os_memcpy(wps->dev.pri_dev_type, hapd->conf->device_type,
 		  WPS_DEV_TYPE_LEN);
 
-	if (hostapd_wps_set_vendor_ext(hapd, wps) < 0)
+	if (hostapd_wps_set_vendor_ext(hapd, wps) < 0 ||
+	    hostapd_wps_set_application_ext(hapd, wps) < 0)
 		goto fail;
 
 	wps->dev.os_version = WPA_GET_BE32(hapd->conf->os_version);
@@ -1133,6 +1180,31 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 		wps->encr_types_wpa = WPS_ENCR_AES | WPS_ENCR_TKIP;
 	}
 
+	if ((hapd->conf->multi_ap & FRONTHAUL_BSS) &&
+	    hapd->conf->multi_ap_backhaul_ssid.ssid_len) {
+		cfg.multi_ap_backhaul_ssid_len =
+			hapd->conf->multi_ap_backhaul_ssid.ssid_len;
+		cfg.multi_ap_backhaul_ssid =
+			hapd->conf->multi_ap_backhaul_ssid.ssid;
+
+		if (conf->multi_ap_backhaul_ssid.wpa_passphrase) {
+			cfg.multi_ap_backhaul_network_key = (const u8 *)
+				conf->multi_ap_backhaul_ssid.wpa_passphrase;
+			cfg.multi_ap_backhaul_network_key_len =
+				os_strlen(conf->multi_ap_backhaul_ssid.wpa_passphrase);
+		} else if (conf->multi_ap_backhaul_ssid.wpa_psk) {
+			multi_ap_netw_key = os_malloc(2 * PMK_LEN + 1);
+			if (!multi_ap_netw_key)
+				goto fail;
+			wpa_snprintf_hex((char *) multi_ap_netw_key,
+					 2 * PMK_LEN + 1,
+					 conf->multi_ap_backhaul_ssid.wpa_psk->psk,
+					 PMK_LEN);
+			cfg.multi_ap_backhaul_network_key = multi_ap_netw_key;
+			cfg.multi_ap_backhaul_network_key_len = 2 * PMK_LEN;
+		}
+	}
+
 	wps->ap_settings = conf->ap_settings;
 	wps->ap_settings_len = conf->ap_settings_len;
 
@@ -1174,10 +1246,12 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 	hostapd_register_probereq_cb(hapd, hostapd_wps_probe_req_rx, hapd);
 
 	hapd->wps = wps;
+	bin_clear_free(multi_ap_netw_key, 2 * PMK_LEN);
 
 	return 0;
 
 fail:
+	bin_clear_free(multi_ap_netw_key, 2 * PMK_LEN);
 	hostapd_free_wps(wps);
 	return -1;
 }
@@ -1253,6 +1327,7 @@ void hostapd_update_wps(struct hostapd_data *hapd)
 #endif /* CONFIG_WPS_UPNP */
 
 	hostapd_wps_set_vendor_ext(hapd, hapd->wps);
+	hostapd_wps_set_application_ext(hapd, hapd->wps);
 
 	if (hapd->conf->wps_state)
 		wps_registrar_update_ie(hapd->wps->registrar);
@@ -1359,6 +1434,7 @@ static int wps_cancel(struct hostapd_data *hapd, void *ctx)
 		data->count++;
 		wps_registrar_wps_cancel(hapd->wps->registrar);
 		ap_for_each_sta(hapd, ap_sta_wps_cancel, NULL);
+		wpa_msg(hapd->msg_ctx, MSG_INFO, WPS_EVENT_CANCEL);
 	}
 
 	return 0;

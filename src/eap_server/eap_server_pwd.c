@@ -27,8 +27,11 @@ struct eap_pwd_data {
 	u8 *password;
 	size_t password_len;
 	int password_hash;
+	u8 *salt;
+	size_t salt_len;
 	u32 token;
 	u16 group_num;
+	u8 password_prep;
 	EAP_PWD_group *grp;
 
 	struct wpabuf *inbuf;
@@ -94,7 +97,7 @@ static void * eap_pwd_init(struct eap_sm *sm)
 	if (data == NULL)
 		return NULL;
 
-	data->group_num = sm->pwd_group;
+	data->group_num = sm->cfg->pwd_group;
 	wpa_printf(MSG_DEBUG, "EAP-pwd: Selected group number %d",
 		   data->group_num);
 	data->state = PWD_ID_Req;
@@ -115,10 +118,23 @@ static void * eap_pwd_init(struct eap_sm *sm)
 	os_memcpy(data->password, sm->user->password, data->password_len);
 	data->password_hash = sm->user->password_hash;
 
+	data->salt_len = sm->user->salt_len;
+	if (data->salt_len) {
+		data->salt = os_memdup(sm->user->salt, sm->user->salt_len);
+		if (!data->salt) {
+			wpa_printf(MSG_INFO,
+				   "EAP-pwd: Memory allocation of salt failed");
+			bin_clear_free(data->id_server, data->id_server_len);
+			bin_clear_free(data->password, data->password_len);
+			os_free(data);
+			return NULL;
+		}
+	}
+
 	data->in_frag_pos = data->out_frag_pos = 0;
 	data->inbuf = data->outbuf = NULL;
 	/* use default MTU from RFC 5931 if not configured otherwise */
-	data->mtu = sm->fragment_size > 0 ? sm->fragment_size : 1020;
+	data->mtu = sm->cfg->fragment_size > 0 ? sm->cfg->fragment_size : 1020;
 
 	return data;
 }
@@ -137,6 +153,7 @@ static void eap_pwd_reset(struct eap_sm *sm, void *priv)
 	bin_clear_free(data->id_peer, data->id_peer_len);
 	bin_clear_free(data->id_server, data->id_server_len);
 	bin_clear_free(data->password, data->password_len);
+	bin_clear_free(data->salt, data->salt_len);
 	if (data->grp) {
 		crypto_ec_deinit(data->grp->group);
 		crypto_ec_point_deinit(data->grp->pwe, 1);
@@ -172,12 +189,45 @@ static void eap_pwd_build_id_req(struct eap_sm *sm, struct eap_pwd_data *data,
 		return;
 	}
 
+	wpa_hexdump_key(MSG_DEBUG, "EAP-pwd (server): password",
+			data->password, data->password_len);
+	if (data->salt_len)
+		wpa_hexdump(MSG_DEBUG, "EAP-pwd (server): salt",
+			    data->salt, data->salt_len);
+
+	/*
+	 * If this is a salted password then figure out how it was hashed
+	 * based on the length.
+	 */
+	if (data->salt_len) {
+		switch (data->password_len) {
+		case 20:
+			data->password_prep = EAP_PWD_PREP_SSHA1;
+			break;
+		case 32:
+			data->password_prep = EAP_PWD_PREP_SSHA256;
+			break;
+		case 64:
+			data->password_prep = EAP_PWD_PREP_SSHA512;
+			break;
+		default:
+			wpa_printf(MSG_INFO,
+				   "EAP-pwd (server): bad size %d for salted password",
+				   (int) data->password_len);
+			eap_pwd_state(data, FAILURE);
+			return;
+		}
+	} else {
+		/* Otherwise, figure out whether it's MS hashed or plain */
+		data->password_prep = data->password_hash ? EAP_PWD_PREP_MS :
+			EAP_PWD_PREP_NONE;
+	}
+
 	wpabuf_put_be16(data->outbuf, data->group_num);
 	wpabuf_put_u8(data->outbuf, EAP_PWD_DEFAULT_RAND_FUNC);
 	wpabuf_put_u8(data->outbuf, EAP_PWD_DEFAULT_PRF);
 	wpabuf_put_data(data->outbuf, &data->token, sizeof(data->token));
-	wpabuf_put_u8(data->outbuf, data->password_hash ? EAP_PWD_PREP_MS :
-		      EAP_PWD_PREP_NONE);
+	wpabuf_put_u8(data->outbuf, data->password_prep);
 	wpabuf_put_data(data->outbuf, data->id_server, data->id_server_len);
 }
 
@@ -186,7 +236,7 @@ static void eap_pwd_build_commit_req(struct eap_sm *sm,
 				     struct eap_pwd_data *data, u8 id)
 {
 	struct crypto_bignum *mask = NULL;
-	u8 *scalar = NULL, *element = NULL;
+	u8 *scalar, *element;
 	size_t prime_len, order_len;
 
 	wpa_printf(MSG_DEBUG, "EAP-pwd: Commit/Request");
@@ -211,18 +261,9 @@ static void eap_pwd_build_commit_req(struct eap_sm *sm,
 		goto fin;
 	}
 
-	if (crypto_bignum_rand(data->private_value,
-			       crypto_ec_get_order(data->grp->group)) < 0 ||
-	    crypto_bignum_rand(mask,
-			       crypto_ec_get_order(data->grp->group)) < 0 ||
-	    crypto_bignum_add(data->private_value, mask, data->my_scalar) < 0 ||
-	    crypto_bignum_mod(data->my_scalar,
-			      crypto_ec_get_order(data->grp->group),
-			      data->my_scalar) < 0) {
-		wpa_printf(MSG_INFO,
-			   "EAP-pwd (server): unable to get randomness");
+	if (eap_pwd_get_rand_mask(data->grp, data->private_value, mask,
+				  data->my_scalar) < 0)
 		goto fin;
-	}
 
 	if (crypto_ec_point_mul(data->grp->group, data->grp->pwe, mask,
 				data->my_element) < 0) {
@@ -238,13 +279,21 @@ static void eap_pwd_build_commit_req(struct eap_sm *sm,
 		goto fin;
 	}
 
-	scalar = os_malloc(order_len);
-	element = os_malloc(prime_len * 2);
-	if (!scalar || !element) {
-		wpa_printf(MSG_INFO, "EAP-PWD (server): data allocation fail");
+	data->outbuf = wpabuf_alloc(2 * prime_len + order_len +
+				    (data->salt ? 1 + data->salt_len : 0));
+	if (data->outbuf == NULL)
 		goto fin;
+
+	/* If we're doing salted password prep, add the salt */
+	if (data->salt_len) {
+		wpabuf_put_u8(data->outbuf, data->salt_len);
+		wpabuf_put_data(data->outbuf, data->salt, data->salt_len);
 	}
 
+	/* We send the element as (x,y) followed by the scalar */
+	element = wpabuf_put(data->outbuf, 2 * prime_len);
+	scalar = wpabuf_put(data->outbuf, order_len);
+	crypto_bignum_to_bin(data->my_scalar, scalar, order_len, order_len);
 	if (crypto_ec_point_to_bin(data->grp->group, data->my_element, element,
 				   element + prime_len) < 0) {
 		wpa_printf(MSG_INFO, "EAP-PWD (server): point assignment "
@@ -252,20 +301,8 @@ static void eap_pwd_build_commit_req(struct eap_sm *sm,
 		goto fin;
 	}
 
-	crypto_bignum_to_bin(data->my_scalar, scalar, order_len, order_len);
-
-	data->outbuf = wpabuf_alloc(2 * prime_len + order_len);
-	if (data->outbuf == NULL)
-		goto fin;
-
-	/* We send the element as (x,y) followed by the scalar */
-	wpabuf_put_data(data->outbuf, element, 2 * prime_len);
-	wpabuf_put_data(data->outbuf, scalar, order_len);
-
 fin:
 	crypto_bignum_deinit(mask, 1);
-	os_free(scalar);
-	os_free(element);
 	if (data->outbuf == NULL)
 		eap_pwd_state(data, FAILURE);
 }
@@ -274,7 +311,7 @@ fin:
 static void eap_pwd_build_confirm_req(struct eap_sm *sm,
 				      struct eap_pwd_data *data, u8 id)
 {
-	struct crypto_hash *hash;
+	struct crypto_hash *hash = NULL;
 	u8 conf[SHA256_MAC_LEN], *cruft = NULL, *ptr;
 	u16 grp;
 	size_t prime_len, order_len;
@@ -355,6 +392,7 @@ static void eap_pwd_build_confirm_req(struct eap_sm *sm,
 
 	/* all done with the random function */
 	eap_pwd_h_final(hash, conf);
+	hash = NULL;
 	os_memcpy(data->my_confirm, conf, SHA256_MAC_LEN);
 
 	data->outbuf = wpabuf_alloc(SHA256_MAC_LEN);
@@ -367,6 +405,7 @@ fin:
 	bin_clear_free(cruft, prime_len * 2);
 	if (data->outbuf == NULL)
 		eap_pwd_state(data, FAILURE);
+	eap_pwd_h_final(hash, NULL);
 }
 
 
@@ -546,10 +585,13 @@ static void eap_pwd_process_id_resp(struct eap_sm *sm,
 	    (id->random_function != EAP_PWD_DEFAULT_RAND_FUNC) ||
 	    (os_memcmp(id->token, (u8 *)&data->token, sizeof(data->token))) ||
 	    (id->prf != EAP_PWD_DEFAULT_PRF) ||
-	    id->prep !=
-	    data->password_hash ? EAP_PWD_PREP_MS : EAP_PWD_PREP_NONE) {
+	    (id->prep != data->password_prep)) {
 		wpa_printf(MSG_INFO, "EAP-pwd: peer changed parameters");
 		eap_pwd_state(data, FAILURE);
+		return;
+	}
+	if (data->id_peer || data->grp) {
+		wpa_printf(MSG_INFO, "EAP-pwd: data was already allocated");
 		return;
 	}
 	data->id_peer = os_malloc(payload_len - sizeof(struct eap_pwd_id));
@@ -569,7 +611,12 @@ static void eap_pwd_process_id_resp(struct eap_sm *sm,
 		return;
 	}
 
-	if (data->password_hash) {
+	/*
+	 * If it's PREP_MS then hash the password again, otherwise regardless
+	 * of the prep the client is doing, the password we have is the one to
+	 * use to generate the password element.
+	 */
+	if (data->password_prep == EAP_PWD_PREP_MS) {
 		res = hash_nt_password_hash(data->password, pwhashhash);
 		if (res)
 			return;
@@ -585,7 +632,7 @@ static void eap_pwd_process_id_resp(struct eap_sm *sm,
 				       data->id_server, data->id_server_len,
 				       data->id_peer, data->id_peer_len,
 				       (u8 *) &data->token);
-	os_memset(pwhashhash, 0, sizeof(pwhashhash));
+	forced_memzero(pwhashhash, sizeof(pwhashhash));
 	if (res) {
 		wpa_printf(MSG_INFO, "EAP-PWD (server): unable to compute "
 			   "PWE");
@@ -603,7 +650,6 @@ eap_pwd_process_commit_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 			    const u8 *payload, size_t payload_len)
 {
 	const u8 *ptr;
-	struct crypto_bignum *cofactor = NULL;
 	struct crypto_ec_point *K = NULL;
 	int res = 0;
 	size_t prime_len, order_len;
@@ -622,17 +668,10 @@ eap_pwd_process_commit_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 	}
 
 	data->k = crypto_bignum_init();
-	cofactor = crypto_bignum_init();
 	K = crypto_ec_point_init(data->grp->group);
-	if (!data->k || !cofactor || !K) {
+	if (!data->k || !K) {
 		wpa_printf(MSG_INFO, "EAP-PWD (server): peer data allocation "
 			   "fail");
-		goto fin;
-	}
-
-	if (crypto_ec_cofactor(data->grp->group, cofactor) < 0) {
-		wpa_printf(MSG_INFO, "EAP-PWD (server): unable to get "
-			   "cofactor for curve");
 		goto fin;
 	}
 
@@ -673,18 +712,8 @@ eap_pwd_process_commit_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 		goto fin;
 	}
 
-	/* ensure that the shared key isn't in a small sub-group */
-	if (!crypto_bignum_is_one(cofactor)) {
-		if (crypto_ec_point_mul(data->grp->group, K, cofactor,
-					K) != 0) {
-			wpa_printf(MSG_INFO, "EAP-PWD (server): cannot "
-				   "multiply shared key point by order!\n");
-			goto fin;
-		}
-	}
-
 	/*
-	 * This check is strictly speaking just for the case above where
+	 * This check is strictly speaking just for the case where
 	 * co-factor > 1 but it was suggested that even though this is probably
 	 * never going to happen it is a simple and safe check "just to be
 	 * sure" so let's be safe.
@@ -703,7 +732,6 @@ eap_pwd_process_commit_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 
 fin:
 	crypto_ec_point_deinit(K, 1);
-	crypto_bignum_deinit(cofactor, 1);
 
 	if (res)
 		eap_pwd_state(data, PWD_Confirm_Req);
@@ -716,7 +744,7 @@ static void
 eap_pwd_process_confirm_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 			     const u8 *payload, size_t payload_len)
 {
-	struct crypto_hash *hash;
+	struct crypto_hash *hash = NULL;
 	u32 cs;
 	u16 grp;
 	u8 conf[SHA256_MAC_LEN], *cruft = NULL, *ptr;
@@ -791,6 +819,7 @@ eap_pwd_process_confirm_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 
 	/* all done */
 	eap_pwd_h_final(hash, conf);
+	hash = NULL;
 
 	ptr = (u8 *) payload;
 	if (os_memcmp_const(conf, ptr, SHA256_MAC_LEN)) {
@@ -810,6 +839,7 @@ eap_pwd_process_confirm_resp(struct eap_sm *sm, struct eap_pwd_data *data,
 
 fin:
 	bin_clear_free(cruft, prime_len * 2);
+	eap_pwd_h_final(hash, NULL);
 }
 
 
@@ -1008,14 +1038,6 @@ static u8 * eap_pwd_get_session_id(struct eap_sm *sm, void *priv, size_t *len)
 int eap_server_pwd_register(void)
 {
 	struct eap_method *eap;
-	struct timeval tp;
-	struct timezone tz;
-	u32 sr;
-
-	sr = 0xdeaddada;
-	(void) gettimeofday(&tp, &tz);
-	sr ^= (tp.tv_sec ^ tp.tv_usec);
-	srandom(sr);
 
 	eap = eap_server_method_alloc(EAP_SERVER_METHOD_INTERFACE_VERSION,
 				      EAP_VENDOR_IETF, EAP_TYPE_PWD,

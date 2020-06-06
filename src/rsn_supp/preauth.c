@@ -49,6 +49,15 @@ void pmksa_candidate_free(struct wpa_sm *sm)
 }
 
 
+static int rsn_preauth_key_mgmt(int akmp)
+{
+	return !!(akmp & (WPA_KEY_MGMT_IEEE8021X |
+			  WPA_KEY_MGMT_IEEE8021X_SHA256 |
+			  WPA_KEY_MGMT_IEEE8021X_SUITE_B |
+			  WPA_KEY_MGMT_IEEE8021X_SUITE_B_192));
+}
+
+
 static void rsn_preauth_receive(void *ctx, const u8 *src_addr,
 				const u8 *buf, size_t len)
 {
@@ -311,10 +320,7 @@ void rsn_preauth_candidate_process(struct wpa_sm *sm)
 	if (sm->preauth_eapol ||
 	    sm->proto != WPA_PROTO_RSN ||
 	    wpa_sm_get_state(sm) != WPA_COMPLETED ||
-	    (sm->key_mgmt != WPA_KEY_MGMT_IEEE8021X &&
-	     sm->key_mgmt != WPA_KEY_MGMT_IEEE8021X_SHA256 &&
-	     sm->key_mgmt != WPA_KEY_MGMT_IEEE8021X_SUITE_B &&
-	     sm->key_mgmt != WPA_KEY_MGMT_IEEE8021X_SUITE_B_192)) {
+	    !rsn_preauth_key_mgmt(sm->key_mgmt)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_DEBUG, "RSN: not in suitable "
 			"state for new pre-authentication");
 		return; /* invalid state for new pre-auth */
@@ -323,7 +329,7 @@ void rsn_preauth_candidate_process(struct wpa_sm *sm)
 	dl_list_for_each_safe(candidate, n, &sm->pmksa_candidates,
 			      struct rsn_pmksa_candidate, list) {
 		struct rsn_pmksa_cache_entry *p = NULL;
-		p = pmksa_cache_get(sm->pmksa, candidate->bssid, NULL, NULL);
+		p = pmksa_cache_get(sm->pmksa, candidate->bssid, NULL, NULL, 0);
 		if (os_memcmp(sm->bssid, candidate->bssid, ETH_ALEN) != 0 &&
 		    (p == NULL || p->opportunistic)) {
 			wpa_msg(sm->ctx->msg_ctx, MSG_DEBUG, "RSN: PMKSA "
@@ -372,7 +378,7 @@ void pmksa_candidate_add(struct wpa_sm *sm, const u8 *bssid,
 
 	if (sm->network_ctx && sm->proactive_key_caching)
 		pmksa_cache_get_opportunistic(sm->pmksa, sm->network_ctx,
-					      bssid);
+					      bssid, 0);
 
 	if (!preauth) {
 		wpa_printf(MSG_DEBUG, "RSN: Ignored PMKID candidate without "
@@ -483,9 +489,12 @@ void rsn_preauth_scan_result(struct wpa_sm *sm, const u8 *bssid,
 	if (wpa_parse_wpa_ie(rsn, 2 + rsn[1], &ie))
 		return;
 
-	pmksa = pmksa_cache_get(sm->pmksa, bssid, NULL, NULL);
+	pmksa = pmksa_cache_get(sm->pmksa, bssid, NULL, NULL, 0);
 	if (pmksa && (!pmksa->opportunistic ||
 		      !(ie.capabilities & WPA_CAPABILITY_PREAUTH)))
+		return;
+
+	if (!rsn_preauth_key_mgmt(ie.key_mgmt))
 		return;
 
 	/* Give less priority to candidates found from normal scan results. */

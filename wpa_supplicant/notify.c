@@ -14,10 +14,10 @@
 #include "wpa_supplicant_i.h"
 #include "wps_supplicant.h"
 #include "dbus/dbus_common.h"
-#include "dbus/dbus_old.h"
 #include "dbus/dbus_new.h"
 #include "rsn_supp/wpa.h"
 #include "fst/fst.h"
+#include "crypto/tls.h"
 #include "driver_i.h"
 #include "scan.h"
 #include "p2p_supplicant.h"
@@ -30,13 +30,13 @@
 
 int wpas_notify_supplicant_initialized(struct wpa_global *global)
 {
-#ifdef CONFIG_DBUS
+#ifdef CONFIG_CTRL_IFACE_DBUS_NEW
 	if (global->params.dbus_ctrl_interface) {
 		global->dbus = wpas_dbus_init(global);
 		if (global->dbus == NULL)
 			return -1;
 	}
-#endif /* CONFIG_DBUS */
+#endif /* CONFIG_CTRL_IFACE_DBUS_NEW */
 
 #ifdef CONFIG_HIDL
 	global->hidl = wpas_hidl_init(global);
@@ -50,10 +50,10 @@ int wpas_notify_supplicant_initialized(struct wpa_global *global)
 
 void wpas_notify_supplicant_deinitialized(struct wpa_global *global)
 {
-#ifdef CONFIG_DBUS
+#ifdef CONFIG_CTRL_IFACE_DBUS_NEW
 	if (global->dbus)
 		wpas_dbus_deinit(global->dbus);
-#endif /* CONFIG_DBUS */
+#endif /* CONFIG_CTRL_IFACE_DBUS_NEW */
 
 #ifdef CONFIG_HIDL
 	if (global->hidl)
@@ -65,9 +65,6 @@ void wpas_notify_supplicant_deinitialized(struct wpa_global *global)
 int wpas_notify_iface_added(struct wpa_supplicant *wpa_s)
 {
 	if (!wpa_s->p2p_mgmt) {
-		if (wpas_dbus_register_iface(wpa_s))
-			return -1;
-
 		if (wpas_dbus_register_interface(wpa_s))
 			return -1;
 	}
@@ -84,18 +81,16 @@ int wpas_notify_iface_added(struct wpa_supplicant *wpa_s)
 
 void wpas_notify_iface_removed(struct wpa_supplicant *wpa_s)
 {
-	if (!wpa_s->p2p_mgmt) {
-		/* unregister interface in old DBus ctrl iface */
-		wpas_dbus_unregister_iface(wpa_s);
-
-		/* unregister interface in new DBus ctrl iface */
-		wpas_dbus_unregister_interface(wpa_s);
-	}
-
 #ifdef CONFIG_HIDL
 	/* HIDL interface wants to keep track of the P2P mgmt iface. */
 	wpas_hidl_unregister_interface(wpa_s);
 #endif
+
+	if (wpa_s->p2p_mgmt)
+		return;
+
+	/* unregister interface in new DBus ctrl iface */
+	wpas_dbus_unregister_interface(wpa_s);
 }
 
 
@@ -105,10 +100,6 @@ void wpas_notify_state_changed(struct wpa_supplicant *wpa_s,
 {
 	if (wpa_s->p2p_mgmt)
 		return;
-
-	/* notify the old DBus API */
-	wpa_supplicant_dbus_notify_state_change(wpa_s, new_state,
-						old_state);
 
 	/* notify the new DBus API */
 	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_STATE);
@@ -160,6 +151,15 @@ void wpas_notify_disconnect_reason(struct wpa_supplicant *wpa_s)
 }
 
 
+void wpas_notify_auth_status_code(struct wpa_supplicant *wpa_s)
+{
+	if (wpa_s->p2p_mgmt)
+		return;
+
+	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_AUTH_STATUS_CODE);
+}
+
+
 void wpas_notify_assoc_status_code(struct wpa_supplicant *wpa_s)
 {
 	if (wpa_s->p2p_mgmt)
@@ -180,6 +180,42 @@ void wpas_notify_auth_timeout(struct wpa_supplicant *wpa_s) {
 	wpas_hidl_notify_auth_timeout(wpa_s);
 #endif
 }
+
+void wpas_notify_roam_time(struct wpa_supplicant *wpa_s)
+{
+	if (wpa_s->p2p_mgmt)
+		return;
+
+	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_ROAM_TIME);
+}
+
+
+void wpas_notify_roam_complete(struct wpa_supplicant *wpa_s)
+{
+	if (wpa_s->p2p_mgmt)
+		return;
+
+	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_ROAM_COMPLETE);
+}
+
+
+void wpas_notify_session_length(struct wpa_supplicant *wpa_s)
+{
+	if (wpa_s->p2p_mgmt)
+		return;
+
+	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_SESSION_LENGTH);
+}
+
+
+void wpas_notify_bss_tm_status(struct wpa_supplicant *wpa_s)
+{
+	if (wpa_s->p2p_mgmt)
+		return;
+
+	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_BSS_TM_STATUS);
+}
+
 
 void wpas_notify_network_changed(struct wpa_supplicant *wpa_s)
 {
@@ -262,9 +298,6 @@ void wpas_notify_scanning(struct wpa_supplicant *wpa_s)
 	if (wpa_s->p2p_mgmt)
 		return;
 
-	/* notify the old DBus API */
-	wpa_supplicant_dbus_notify_scanning(wpa_s);
-
 	/* notify the new DBus API */
 	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_SCANNING);
 }
@@ -284,9 +317,6 @@ void wpas_notify_scan_results(struct wpa_supplicant *wpa_s)
 	if (wpa_s->p2p_mgmt)
 		return;
 
-	/* notify the old DBus API */
-	wpa_supplicant_dbus_notify_scan_results(wpa_s);
-
 	wpas_wps_notify_scan_results(wpa_s);
 }
 
@@ -298,8 +328,6 @@ void wpas_notify_wps_credential(struct wpa_supplicant *wpa_s,
 		return;
 
 #ifdef CONFIG_WPS
-	/* notify the old DBus API */
-	wpa_supplicant_dbus_notify_wps_cred(wpa_s, cred);
 	/* notify the new DBus API */
 	wpas_dbus_signal_wps_cred(wpa_s, cred);
 #endif /* CONFIG_WPS */
@@ -848,6 +876,9 @@ static void wpas_notify_ap_sta_authorized(struct wpa_supplicant *wpa_s,
 		wpas_dbus_signal_p2p_peer_joined(wpa_s, p2p_dev_addr);
 #endif /* CONFIG_P2P */
 
+	/* Register the station */
+	wpas_dbus_register_sta(wpa_s, sta);
+
 	/* Notify listeners a new station has been authorized */
 	wpas_dbus_signal_sta_authorized(wpa_s, sta);
 
@@ -873,6 +904,9 @@ static void wpas_notify_ap_sta_deauthorized(struct wpa_supplicant *wpa_s,
 	/* Notify listeners a station has been deauthorized */
 	wpas_dbus_signal_sta_deauthorized(wpa_s, sta);
 
+	/* Unregister the station */
+	wpas_dbus_unregister_sta(wpa_s, sta);
+
 #ifdef CONFIG_HIDL
 	wpas_hidl_notify_ap_sta_deauthorized(wpa_s, sta, p2p_dev_addr);
 #endif
@@ -890,45 +924,42 @@ void wpas_notify_sta_authorized(struct wpa_supplicant *wpa_s,
 }
 
 
-void wpas_notify_certification(struct wpa_supplicant *wpa_s, int depth,
-			       const char *subject, const char *altsubject[],
-			       int num_altsubject, const char *cert_hash,
-			       const struct wpabuf *cert)
+void wpas_notify_certification(struct wpa_supplicant *wpa_s,
+			       struct tls_cert_data *cert,
+			       const char *cert_hash)
 {
+	int i;
 	wpa_msg(wpa_s, MSG_INFO, WPA_EVENT_EAP_PEER_CERT
-		"depth=%d subject='%s'%s%s",
-		depth, subject, cert_hash ? " hash=" : "",
-		cert_hash ? cert_hash : "");
+		"depth=%d subject='%s'%s%s%s%s",
+		cert->depth, cert->subject, cert_hash ? " hash=" : "",
+		cert_hash ? cert_hash : "",
+		cert->tod == 2 ? " tod=2" : "",
+		cert->tod == 1 ? " tod=1" : "");
 
-	if (cert) {
+	if (cert->cert) {
 		char *cert_hex;
-		size_t len = wpabuf_len(cert) * 2 + 1;
+		size_t len = wpabuf_len(cert->cert) * 2 + 1;
 		cert_hex = os_malloc(len);
 		if (cert_hex) {
-			wpa_snprintf_hex(cert_hex, len, wpabuf_head(cert),
-					 wpabuf_len(cert));
+			wpa_snprintf_hex(cert_hex, len, wpabuf_head(cert->cert),
+					 wpabuf_len(cert->cert));
 			wpa_msg_ctrl(wpa_s, MSG_INFO,
 				     WPA_EVENT_EAP_PEER_CERT
 				     "depth=%d subject='%s' cert=%s",
-				     depth, subject, cert_hex);
+				     cert->depth, cert->subject, cert_hex);
 			os_free(cert_hex);
 		}
 	}
 
-	if (altsubject) {
-		int i;
-
-		for (i = 0; i < num_altsubject; i++)
+		for (i = 0; i < cert->num_altsubject; i++)
 			wpa_msg(wpa_s, MSG_INFO, WPA_EVENT_EAP_PEER_ALT
-				"depth=%d %s", depth, altsubject[i]);
-	}
+				"depth=%d %s", cert->depth,
+				cert->altsubject[i]);
 
-	/* notify the old DBus API */
-	wpa_supplicant_dbus_notify_certification(wpa_s, depth, subject,
-						 cert_hash, cert);
 	/* notify the new DBus API */
-	wpas_dbus_signal_certification(wpa_s, depth, subject, altsubject,
-				       num_altsubject, cert_hash, cert);
+	wpas_dbus_signal_certification(wpa_s, cert->depth, cert->subject,
+				       cert->altsubject, cert->num_altsubject,
+				       cert_hash, cert->cert);
 }
 
 
@@ -1069,7 +1100,7 @@ void wpas_notify_mesh_group_started(struct wpa_supplicant *wpa_s,
 
 void wpas_notify_mesh_group_removed(struct wpa_supplicant *wpa_s,
 				    const u8 *meshid, u8 meshid_len,
-				    int reason_code)
+				    u16 reason_code)
 {
 	if (wpa_s->p2p_mgmt)
 		return;
@@ -1090,7 +1121,7 @@ void wpas_notify_mesh_peer_connected(struct wpa_supplicant *wpa_s,
 
 
 void wpas_notify_mesh_peer_disconnected(struct wpa_supplicant *wpa_s,
-					const u8 *peer_addr, int reason_code)
+					const u8 *peer_addr, u16 reason_code)
 {
 	if (wpa_s->p2p_mgmt)
 		return;
@@ -1100,51 +1131,116 @@ void wpas_notify_mesh_peer_disconnected(struct wpa_supplicant *wpa_s,
 
 #endif /* CONFIG_MESH */
 
-//DPP Notifications
-void wpas_notify_dpp_auth_success(void *msg_ctx, int initiator)
+/*
+ * DPP Notifications
+ */
+
+/* DPP Success notifications */
+
+void wpas_notify_dpp_config_received(struct wpa_supplicant *wpa_s,
+	    struct wpa_ssid *ssid)
 {
 #ifdef CONFIG_DPP
-	struct wpa_supplicant *wpa_s = msg_ctx;
 	if (!wpa_s)
 		return;
 
-	wpas_hidl_notify_dpp_auth_success(wpa_s, initiator);
+	wpas_hidl_notify_dpp_config_received(wpa_s, ssid);
 #endif /* CONFIG_DPP */
 }
-void wpas_notify_dpp_not_compatible(void *msg_ctx, u8 capab,
-				    int initiator)
+
+void wpas_notify_dpp_config_sent(struct wpa_supplicant *wpa_s)
 {
 #ifdef CONFIG_DPP
-	struct wpa_supplicant *wpa_s = msg_ctx;
 	if (!wpa_s)
 		return;
 
-	wpas_hidl_notify_dpp_not_compatible(wpa_s, capab, initiator);
+	wpas_hidl_notify_dpp_config_sent(wpa_s);
 #endif /* CONFIG_DPP */
 }
-void wpas_notify_dpp_resp_pending(void *msg_ctx)
+
+/* DPP Progress notifications */
+void wpas_notify_dpp_auth_success(struct wpa_supplicant *wpa_s)
 {
 #ifdef CONFIG_DPP
-	struct wpa_supplicant *wpa_s = msg_ctx;
+	if (!wpa_s)
+		return;
+
+	wpas_hidl_notify_dpp_auth_success(wpa_s);
+#endif /* CONFIG_DPP */
+}
+
+void wpas_notify_dpp_resp_pending(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_DPP
 	if (!wpa_s)
 		return;
 
 	wpas_hidl_notify_dpp_resp_pending(wpa_s);
 #endif /* CONFIG_DPP */
 }
-void wpas_notify_dpp_scan_peer_qrcode(void *msg_ctx,
-				      const u8* i_bootstrap,
-				      uint16_t i_bootstrap_len)
+
+/* DPP Failure notifications */
+void wpas_notify_dpp_not_compatible(struct wpa_supplicant *wpa_s)
 {
 #ifdef CONFIG_DPP
-	struct wpa_supplicant *wpa_s = msg_ctx;
-	if (!wpa_s || !i_bootstrap_len)
+	if (!wpa_s)
 		return;
 
-	wpas_hidl_notify_dpp_scan_peer_qrcode(wpa_s, i_bootstrap,
-					      i_bootstrap_len);
+	wpas_hidl_notify_dpp_not_compatible(wpa_s);
 #endif /* CONFIG_DPP */
 }
+
+void wpas_notify_dpp_missing_auth(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_DPP
+	if (!wpa_s)
+		return;
+
+	wpas_hidl_notify_dpp_missing_auth(wpa_s);
+#endif /* CONFIG_DPP */
+}
+
+void wpas_notify_dpp_configuration_failure(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_DPP
+	if (!wpa_s)
+		return;
+
+	wpas_hidl_notify_dpp_configuration_failure(wpa_s);
+#endif /* CONFIG_DPP */
+}
+
+void wpas_notify_dpp_timeout(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_DPP
+	if (!wpa_s)
+		return;
+
+	wpas_hidl_notify_dpp_timeout(wpa_s);
+#endif /* CONFIG_DPP */
+}
+
+void wpas_notify_dpp_auth_failure(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_DPP
+	if (!wpa_s)
+		return;
+
+	wpas_hidl_notify_dpp_auth_failure(wpa_s);
+#endif /* CONFIG_DPP */
+}
+
+void wpas_notify_dpp_failure(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_DPP
+	if (!wpa_s)
+		return;
+
+	wpas_hidl_notify_dpp_fail(wpa_s);
+#endif /* CONFIG_DPP */
+}
+
+//Vendor DPP notifications
 void wpas_notify_dpp_conf(void *msg_ctx, u8 type, u8* ssid,
 			  u8 ssid_len, const char *connector,
 			  struct wpabuf *c_sign, struct wpabuf *net_access,
@@ -1159,25 +1255,5 @@ void wpas_notify_dpp_conf(void *msg_ctx, u8 type, u8* ssid,
 	wpas_hidl_notify_dpp_conf(wpa_s, type, ssid, ssid_len, connector, c_sign,
 				  net_access, net_access_expiry, passphrase,
 				  psk_set, psk);
-#endif /* CONFIG_DPP */
-}
-void wpas_notify_dpp_missing_auth(void *msg_ctx, u8 dpp_auth_param)
-{
-#ifdef CONFIG_DPP
-	struct wpa_supplicant *wpa_s = msg_ctx;
-	if (!wpa_s)
-		return;
-
-	wpas_hidl_notify_dpp_missing_auth(wpa_s, dpp_auth_param);
-#endif /* CONFIG_DPP */
-}
-void wpas_notify_dpp_net_id(void *msg_ctx, uint32_t net_id)
-{
-#ifdef CONFIG_DPP
-	struct wpa_supplicant *wpa_s = msg_ctx;
-	if (!wpa_s)
-		return;
-
-	wpas_hidl_notify_dpp_net_id(wpa_s, net_id);
 #endif /* CONFIG_DPP */
 }

@@ -87,6 +87,9 @@ extern "C" {
 #define WPA_EVENT_BEACON_LOSS "CTRL-EVENT-BEACON-LOSS "
 /** Regulatory domain channel */
 #define WPA_EVENT_REGDOM_CHANGE "CTRL-EVENT-REGDOM-CHANGE "
+/** Channel switch started (followed by freq=<MHz> and other channel parameters)
+ */
+#define WPA_EVENT_CHANNEL_SWITCH_STARTED "CTRL-EVENT-STARTED-CHANNEL-SWITCH "
 /** Channel switch (followed by freq=<MHz> and other channel parameters) */
 #define WPA_EVENT_CHANNEL_SWITCH "CTRL-EVENT-CHANNEL-SWITCH "
 /** SAE authentication failed due to unknown password identifier */
@@ -165,8 +168,10 @@ extern "C" {
 #define DPP_EVENT_CONF_RECEIVED "DPP-CONF-RECEIVED "
 #define DPP_EVENT_CONF_SENT "DPP-CONF-SENT "
 #define DPP_EVENT_CONF_FAILED "DPP-CONF-FAILED "
+#define DPP_EVENT_CONN_STATUS_RESULT "DPP-CONN-STATUS-RESULT "
 #define DPP_EVENT_CONFOBJ_AKM "DPP-CONFOBJ-AKM "
 #define DPP_EVENT_CONFOBJ_SSID "DPP-CONFOBJ-SSID "
+#define DPP_EVENT_CONFOBJ_SSID_CHARSET "DPP-CONFOBJ-SSID-CHARSET "
 #define DPP_EVENT_CONFOBJ_PASS "DPP-CONFOBJ-PASS "
 #define DPP_EVENT_CONFOBJ_PSK "DPP-CONFOBJ-PSK "
 #define DPP_EVENT_CONNECTOR "DPP-CONNECTOR "
@@ -174,6 +179,7 @@ extern "C" {
 #define DPP_EVENT_NET_ACCESS_KEY "DPP-NET-ACCESS-KEY "
 #define DPP_EVENT_MISSING_CONNECTOR "DPP-MISSING-CONNECTOR "
 #define DPP_EVENT_NETWORK_ID "DPP-NETWORK-ID "
+#define DPP_EVENT_CONFIGURATOR_ID "DPP-CONFIGURATOR-ID "
 #define DPP_EVENT_RX "DPP-RX "
 #define DPP_EVENT_TX "DPP-TX "
 #define DPP_EVENT_TX_STATUS "DPP-TX-STATUS "
@@ -275,8 +281,12 @@ extern "C" {
 #define RX_HS20_ICON "RX-HS20-ICON "
 #define RX_MBO_ANQP "RX-MBO-ANQP "
 
+/* parameters: <Venue Number> <Venue URL> */
+#define RX_VENUE_URL "RX-VENUE-URL "
+
 #define HS20_SUBSCRIPTION_REMEDIATION "HS20-SUBSCRIPTION-REMEDIATION "
 #define HS20_DEAUTH_IMMINENT_NOTICE "HS20-DEAUTH-IMMINENT-NOTICE "
+#define HS20_T_C_ACCEPTANCE "HS20-T-C-ACCEPTANCE "
 
 #define EXT_RADIO_WORK_START "EXT-RADIO-WORK-START "
 #define EXT_RADIO_WORK_TIMEOUT "EXT-RADIO-WORK-TIMEOUT "
@@ -292,6 +302,8 @@ extern "C" {
 #define WPS_EVENT_AP_SETUP_UNLOCKED "WPS-AP-SETUP-UNLOCKED "
 #define WPS_EVENT_AP_PIN_ENABLED "WPS-AP-PIN-ENABLED "
 #define WPS_EVENT_AP_PIN_DISABLED "WPS-AP-PIN-DISABLED "
+#define WPS_EVENT_PIN_ACTIVE "WPS-PIN-ACTIVE "
+#define WPS_EVENT_CANCEL "WPS-CANCEL "
 #define AP_STA_CONNECTED "AP-STA-CONNECTED "
 #define AP_STA_DISCONNECTED "AP-STA-DISCONNECTED "
 #define AP_STA_POSSIBLE_PSK_MISMATCH "AP-STA-POSSIBLE-PSK-MISMATCH "
@@ -299,6 +311,9 @@ extern "C" {
 
 #define AP_REJECTED_MAX_STA "AP-REJECTED-MAX-STA "
 #define AP_REJECTED_BLOCKED_STA "AP-REJECTED-BLOCKED-STA "
+
+#define HS20_T_C_FILTERING_ADD "HS20-T-C-FILTERING-ADD "
+#define HS20_T_C_FILTERING_REMOVE "HS20-T-C-FILTERING-REMOVE "
 
 #define AP_EVENT_ENABLED "AP-ENABLED "
 #define AP_EVENT_DISABLED "AP-DISABLED "
@@ -324,6 +339,13 @@ extern "C" {
 
 /* BSS Transition Management Response frame received */
 #define BSS_TM_RESP "BSS-TM-RESP "
+
+/* Collocated Interference Request frame received;
+ * parameters: <dialog token> <automatic report enabled> <report timeout> */
+#define COLOC_INTF_REQ "COLOC-INTF-REQ "
+/* Collocated Interference Report frame received;
+ * parameters: <STA address> <dialog token> <hexdump of report elements> */
+#define COLOC_INTF_REPORT "COLOC-INTF-REPORT "
 
 /* MBO IE with cellular data connection preference received */
 #define MBO_CELL_PREFERENCE "MBO-CELL-PREFERENCE "
@@ -353,6 +375,10 @@ extern "C" {
 #define STA_OPMODE_MAX_BW_CHANGED "STA-OPMODE-MAX-BW-CHANGED "
 #define STA_OPMODE_SMPS_MODE_CHANGED "STA-OPMODE-SMPS-MODE-CHANGED "
 #define STA_OPMODE_N_SS_CHANGED "STA-OPMODE-N_SS-CHANGED "
+
+/* New interface addition or removal for 4addr WDS SDA */
+#define WDS_STA_INTERFACE_ADDED "WDS-STA-INTERFACE-ADDED "
+#define WDS_STA_INTERFACE_REMOVED "WDS-STA-INTERFACE-REMOVED "
 
 /* BSS command information masks */
 

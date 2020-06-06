@@ -51,6 +51,9 @@
 #include "common/ieee802_11_common.h"
 
 
+#define MAX_ROAMING_CONS 36
+#define MAX_ROAMING_CONS_OI_LEN 15
+
 struct wpa_cred {
 	/**
 	 * next - Next credential in the list
@@ -225,8 +228,41 @@ struct wpa_cred {
 	 */
 	size_t roaming_consortium_len;
 
+	/**
+	 * required_roaming_consortium - Required Roaming Consortium OI
+	 *
+	 * If required_roaming_consortium_len is non-zero, this field contains
+	 * the Roaming Consortium OI that is required to be advertised by the AP
+	 * for the credential to be considered matching.
+	 */
 	u8 required_roaming_consortium[15];
+
+	/**
+	 * required_roaming_consortium_len - Length of required_roaming_consortium
+	 */
 	size_t required_roaming_consortium_len;
+
+	/**
+	 * roaming_consortiums - Roaming Consortium OI(s) memberships
+	 *
+	 * This field contains one or more OIs identifying the roaming
+	 * consortiums of which the provider is a member. The list is sorted
+	 * from the most preferred one to the least preferred one. A match
+	 * between the Roaming Consortium OIs advertised by an AP and the OIs
+	 * in this list indicates that successful authentication is possible.
+	 * (Hotspot 2.0 PerProviderSubscription/<X+>/HomeSP/RoamingConsortiumOI)
+	 */
+	u8 roaming_consortiums[MAX_ROAMING_CONS][MAX_ROAMING_CONS_OI_LEN];
+
+	/**
+	 * roaming_consortiums_len - Length on roaming_consortiums[i]
+	 */
+	size_t roaming_consortiums_len[MAX_ROAMING_CONS];
+
+	/**
+	 * num_roaming_consortiums - Number of entries in roaming_consortiums
+	 */
+	unsigned int num_roaming_consortiums;
 
 	/**
 	 * eap_method - EAP method to use
@@ -710,6 +746,16 @@ struct wpa_config {
 	 */
 	int wps_cred_processing;
 
+	/**
+	 * wps_cred_add_sae - Whether to enable SAE automatically for WPS
+	 *
+	 * 0 = only add the explicitly listed WPA2-PSK configuration
+	 * 1 = add both the WPA2-PSK and SAE configuration and enable PMF so
+	 *     that the station gets configured in WPA3-Personal transition mode
+	 *     (supports both WPA2-Personal (PSK) and WPA3-Personal (SAE) APs).
+	 */
+	int wps_cred_add_sae;
+
 #define MAX_SEC_DEVICE_TYPES 5
 	/**
 	 * sec_device_types - Secondary Device Types (P2P)
@@ -1044,6 +1090,26 @@ struct wpa_config {
 	int p2p_go_vht;
 
 	/**
+	 * p2p_go_edmg - Default mode for EDMG enable when operating as GO
+	 *
+	 * This will take effect for p2p_group_add, p2p_connect, and p2p_invite.
+	 * Note that regulatory constraints and driver capabilities are
+	 * consulted anyway, so setting it to 1 can't do real harm.
+	 * By default: 0 (disabled)
+	 */
+	int p2p_go_edmg;
+
+	/**
+	 * p2p_go_he - Default mode for 11ax HE enable when operating as GO
+	 *
+	 * This will take effect for p2p_group_add, p2p_connect, and p2p_invite.
+	 * Note that regulatory constraints and driver capabilities are
+	 * consulted anyway, so setting it to 1 can't do real harm.
+	 * By default: 0 (disabled)
+	 */
+	int p2p_go_he;
+
+	/**
 	 * p2p_go_ctwindow - CTWindow to use when operating as GO
 	 *
 	 * By default: 0 (no CTWindow). Values 0-127 can be used to indicate
@@ -1107,6 +1173,19 @@ struct wpa_config {
 	 * groups will be tried in the indicated order.
 	 */
 	int *sae_groups;
+
+	/**
+	 * sae_pwe - SAE mechanism for PWE derivation
+	 * 0 = hunting-and-pecking loop only
+	 * 1 = hash-to-element only
+	 * 2 = both hunting-and-pecking loop and hash-to-element enabled
+	 */
+	int sae_pwe;
+
+	/**
+	 * sae_pmkid_in_assoc - Whether to include PMKID in SAE Assoc Req
+	 */
+	int sae_pmkid_in_assoc;
 
 	/**
 	 * dtim_period - Default DTIM period in Beacon intervals
@@ -1434,6 +1513,62 @@ struct wpa_config {
 	 *	profile automatically
 	 */
 	int dpp_config_processing;
+
+	/**
+	 * dpp_name - Name for Enrollee's DPP Configuration Request
+	 */
+	char *dpp_name;
+
+	/**
+	 * dpp_mud_url - MUD URL for Enrollee's DPP Configuration Request
+	 */
+	char *dpp_mud_url;
+
+	/**
+	 * coloc_intf_reporting - Colocated interference reporting
+	 *
+	 * dot11CoLocIntfReportingActivated
+	 * 0 = disabled (false)
+	 * 1 = enabled (true)
+	 */
+	int coloc_intf_reporting;
+
+	/**
+	 * p2p_device_random_mac_addr - P2P Device MAC address policy default
+	 *
+	 * 0 = use permanent MAC address
+	 * 1 = use random MAC address on creating the interface if there is no
+	 * persistent groups.
+	 *
+	 * By default, permanent MAC address is used.
+	 */
+	int p2p_device_random_mac_addr;
+
+	/**
+	 * p2p_device_persistent_mac_addr - Record last used MAC address
+	 *
+	 * If there are saved persistent groups, P2P cannot generate another
+	 * random MAC address, and need to restore to last used MAC address.
+	 */
+	u8 p2p_device_persistent_mac_addr[ETH_ALEN];
+
+	/**
+	 * p2p_interface_random_mac_addr - P2P Interface MAC address policy default
+	 *
+	 * 0 = use permanent MAC address
+	 * 1 = use random MAC address on creating the interface.
+	 *
+	 * By default, permanent MAC address is used.
+	 */
+	int p2p_interface_random_mac_addr;
+
+	/**
+	 * bss_no_flush_when_down - Whether to flush BSS entries when the interface is disabled
+	 *
+	 * 0 = Flush BSS entries when the interface becomes disabled (Default)
+	 * 1 = Do not flush BSS entries when the interface becomes disabled
+	 */
+	int bss_no_flush_when_down;
 
 	/**
 	 * disable_btm - Disable BSS transition management in STA

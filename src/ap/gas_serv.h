@@ -60,6 +60,10 @@
 	(0x10000 << HS20_STYPE_OSU_PROVIDERS_LIST)
 #define ANQP_REQ_ICON_REQUEST \
 	(0x10000 << HS20_STYPE_ICON_REQUEST)
+#define ANQP_REQ_OPERATOR_ICON_METADATA \
+	(0x10000 << HS20_STYPE_OPERATOR_ICON_METADATA)
+#define ANQP_REQ_OSU_PROVIDERS_NAI_LIST \
+	(0x10000 << HS20_STYPE_OSU_PROVIDERS_NAI_LIST)
 /* The first MBO ANQP-element can be included in the optimized bitmap. */
 #define ANQP_REQ_MBO_CELL_DATA_CONN_PREF \
 	(BIT(29) << MBO_ANQP_SUBTYPE_CELL_CONN_PREF)
@@ -83,5 +87,9 @@ void gas_serv_dialog_clear(struct gas_dialog_info *dialog);
 
 int gas_serv_init(struct hostapd_data *hapd);
 void gas_serv_deinit(struct hostapd_data *hapd);
+
+void gas_serv_req_dpp_processing(struct hostapd_data *hapd,
+				 const u8 *sa, u8 dialog_token,
+				 int prot, struct wpabuf *buf);
 
 #endif /* GAS_SERV_H */

@@ -10,24 +10,12 @@
 
 #include "common.h"
 #include "crypto.h"
+#include "crypto/sha1.h"
+#include "crypto/sha256.h"
 #include "tls.h"
 
-#define OPENSSL_EXTRA
-#define HAVE_STUNNEL
-#define HAVE_SECRET_CALLBACK
-#define HAVE_SESSION_TICKET
-#define HAVE_OCSP
-#define HAVE_CERTIFICATE_STATUS_REQUEST
-#define HAVE_CERTIFICATE_STATUS_REQUEST_V2
-#ifndef WOLFSSL_DER_LOAD
-#define WOLFSSL_DER_LOAD
-#endif
-#if 0
-/* Enable if a debug build of wolfSSL is installed. */
-#define DEBUG_WOLFSSL
-#endif
-
 /* wolfSSL includes */
+#include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/error-ssl.h>
 #include <wolfssl/wolfcrypt/asn.h>
@@ -153,7 +141,7 @@ static int wolfssl_receive_cb(WOLFSSL *ssl, char *buf, int sz, void *ctx)
 	if (get > (wpabuf_len(data->in_data) - data->consumed))
 		get = wpabuf_len(data->in_data) - data->consumed;
 
-	os_memcpy(buf, wpabuf_head(data->in_data) + data->consumed, get);
+	os_memcpy(buf, wpabuf_head_u8(data->in_data) + data->consumed, get);
 	data->consumed += get;
 
 	if (get == 0)
@@ -359,6 +347,14 @@ int tls_connection_established(void *tls_ctx, struct tls_connection *conn)
 }
 
 
+char * tls_connection_peer_serial_num(void *tls_ctx,
+				      struct tls_connection *conn)
+{
+	/* TODO */
+	return NULL;
+}
+
+
 int tls_connection_shutdown(void *tls_ctx, struct tls_connection *conn)
 {
 	WOLFSSL_SESSION *session;
@@ -470,9 +466,9 @@ static int tls_connection_client_cert(struct tls_connection *conn,
 		return 0;
 
 	if (client_cert_blob) {
-		if (wolfSSL_use_certificate_buffer(conn->ssl, client_cert_blob,
-						   blob_len,
-						   SSL_FILETYPE_ASN1) < 0) {
+		if (wolfSSL_use_certificate_chain_buffer_format(
+			    conn->ssl, client_cert_blob, blob_len,
+			    SSL_FILETYPE_ASN1) < 0) {
 			wpa_printf(MSG_INFO,
 				   "SSL: use client cert DER blob failed");
 			return -1;
@@ -482,11 +478,11 @@ static int tls_connection_client_cert(struct tls_connection *conn,
 	}
 
 	if (client_cert) {
-		if (wolfSSL_use_certificate_file(conn->ssl, client_cert,
-						 SSL_FILETYPE_PEM) < 0) {
+		if (wolfSSL_use_certificate_chain_file(conn->ssl,
+						       client_cert) < 0) {
 			wpa_printf(MSG_INFO,
 				   "SSL: use client cert PEM file failed");
-			if (wolfSSL_use_certificate_file(
+			if (wolfSSL_use_certificate_chain_file_format(
 				    conn->ssl, client_cert,
 				    SSL_FILETYPE_ASN1) < 0) {
 				wpa_printf(MSG_INFO,
@@ -577,10 +573,6 @@ static int tls_connection_private_key(void *tls_ctx,
 }
 
 
-#define GEN_EMAIL	1
-#define GEN_DNS		ALT_NAMES_OID
-#define GEN_URI		6
-
 static int tls_match_alt_subject_component(WOLFSSL_X509 *cert, int type,
 					   const char *value, size_t len)
 {
@@ -651,9 +643,9 @@ static int tls_match_alt_subject(WOLFSSL_X509 *cert, const char *match)
 
 
 static int domain_suffix_match(const char *val, size_t len, const char *match,
-			       int full)
+			       size_t match_len, int full)
 {
-	size_t i, match_len;
+	size_t i;
 
 	/* Check for embedded nuls that could mess up suffix matching */
 	for (i = 0; i < len; i++) {
@@ -664,7 +656,6 @@ static int domain_suffix_match(const char *val, size_t len, const char *match,
 		}
 	}
 
-	match_len = os_strlen(match);
 	if (match_len > len || (full && match_len != len))
 		return 0;
 
@@ -682,7 +673,8 @@ static int domain_suffix_match(const char *val, size_t len, const char *match,
 }
 
 
-static int tls_match_suffix(WOLFSSL_X509 *cert, const char *match, int full)
+static int tls_match_suffix_helper(WOLFSSL_X509 *cert, const char *match,
+				   size_t match_len, int full)
 {
 	WOLFSSL_ASN1_OBJECT *gen;
 	void *ext;
@@ -698,14 +690,14 @@ static int tls_match_suffix(WOLFSSL_X509 *cert, const char *match, int full)
 
 	for (j = 0; ext && j < wolfSSL_sk_num(ext); j++) {
 		gen = wolfSSL_sk_value(ext, j);
-		if (gen->type != ALT_NAMES_OID)
+		if (gen->type != ASN_DNS_TYPE)
 			continue;
 		dns_name++;
 		wpa_hexdump_ascii(MSG_DEBUG, "TLS: Certificate dNSName",
 				  gen->obj, os_strlen((char *)gen->obj));
 		if (domain_suffix_match((const char *) gen->obj,
 					os_strlen((char *) gen->obj), match,
-					full) == 1) {
+					match_len, full) == 1) {
 			wpa_printf(MSG_DEBUG, "TLS: %s in dNSName found",
 				   full ? "Match" : "Suffix match");
 			wolfSSL_sk_ASN1_OBJECT_free(ext);
@@ -737,8 +729,8 @@ static int tls_match_suffix(WOLFSSL_X509 *cert, const char *match, int full)
 			continue;
 		wpa_hexdump_ascii(MSG_DEBUG, "TLS: Certificate commonName",
 				  cn->data, cn->length);
-		if (domain_suffix_match(cn->data, cn->length, match, full) == 1)
-		{
+		if (domain_suffix_match(cn->data, cn->length,
+					match, match_len, full) == 1) {
 			wpa_printf(MSG_DEBUG, "TLS: %s in commonName found",
 				   full ? "Match" : "Suffix match");
 			return 1;
@@ -747,6 +739,20 @@ static int tls_match_suffix(WOLFSSL_X509 *cert, const char *match, int full)
 
 	wpa_printf(MSG_DEBUG, "TLS: No CommonName %smatch found",
 		   full ? "" : "suffix ");
+	return 0;
+}
+
+
+static int tls_match_suffix(WOLFSSL_X509 *cert, const char *match, int full)
+{
+	const char *token, *last = NULL;
+
+	/* Process each match alternative separately until a match is found */
+	while ((token = cstr_token(match, ";", &last))) {
+		if (tls_match_suffix_helper(cert, token, last - token, full))
+			return 1;
+	}
+
 	return 0;
 }
 
@@ -893,19 +899,16 @@ static void wolfssl_tls_cert_event(struct tls_connection *conn,
 		if (num_alt_subject == TLS_MAX_ALT_SUBJECT)
 			break;
 		gen = wolfSSL_sk_value((void *) ext, i);
-#if 0
 		if (gen->type != GEN_EMAIL &&
 		    gen->type != GEN_DNS &&
 		    gen->type != GEN_URI)
 			continue;
-#endif
 
 		pos = os_malloc(10 + os_strlen((char *) gen->obj) + 1);
 		if (!pos)
 			break;
 		alt_subject[num_alt_subject++] = pos;
 
-#if 0
 		switch (gen->type) {
 		case GEN_EMAIL:
 			os_memcpy(pos, "EMAIL:", 6);
@@ -920,10 +923,6 @@ static void wolfssl_tls_cert_event(struct tls_connection *conn,
 			pos += 4;
 			break;
 		}
-#else
-		os_memcpy(pos, "DNS:", 4);
-		pos += 4;
-#endif
 
 		os_memcpy(pos, gen->obj, os_strlen((char *)gen->obj));
 		pos += os_strlen((char *)gen->obj);
@@ -1099,7 +1098,7 @@ static int tls_verify_cb(int preverify_ok, WOLFSSL_X509_STORE_CTX *x509_ctx)
 				       TLS_FAIL_SERVER_CHAIN_PROBE);
 	}
 
-#ifdef HAVE_OCSP_OPENSSL
+#ifdef HAVE_OCSP_WOLFSSL
 	if (depth == 0 && (conn->flags & TLS_CONN_REQUEST_OCSP) &&
 	    preverify_ok) {
 		enum ocsp_result res;
@@ -1123,7 +1122,7 @@ static int tls_verify_cb(int preverify_ok, WOLFSSL_X509_STORE_CTX *x509_ctx)
 					       TLS_FAIL_UNSPECIFIED);
 		}
 	}
-#endif /* HAVE_OCSP */
+#endif /* HAVE_OCSP_WOLFSSL */
 	if (depth == 0 && preverify_ok && context->event_cb != NULL)
 		context->event_cb(context->cb_ctx,
 				  TLS_CERT_CHAIN_SUCCESS, NULL);
@@ -1204,7 +1203,6 @@ static int tls_connection_ca_cert(void *tls_ctx, struct tls_connection *conn,
 			return -1;
 		}
 		wolfSSL_CTX_set_cert_store(ctx, cm);
-		XFREE(cm, NULL, DYNAMIC_TYPE_X509_STORE);
 
 		if (wolfSSL_CTX_load_verify_locations(ctx, ca_cert, ca_path) !=
 		    SSL_SUCCESS) {
@@ -1370,11 +1368,11 @@ static int tls_global_client_cert(void *ssl_ctx, const char *client_cert)
 	if (!client_cert)
 		return 0;
 
-	if (wolfSSL_CTX_use_certificate_file(ctx, client_cert,
-					     SSL_FILETYPE_ASN1) !=
+	if (wolfSSL_CTX_use_certificate_chain_file_format(ctx, client_cert,
+							  SSL_FILETYPE_ASN1) !=
 	    SSL_SUCCESS &&
-	    wolfSSL_CTX_use_certificate_file(ctx, client_cert,
-					     SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+	    wolfSSL_CTX_use_certificate_chain_file(ctx, client_cert) !=
+	    SSL_SUCCESS) {
 		wpa_printf(MSG_INFO, "Failed to load client certificate");
 		return -1;
 	}
@@ -1503,6 +1501,9 @@ int tls_global_set_params(void *tls_ctx,
 {
 	wpa_printf(MSG_DEBUG, "SSL: global set params");
 
+	if (params->check_cert_subject)
+		return -1; /* not yet supported */
+
 	if (tls_global_ca_cert(tls_ctx, params->ca_cert) < 0) {
 		wpa_printf(MSG_INFO, "SSL: Failed to load ca cert file '%s'",
 			   params->ca_cert);
@@ -1540,6 +1541,12 @@ int tls_global_set_params(void *tls_ctx,
 		return -1;
 	}
 
+	if (params->openssl_ecdh_curves) {
+		wpa_printf(MSG_INFO,
+			   "wolfSSL: openssl_ecdh_curves not supported");
+		return -1;
+	}
+
 #ifdef HAVE_SESSION_TICKET
 	/* Session ticket is off by default - can't disable once on. */
 	if (!(params->flags & TLS_CONN_DISABLE_SESSION_TICKET))
@@ -1559,7 +1566,7 @@ int tls_global_set_params(void *tls_ctx,
 }
 
 
-int tls_global_set_verify(void *tls_ctx, int check_crl)
+int tls_global_set_verify(void *tls_ctx, int check_crl, int strict)
 {
 	wpa_printf(MSG_DEBUG, "SSL: global set verify: %d", check_crl);
 
@@ -1980,26 +1987,69 @@ int tls_connection_get_random(void *ssl_ctx, struct tls_connection *conn,
 
 
 int tls_connection_export_key(void *tls_ctx, struct tls_connection *conn,
-			      const char *label, u8 *out, size_t out_len)
+			      const char *label, const u8 *context,
+			      size_t context_len, u8 *out, size_t out_len)
 {
+	if (context)
+		return -1;
 	if (!conn || wolfSSL_make_eap_keys(conn->ssl, out, out_len, label) != 0)
 		return -1;
 	return 0;
 }
 
 
+#define SEED_LEN	(RAN_LEN + RAN_LEN)
+
 int tls_connection_get_eap_fast_key(void *tls_ctx, struct tls_connection *conn,
 				    u8 *out, size_t out_len)
 {
-	int ret;
+	byte seed[SEED_LEN];
+	int ret = -1;
+	WOLFSSL *ssl;
+	byte *tmp_out;
+	byte *_out;
+	int skip = 0;
+	byte *master_key;
+	unsigned int master_key_len;
+	byte *server_random;
+	unsigned int server_len;
+	byte *client_random;
+	unsigned int client_len;
 
 	if (!conn || !conn->ssl)
 		return -1;
+	ssl = conn->ssl;
 
-	ret = wolfSSL_make_eap_keys(conn->ssl, out, out_len, "key expansion");
-	if (ret != 0)
+	skip = 2 * (wolfSSL_GetKeySize(ssl) + wolfSSL_GetHmacSize(ssl) +
+		    wolfSSL_GetIVSize(ssl));
+
+	tmp_out = os_malloc(skip + out_len);
+	if (!tmp_out)
 		return -1;
-	return 0;
+	_out = tmp_out;
+
+	wolfSSL_get_keys(ssl, &master_key, &master_key_len, &server_random,
+			 &server_len, &client_random, &client_len);
+	os_memcpy(seed, server_random, RAN_LEN);
+	os_memcpy(seed + RAN_LEN, client_random, RAN_LEN);
+
+	if (wolfSSL_GetVersion(ssl) == WOLFSSL_TLSV1_2) {
+		tls_prf_sha256(master_key, master_key_len,
+			       "key expansion", seed, sizeof(seed),
+			       _out, skip + out_len);
+		ret = 0;
+	} else {
+		ret = tls_prf_sha1_md5(master_key, master_key_len,
+				       "key expansion", seed, sizeof(seed),
+				       _out, skip + out_len);
+	}
+
+	forced_memzero(master_key, master_key_len);
+	if (ret == 0)
+		os_memcpy(out, _out + skip, out_len);
+	bin_clear_free(tmp_out, skip + out_len);
+
+	return ret;
 }
 
 
@@ -2037,14 +2087,15 @@ static int tls_sess_sec_cb(WOLFSSL *s, void *secret, int *secret_len, void *arg)
 				      sizeof(client_random)) == 0 ||
 	    wolfSSL_get_server_random(s, server_random,
 				      sizeof(server_random)) == 0 ||
-	    wolfSSL_get_SessionTicket(s, conn->session_ticket, &ticketLen) != 1)
+	    wolfSSL_get_SessionTicket(s, conn->session_ticket,
+				      &ticket_len) != 1)
 		return 1;
 
 	if (ticket_len == 0)
 		return 0;
 
 	ret = conn->session_ticket_cb(conn->session_ticket_cb_ctx,
-				      conn->session_ticket, ticketLen,
+				      conn->session_ticket, ticket_len,
 				      client_random, server_random, secret);
 	if (ret <= 0)
 		return 1;

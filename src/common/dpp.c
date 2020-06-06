@@ -1,12 +1,14 @@
 /*
  * DPP functionality shared between hostapd and wpa_supplicant
  * Copyright (c) 2017, Qualcomm Atheros, Inc.
+ * Copyright (c) 2018-2020, The Linux Foundation
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
  */
 
 #include "utils/includes.h"
+#include <fcntl.h>
 #include <openssl/opensslv.h>
 #include <openssl/err.h>
 #include <openssl/asn1.h>
@@ -15,18 +17,24 @@
 #include "utils/common.h"
 #include "utils/base64.h"
 #include "utils/json.h"
+#include "utils/ip_addr.h"
+#include "utils/eloop.h"
 #include "common/ieee802_11_common.h"
 #include "common/ieee802_11_defs.h"
 #include "common/wpa_ctrl.h"
+#include "common/gas.h"
 #include "crypto/crypto.h"
 #include "crypto/random.h"
 #include "crypto/aes.h"
 #include "crypto/aes_siv.h"
 #include "crypto/sha384.h"
 #include "crypto/sha512.h"
+#include "tls/asn1.h"
 #include "drivers/driver.h"
 #include "dpp.h"
 
+
+static const char * dpp_netrole_str(enum dpp_netrole netrole);
 
 #ifdef CONFIG_TESTING_OPTIONS
 enum dpp_test_behavior dpp_test = DPP_TEST_DISABLED;
@@ -43,7 +51,9 @@ static int dpp_test_gen_invalid_key(struct wpabuf *msg,
 				    const struct dpp_curve_params *curve);
 #endif /* CONFIG_TESTING_OPTIONS */
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || \
+	(defined(LIBRESSL_VERSION_NUMBER) && \
+	 LIBRESSL_VERSION_NUMBER < 0x20700000L)
 /* Compatibility wrappers for older versions. */
 
 static int ECDSA_SIG_set0(ECDSA_SIG *sig, BIGNUM *r, BIGNUM *s)
@@ -65,6 +75,64 @@ static void ECDSA_SIG_get0(const ECDSA_SIG *sig, const BIGNUM **pr,
 
 #endif
 
+
+struct dpp_connection {
+	struct dl_list list;
+	struct dpp_controller *ctrl;
+	struct dpp_relay_controller *relay;
+	struct dpp_global *global;
+	struct dpp_authentication *auth;
+	int sock;
+	u8 mac_addr[ETH_ALEN];
+	unsigned int freq;
+	u8 msg_len[4];
+	size_t msg_len_octets;
+	struct wpabuf *msg;
+	struct wpabuf *msg_out;
+	size_t msg_out_pos;
+	unsigned int read_eloop:1;
+	unsigned int write_eloop:1;
+	unsigned int on_tcp_tx_complete_gas_done:1;
+	unsigned int on_tcp_tx_complete_remove:1;
+	unsigned int on_tcp_tx_complete_auth_ok:1;
+};
+
+/* Remote Controller */
+struct dpp_relay_controller {
+	struct dl_list list;
+	struct dpp_global *global;
+	u8 pkhash[SHA256_MAC_LEN];
+	struct hostapd_ip_addr ipaddr;
+	void *cb_ctx;
+	void (*tx)(void *ctx, const u8 *addr, unsigned int freq, const u8 *msg,
+		   size_t len);
+	void (*gas_resp_tx)(void *ctx, const u8 *addr, u8 dialog_token,
+			    int prot, struct wpabuf *buf);
+	struct dl_list conn; /* struct dpp_connection */
+};
+
+/* Local Controller */
+struct dpp_controller {
+	struct dpp_global *global;
+	u8 allowed_roles;
+	int qr_mutual;
+	int sock;
+	struct dl_list conn; /* struct dpp_connection */
+	char *configurator_params;
+};
+
+struct dpp_global {
+	void *msg_ctx;
+	struct dl_list bootstrap; /* struct dpp_bootstrap_info */
+	struct dl_list configurator; /* struct dpp_configurator */
+#ifdef CONFIG_DPP2
+	struct dl_list controllers; /* struct dpp_relay_controller */
+	struct dpp_controller *controller;
+	struct dl_list tcp_init; /* struct dpp_connection */
+	void *cb_ctx;
+	int (*process_conf_obj)(void *ctx, struct dpp_authentication *auth);
+#endif /* CONFIG_DPP2 */
+};
 
 static const struct dpp_curve_params dpp_curves[] = {
 	/* The mandatory to support and the default NIST P-256 curve needs to
@@ -386,6 +454,76 @@ static int dpp_hmac(size_t hash_len, const u8 *key, size_t key_len,
 }
 
 
+#ifdef CONFIG_DPP2
+
+static int dpp_pbkdf2_f(size_t hash_len,
+			const u8 *password, size_t password_len,
+			const u8 *salt, size_t salt_len,
+			unsigned int iterations, unsigned int count, u8 *digest)
+{
+	unsigned char tmp[DPP_MAX_HASH_LEN], tmp2[DPP_MAX_HASH_LEN];
+	unsigned int i;
+	size_t j;
+	u8 count_buf[4];
+	const u8 *addr[2];
+	size_t len[2];
+
+	addr[0] = salt;
+	len[0] = salt_len;
+	addr[1] = count_buf;
+	len[1] = 4;
+
+	/* F(P, S, c, i) = U1 xor U2 xor ... Uc
+	 * U1 = PRF(P, S || i)
+	 * U2 = PRF(P, U1)
+	 * Uc = PRF(P, Uc-1)
+	 */
+
+	WPA_PUT_BE32(count_buf, count);
+	if (dpp_hmac_vector(hash_len, password, password_len, 2, addr, len,
+			    tmp))
+		return -1;
+	os_memcpy(digest, tmp, hash_len);
+
+	for (i = 1; i < iterations; i++) {
+		if (dpp_hmac(hash_len, password, password_len, tmp, hash_len,
+			     tmp2))
+			return -1;
+		os_memcpy(tmp, tmp2, hash_len);
+		for (j = 0; j < hash_len; j++)
+			digest[j] ^= tmp2[j];
+	}
+
+	return 0;
+}
+
+
+static int dpp_pbkdf2(size_t hash_len, const u8 *password, size_t password_len,
+		      const u8 *salt, size_t salt_len, unsigned int iterations,
+		      u8 *buf, size_t buflen)
+{
+	unsigned int count = 0;
+	unsigned char *pos = buf;
+	size_t left = buflen, plen;
+	unsigned char digest[DPP_MAX_HASH_LEN];
+
+	while (left > 0) {
+		count++;
+		if (dpp_pbkdf2_f(hash_len, password, password_len,
+				 salt, salt_len, iterations, count, digest))
+			return -1;
+		plen = left > hash_len ? hash_len : left;
+		os_memcpy(pos, digest, plen);
+		pos += plen;
+		left -= plen;
+	}
+
+	return 0;
+}
+
+#endif /* CONFIG_DPP2 */
+
+
 static int dpp_bn2bin_pad(const BIGNUM *bn, u8 *pos, size_t len)
 {
 	int num_bytes, offset;
@@ -545,6 +683,91 @@ static EVP_PKEY * dpp_set_pubkey_point(EVP_PKEY *group_key,
 }
 
 
+static int dpp_ecdh(EVP_PKEY *own, EVP_PKEY *peer,
+		    u8 *secret, size_t *secret_len)
+{
+	EVP_PKEY_CTX *ctx;
+	int ret = -1;
+
+	ERR_clear_error();
+	*secret_len = 0;
+
+	ctx = EVP_PKEY_CTX_new(own, NULL);
+	if (!ctx) {
+		wpa_printf(MSG_ERROR, "DPP: EVP_PKEY_CTX_new failed: %s",
+			   ERR_error_string(ERR_get_error(), NULL));
+		return -1;
+	}
+
+	if (EVP_PKEY_derive_init(ctx) != 1) {
+		wpa_printf(MSG_ERROR, "DPP: EVP_PKEY_derive_init failed: %s",
+			   ERR_error_string(ERR_get_error(), NULL));
+		goto fail;
+	}
+
+	if (EVP_PKEY_derive_set_peer(ctx, peer) != 1) {
+		wpa_printf(MSG_ERROR,
+			   "DPP: EVP_PKEY_derive_set_peet failed: %s",
+			   ERR_error_string(ERR_get_error(), NULL));
+		goto fail;
+	}
+
+	if (EVP_PKEY_derive(ctx, NULL, secret_len) != 1) {
+		wpa_printf(MSG_ERROR, "DPP: EVP_PKEY_derive(NULL) failed: %s",
+			   ERR_error_string(ERR_get_error(), NULL));
+		goto fail;
+	}
+
+	if (*secret_len > DPP_MAX_SHARED_SECRET_LEN) {
+		u8 buf[200];
+		int level = *secret_len > 200 ? MSG_ERROR : MSG_DEBUG;
+
+		/* It looks like OpenSSL can return unexpectedly large buffer
+		 * need for shared secret from EVP_PKEY_derive(NULL) in some
+		 * cases. For example, group 19 has shown cases where secret_len
+		 * is set to 72 even though the actual length ends up being
+		 * updated to 32 when EVP_PKEY_derive() is called with a buffer
+		 * for the value. Work around this by trying to fetch the value
+		 * and continue if it is within supported range even when the
+		 * initial buffer need is claimed to be larger. */
+		wpa_printf(level,
+			   "DPP: Unexpected secret_len=%d from EVP_PKEY_derive()",
+			   (int) *secret_len);
+		if (*secret_len > 200)
+			goto fail;
+		if (EVP_PKEY_derive(ctx, buf, secret_len) != 1) {
+			wpa_printf(MSG_ERROR, "DPP: EVP_PKEY_derive failed: %s",
+				   ERR_error_string(ERR_get_error(), NULL));
+			goto fail;
+		}
+		if (*secret_len > DPP_MAX_SHARED_SECRET_LEN) {
+			wpa_printf(MSG_ERROR,
+				   "DPP: Unexpected secret_len=%d from EVP_PKEY_derive()",
+				   (int) *secret_len);
+			goto fail;
+		}
+		wpa_hexdump_key(MSG_DEBUG, "DPP: Unexpected secret_len change",
+				buf, *secret_len);
+		os_memcpy(secret, buf, *secret_len);
+		forced_memzero(buf, sizeof(buf));
+		goto done;
+	}
+
+	if (EVP_PKEY_derive(ctx, secret, secret_len) != 1) {
+		wpa_printf(MSG_ERROR, "DPP: EVP_PKEY_derive failed: %s",
+			   ERR_error_string(ERR_get_error(), NULL));
+		goto fail;
+	}
+
+done:
+	ret = 0;
+
+fail:
+	EVP_PKEY_CTX_free(ctx);
+	return ret;
+}
+
+
 static void dpp_auth_fail(struct dpp_authentication *auth, const char *txt)
 {
 	wpa_msg(auth->msg_ctx, MSG_INFO, DPP_EVENT_FAIL "%s", txt);
@@ -574,6 +797,34 @@ const u8 * dpp_get_attr(const u8 *buf, size_t len, u16 req_id, u16 *ret_len)
 	u16 id, alen;
 	const u8 *pos = buf, *end = buf + len;
 
+	while (end - pos >= 4) {
+		id = WPA_GET_LE16(pos);
+		pos += 2;
+		alen = WPA_GET_LE16(pos);
+		pos += 2;
+		if (alen > end - pos)
+			return NULL;
+		if (id == req_id) {
+			*ret_len = alen;
+			return pos;
+		}
+		pos += alen;
+	}
+
+	return NULL;
+}
+
+
+static const u8 * dpp_get_attr_next(const u8 *prev, const u8 *buf, size_t len,
+				    u16 req_id, u16 *ret_len)
+{
+	u16 id, alen;
+	const u8 *pos, *end = buf + len;
+
+	if (!prev)
+		pos = buf;
+	else
+		pos = prev + WPA_GET_LE16(prev - 2);
 	while (end - pos >= 4) {
 		id = WPA_GET_LE16(pos);
 		pos += 2;
@@ -640,6 +891,8 @@ void dpp_bootstrap_info_free(struct dpp_bootstrap_info *info)
 		return;
 	os_free(info->uri);
 	os_free(info->info);
+	os_free(info->chan);
+	os_free(info->pk);
 	EVP_PKEY_free(info->pubkey);
 	os_free(info);
 }
@@ -652,6 +905,8 @@ const char * dpp_bootstrap_type_txt(enum dpp_bootstrap_type type)
 		return "QRCODE";
 	case DPP_BOOTSTRAP_PKEX:
 		return "PKEX";
+	case DPP_BOOTSTRAP_NFC_URI:
+		return "NFC-URI";
 	}
 	return "??";
 }
@@ -680,17 +935,19 @@ static int dpp_clone_uri(struct dpp_bootstrap_info *bi, const char *uri)
 int dpp_parse_uri_chan_list(struct dpp_bootstrap_info *bi,
 			    const char *chan_list)
 {
-	const char *pos = chan_list;
-	int opclass, channel, freq;
+	const char *pos = chan_list, *pos2;
+	int opclass = -1, channel, freq;
 
 	while (pos && *pos && *pos != ';') {
-		opclass = atoi(pos);
+		pos2 = pos;
+		while (*pos2 >= '0' && *pos2 <= '9')
+			pos2++;
+		if (*pos2 == '/') {
+			opclass = atoi(pos);
+			pos = pos2 + 1;
+		}
 		if (opclass <= 0)
 			goto fail;
-		pos = os_strchr(pos, '/');
-		if (!pos)
-			goto fail;
-		pos++;
 		channel = atoi(pos);
 		if (channel <= 0)
 			goto fail;
@@ -811,7 +1068,9 @@ static int dpp_parse_uri_pk(struct dpp_bootstrap_info *bi, const char *info)
 	const unsigned char *pk;
 	int ppklen;
 	X509_ALGOR *pa;
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || \
+	(defined(LIBRESSL_VERSION_NUMBER) && \
+	 LIBRESSL_VERSION_NUMBER < 0x20800000L)
 	ASN1_OBJECT *pa_oid;
 #else
 	const ASN1_OBJECT *pa_oid;
@@ -825,8 +1084,7 @@ static int dpp_parse_uri_pk(struct dpp_bootstrap_info *bi, const char *info)
 	if (!end)
 		return -1;
 
-	data = base64_decode((const unsigned char *) info, end - info,
-			     &data_len);
+	data = base64_decode(info, end - info, &data_len);
 	if (!data) {
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Invalid base64 encoding on URI public-key");
@@ -1000,17 +1258,6 @@ static struct dpp_bootstrap_info * dpp_parse_uri(const char *uri)
 }
 
 
-struct dpp_bootstrap_info * dpp_parse_qr_code(const char *uri)
-{
-	struct dpp_bootstrap_info *bi;
-
-	bi = dpp_parse_uri(uri);
-	if (bi)
-		bi->type = DPP_BOOTSTRAP_QR_CODE;
-	return bi;
-}
-
-
 static void dpp_debug_print_key(const char *title, EVP_PKEY *key)
 {
 	EC_KEY *eckey;
@@ -1068,7 +1315,7 @@ static void dpp_debug_print_key(const char *title, EVP_PKEY *key)
 static EVP_PKEY * dpp_gen_keypair(const struct dpp_curve_params *curve)
 {
 	EVP_PKEY_CTX *kctx = NULL;
-	EC_KEY *ec_params;
+	EC_KEY *ec_params = NULL;
 	EVP_PKEY *params = NULL, *key = NULL;
 	int nid;
 
@@ -1099,19 +1346,18 @@ static EVP_PKEY * dpp_gen_keypair(const struct dpp_curve_params *curve)
 	    EVP_PKEY_keygen_init(kctx) != 1 ||
 	    EVP_PKEY_keygen(kctx, &key) != 1) {
 		wpa_printf(MSG_ERROR, "DPP: Failed to generate EC key");
+		key = NULL;
 		goto fail;
 	}
 
 	if (wpa_debug_show_keys)
 		dpp_debug_print_key("Own generated key", key);
 
+fail:
+	EC_KEY_free(ec_params);
 	EVP_PKEY_free(params);
 	EVP_PKEY_CTX_free(kctx);
 	return key;
-fail:
-	EVP_PKEY_CTX_free(kctx);
-	EVP_PKEY_free(params);
-	return NULL;
 }
 
 
@@ -1298,10 +1544,10 @@ int dpp_bootstrap_key_hash(struct dpp_bootstrap_info *bi)
 }
 
 
-char * dpp_keygen(struct dpp_bootstrap_info *bi, const char *curve,
-		  const u8 *privkey, size_t privkey_len)
+static int dpp_keygen(struct dpp_bootstrap_info *bi, const char *curve,
+		      const u8 *privkey, size_t privkey_len)
 {
-	unsigned char *base64 = NULL;
+	char *base64 = NULL;
 	char *pos, *end;
 	size_t len;
 	struct wpabuf *der = NULL;
@@ -1315,7 +1561,7 @@ char * dpp_keygen(struct dpp_bootstrap_info *bi, const char *curve,
 		if (!bi->curve) {
 			wpa_printf(MSG_INFO, "DPP: Unsupported curve: %s",
 				   curve);
-			return NULL;
+			return -1;
 		}
 	}
 	if (privkey)
@@ -1347,7 +1593,7 @@ char * dpp_keygen(struct dpp_bootstrap_info *bi, const char *curve,
 	der = NULL;
 	if (!base64)
 		goto fail;
-	pos = (char *) base64;
+	pos = base64;
 	end = pos + len;
 	for (;;) {
 		pos = os_strchr(pos, '\n');
@@ -1355,11 +1601,13 @@ char * dpp_keygen(struct dpp_bootstrap_info *bi, const char *curve,
 			break;
 		os_memmove(pos, pos + 1, end - pos);
 	}
-	return (char *) base64;
+	os_free(bi->pk);
+	bi->pk = base64;
+	return 0;
 fail:
 	os_free(base64);
 	wpabuf_free(der);
-	return NULL;
+	return -1;
 }
 
 
@@ -1533,6 +1781,9 @@ static struct wpabuf * dpp_auth_build_req(struct dpp_authentication *auth,
 		4 + sizeof(wrapped_data);
 	if (neg_freq > 0)
 		attr_len += 4 + 2;
+#ifdef CONFIG_DPP2
+	attr_len += 5;
+#endif /* CONFIG_DPP2 */
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_test == DPP_TEST_AFTER_WRAPPED_DATA_AUTH_REQ)
 		attr_len += 5;
@@ -1574,6 +1825,13 @@ static struct wpabuf * dpp_auth_build_req(struct dpp_authentication *auth,
 		wpabuf_put_u8(msg, op_class);
 		wpabuf_put_u8(msg, channel);
 	}
+
+#ifdef CONFIG_DPP2
+	/* Protocol Version */
+	wpabuf_put_le16(msg, DPP_ATTR_PROTOCOL_VERSION);
+	wpabuf_put_le16(msg, 1);
+	wpabuf_put_u8(msg, 2);
+#endif /* CONFIG_DPP2 */
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_test == DPP_TEST_NO_WRAPPED_DATA_AUTH_REQ) {
@@ -1701,6 +1959,9 @@ static struct wpabuf * dpp_auth_build_resp(struct dpp_authentication *auth,
 	/* Build DPP Authentication Response frame attributes */
 	attr_len = 4 + 1 + 2 * (4 + SHA256_MAC_LEN) +
 		4 + (pr ? wpabuf_len(pr) : 0) + 4 + sizeof(wrapped_data);
+#ifdef CONFIG_DPP2
+	attr_len += 5;
+#endif /* CONFIG_DPP2 */
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_test == DPP_TEST_AFTER_WRAPPED_DATA_AUTH_RESP)
 		attr_len += 5;
@@ -1727,6 +1988,15 @@ static struct wpabuf * dpp_auth_build_resp(struct dpp_authentication *auth,
 		wpabuf_put_le16(msg, wpabuf_len(pr));
 		wpabuf_put_buf(msg, pr);
 	}
+
+#ifdef CONFIG_DPP2
+	/* Protocol Version */
+	if (auth->peer_version >= 2) {
+		wpabuf_put_le16(msg, DPP_ATTR_PROTOCOL_VERSION);
+		wpabuf_put_le16(msg, 1);
+		wpabuf_put_u8(msg, 2);
+	}
+#endif /* CONFIG_DPP2 */
 
 	attr_end = wpabuf_put(msg, 0);
 
@@ -2005,11 +2275,42 @@ static int dpp_prepare_channel_list(struct dpp_authentication *auth,
 }
 
 
+static int dpp_gen_uri(struct dpp_bootstrap_info *bi)
+{
+	char macstr[ETH_ALEN * 2 + 10];
+	size_t len;
+
+	len = 4; /* "DPP:" */
+	if (bi->chan)
+		len += 3 + os_strlen(bi->chan); /* C:...; */
+	if (is_zero_ether_addr(bi->mac_addr))
+		macstr[0] = '\0';
+	else
+		os_snprintf(macstr, sizeof(macstr), "M:" COMPACT_MACSTR ";",
+			    MAC2STR(bi->mac_addr));
+	len += os_strlen(macstr); /* M:...; */
+	if (bi->info)
+		len += 3 + os_strlen(bi->info); /* I:...; */
+	len += 4 + os_strlen(bi->pk); /* K:...;; */
+
+	os_free(bi->uri);
+	bi->uri = os_malloc(len + 1);
+	if (!bi->uri)
+		return -1;
+	os_snprintf(bi->uri, len + 1, "DPP:%s%s%s%s%s%s%sK:%s;;",
+		    bi->chan ? "C:" : "", bi->chan ? bi->chan : "",
+		    bi->chan ? ";" : "",
+		    macstr,
+		    bi->info ? "I:" : "", bi->info ? bi->info : "",
+		    bi->info ? ";" : "",
+		    bi->pk);
+	return 0;
+}
+
+
 static int dpp_autogen_bootstrap_key(struct dpp_authentication *auth)
 {
 	struct dpp_bootstrap_info *bi;
-	char *pk = NULL;
-	size_t len;
 
 	if (auth->own_bi)
 		return 0; /* already generated */
@@ -2018,29 +2319,32 @@ static int dpp_autogen_bootstrap_key(struct dpp_authentication *auth)
 	if (!bi)
 		return -1;
 	bi->type = DPP_BOOTSTRAP_QR_CODE;
-	pk = dpp_keygen(bi, auth->peer_bi->curve->name, NULL, 0);
-	if (!pk)
+	if (dpp_keygen(bi, auth->peer_bi->curve->name, NULL, 0) < 0 ||
+	    dpp_gen_uri(bi) < 0)
 		goto fail;
-
-	len = 4; /* "DPP:" */
-	len += 4 + os_strlen(pk);
-	bi->uri = os_malloc(len + 1);
-	if (!bi->uri)
-		goto fail;
-	os_snprintf(bi->uri, len + 1, "DPP:K:%s;;", pk);
 	wpa_printf(MSG_DEBUG,
 		   "DPP: Auto-generated own bootstrapping key info: URI %s",
 		   bi->uri);
 
 	auth->tmp_own_bi = auth->own_bi = bi;
 
-	os_free(pk);
-
 	return 0;
 fail:
-	os_free(pk);
 	dpp_bootstrap_info_free(bi);
 	return -1;
+}
+
+
+static struct dpp_authentication * dpp_alloc_auth(void *msg_ctx)
+{
+	struct dpp_authentication *auth;
+
+	auth = os_zalloc(sizeof(*auth));
+	if (!auth)
+		return NULL;
+	auth->msg_ctx = msg_ctx;
+	auth->conf_resp_status = 255;
+	return auth;
 }
 
 
@@ -2054,7 +2358,6 @@ struct dpp_authentication * dpp_auth_init(void *msg_ctx,
 {
 	struct dpp_authentication *auth;
 	size_t nonce_len;
-	EVP_PKEY_CTX *ctx = NULL;
 	size_t secret_len;
 	struct wpabuf *pi = NULL;
 	const u8 *r_pubkey_hash, *i_pubkey_hash;
@@ -2062,10 +2365,9 @@ struct dpp_authentication * dpp_auth_init(void *msg_ctx,
 	u8 test_hash[SHA256_MAC_LEN];
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	auth = os_zalloc(sizeof(*auth));
+	auth = dpp_alloc_auth(msg_ctx);
 	if (!auth)
 		return NULL;
-	auth->msg_ctx = msg_ctx;
 	auth->initiator = 1;
 	auth->waiting_auth_resp = 1;
 	auth->allowed_roles = dpp_allowed_roles;
@@ -2123,21 +2425,10 @@ struct dpp_authentication * dpp_auth_init(void *msg_ctx,
 		goto fail;
 
 	/* ECDH: M = pI * BR */
-	ctx = EVP_PKEY_CTX_new(auth->own_protocol_key, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, auth->peer_bi->pubkey) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &secret_len) != 1 ||
-	    secret_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, auth->Mx, &secret_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(auth->own_protocol_key, auth->peer_bi->pubkey,
+		     auth->Mx, &secret_len) < 0)
 		goto fail;
-	}
 	auth->secret_len = secret_len;
-	EVP_PKEY_CTX_free(ctx);
-	ctx = NULL;
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (M.x)",
 			auth->Mx, auth->secret_len);
@@ -2189,7 +2480,6 @@ struct dpp_authentication * dpp_auth_init(void *msg_ctx,
 
 out:
 	wpabuf_free(pi);
-	EVP_PKEY_CTX_free(ctx);
 	return auth;
 fail:
 	dpp_auth_deinit(auth);
@@ -2198,8 +2488,8 @@ fail:
 }
 
 
-struct wpabuf * dpp_build_conf_req(struct dpp_authentication *auth,
-				   const char *json)
+static struct wpabuf * dpp_build_conf_req_attr(struct dpp_authentication *auth,
+					       const char *json)
 {
 	size_t nonce_len;
 	size_t json_len, clear_len;
@@ -2216,7 +2506,7 @@ struct wpabuf * dpp_build_conf_req(struct dpp_authentication *auth,
 	}
 	wpa_hexdump(MSG_DEBUG, "DPP: E-nonce", auth->e_nonce, nonce_len);
 	json_len = os_strlen(json);
-	wpa_hexdump_ascii(MSG_DEBUG, "DPP: configAttr JSON", json, json_len);
+	wpa_hexdump_ascii(MSG_DEBUG, "DPP: configRequest JSON", json, json_len);
 
 	/* { E-nonce, configAttrib }ke */
 	clear_len = 4 + nonce_len + 4 + json_len;
@@ -2300,6 +2590,115 @@ fail:
 	wpabuf_free(clear);
 	wpabuf_free(msg);
 	return NULL;
+}
+
+
+static void dpp_write_adv_proto(struct wpabuf *buf)
+{
+	/* Advertisement Protocol IE */
+	wpabuf_put_u8(buf, WLAN_EID_ADV_PROTO);
+	wpabuf_put_u8(buf, 8); /* Length */
+	wpabuf_put_u8(buf, 0x7f);
+	wpabuf_put_u8(buf, WLAN_EID_VENDOR_SPECIFIC);
+	wpabuf_put_u8(buf, 5);
+	wpabuf_put_be24(buf, OUI_WFA);
+	wpabuf_put_u8(buf, DPP_OUI_TYPE);
+	wpabuf_put_u8(buf, 0x01);
+}
+
+
+static void dpp_write_gas_query(struct wpabuf *buf, struct wpabuf *query)
+{
+	/* GAS Query */
+	wpabuf_put_le16(buf, wpabuf_len(query));
+	wpabuf_put_buf(buf, query);
+}
+
+
+struct wpabuf * dpp_build_conf_req(struct dpp_authentication *auth,
+				   const char *json)
+{
+	struct wpabuf *buf, *conf_req;
+
+	conf_req = dpp_build_conf_req_attr(auth, json);
+	if (!conf_req) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No configuration request data available");
+		return NULL;
+	}
+
+	buf = gas_build_initial_req(0, 10 + 2 + wpabuf_len(conf_req));
+	if (!buf) {
+		wpabuf_free(conf_req);
+		return NULL;
+	}
+
+	dpp_write_adv_proto(buf);
+	dpp_write_gas_query(buf, conf_req);
+	wpabuf_free(conf_req);
+	wpa_hexdump_buf(MSG_MSGDUMP, "DPP: GAS Config Request", buf);
+
+	return buf;
+}
+
+
+struct wpabuf * dpp_build_conf_req_helper(struct dpp_authentication *auth,
+					  const char *name,
+					  enum dpp_netrole netrole,
+					  const char *mud_url, int *opclasses)
+{
+	size_t len, name_len;
+	const char *tech = "infra";
+	const char *dpp_name;
+	struct wpabuf *buf, *json;
+
+#ifdef CONFIG_TESTING_OPTIONS
+	if (dpp_test == DPP_TEST_INVALID_CONFIG_ATTR_OBJ_CONF_REQ) {
+		static const char *bogus_tech = "knfra";
+
+		wpa_printf(MSG_INFO, "DPP: TESTING - invalid Config Attr");
+		tech = bogus_tech;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
+
+	dpp_name = name ? name : "Test";
+	name_len = os_strlen(dpp_name);
+
+	len = 100 + name_len * 6 + 1 + int_array_len(opclasses) * 4;
+	if (mud_url && mud_url[0])
+		len += 10 + os_strlen(mud_url);
+	json = wpabuf_alloc(len);
+	if (!json)
+		return NULL;
+
+	json_start_object(json, NULL);
+	if (json_add_string_escape(json, "name", dpp_name, name_len) < 0) {
+		wpabuf_free(json);
+		return NULL;
+	}
+	json_value_sep(json);
+	json_add_string(json, "wi-fi_tech", tech);
+	json_value_sep(json);
+	json_add_string(json, "netRole", dpp_netrole_str(netrole));
+	if (mud_url && mud_url[0]) {
+		json_value_sep(json);
+		json_add_string(json, "mudurl", mud_url);
+	}
+	if (opclasses) {
+		int i;
+
+		json_value_sep(json);
+		json_start_array(json, "bandSupport");
+		for (i = 0; opclasses[i]; i++)
+			wpabuf_printf(json, "%s%u", i ? "," : "", opclasses[i]);
+		json_end_array(json);
+	}
+	json_end_object(json);
+
+	buf = dpp_build_conf_req(auth, wpabuf_head(json));
+	wpabuf_free(json);
+
+	return buf;
 }
 
 
@@ -2613,7 +3012,6 @@ fail:
 static int dpp_auth_build_resp_ok(struct dpp_authentication *auth)
 {
 	size_t nonce_len;
-	EVP_PKEY_CTX *ctx = NULL;
 	size_t secret_len;
 	struct wpabuf *msg, *pr = NULL;
 	u8 r_auth[4 + DPP_MAX_HASH_LEN];
@@ -2652,6 +3050,7 @@ static int dpp_auth_build_resp_ok(struct dpp_authentication *auth)
 #endif /* CONFIG_TESTING_OPTIONS */
 	wpa_hexdump(MSG_DEBUG, "DPP: R-nonce", auth->r_nonce, nonce_len);
 
+	EVP_PKEY_free(auth->own_protocol_key);
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_protocol_key_override_len) {
 		const struct dpp_curve_params *tmp_curve;
@@ -2675,20 +3074,9 @@ static int dpp_auth_build_resp_ok(struct dpp_authentication *auth)
 		goto fail;
 
 	/* ECDH: N = pR * PI */
-	ctx = EVP_PKEY_CTX_new(auth->own_protocol_key, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, auth->peer_protocol_key) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &secret_len) != 1 ||
-	    secret_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, auth->Nx, &secret_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(auth->own_protocol_key, auth->peer_protocol_key,
+		     auth->Nx, &secret_len) < 0)
 		goto fail;
-	}
-	EVP_PKEY_CTX_free(ctx);
-	ctx = NULL;
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (N.x)",
 			auth->Nx, auth->secret_len);
@@ -2852,7 +3240,7 @@ static int dpp_auth_build_resp_status(struct dpp_authentication *auth,
 		i_pubkey_hash = test_hash;
 	} else if (dpp_test == DPP_TEST_NO_STATUS_AUTH_RESP) {
 		wpa_printf(MSG_INFO, "DPP: TESTING - no Status");
-		status = -1;
+		status = 255;
 	} else if (dpp_test == DPP_TEST_NO_I_NONCE_AUTH_RESP) {
 		wpa_printf(MSG_INFO, "DPP: TESTING - no I-nonce");
 		i_nonce = NULL;
@@ -2889,6 +3277,10 @@ dpp_auth_req_rx(void *msg_ctx, u8 dpp_allowed_roles, int qr_mutual,
 	u16 wrapped_data_len, i_proto_len, i_nonce_len, i_capab_len,
 		i_bootstrap_len, channel_len;
 	struct dpp_authentication *auth = NULL;
+#ifdef CONFIG_DPP2
+	const u8 *version;
+	u16 version_len;
+#endif /* CONFIG_DPP2 */
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_test == DPP_TEST_STOP_AT_AUTH_REQ) {
@@ -2909,14 +3301,29 @@ dpp_auth_req_rx(void *msg_ctx, u8 dpp_allowed_roles, int qr_mutual,
 		    wrapped_data, wrapped_data_len);
 	attr_len = wrapped_data - 4 - attr_start;
 
-	auth = os_zalloc(sizeof(*auth));
+	auth = dpp_alloc_auth(msg_ctx);
 	if (!auth)
 		goto fail;
-	auth->msg_ctx = msg_ctx;
 	auth->peer_bi = peer_bi;
 	auth->own_bi = own_bi;
 	auth->curve = own_bi->curve;
 	auth->curr_freq = freq;
+
+	auth->peer_version = 1; /* default to the first version */
+#ifdef CONFIG_DPP2
+	version = dpp_get_attr(attr_start, attr_len, DPP_ATTR_PROTOCOL_VERSION,
+			       &version_len);
+	if (version) {
+		if (version_len < 1 || version[0] == 0) {
+			dpp_auth_fail(auth,
+				      "Invalid Protocol Version attribute");
+			goto fail;
+		}
+		auth->peer_version = version[0];
+		wpa_printf(MSG_DEBUG, "DPP: Peer protocol version %u",
+			   auth->peer_version);
+	}
+#endif /* CONFIG_DPP2 */
 
 	channel = dpp_get_attr(attr_start, attr_len, DPP_ATTR_CHANNEL,
 			       &channel_len);
@@ -2964,22 +3371,9 @@ dpp_auth_req_rx(void *msg_ctx, u8 dpp_allowed_roles, int qr_mutual,
 	}
 	dpp_debug_print_key("Peer (Initiator) Protocol Key", pi);
 
-	ctx = EVP_PKEY_CTX_new(own_bi->pubkey, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pi) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &secret_len) != 1 ||
-	    secret_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, auth->Mx, &secret_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
-		dpp_auth_fail(auth, "Failed to derive ECDH shared secret");
+	if (dpp_ecdh(own_bi->pubkey, pi, auth->Mx, &secret_len) < 0)
 		goto fail;
-	}
 	auth->secret_len = secret_len;
-	EVP_PKEY_CTX_free(ctx);
-	ctx = NULL;
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (M.x)",
 			auth->Mx, auth->secret_len);
@@ -3102,8 +3496,6 @@ dpp_auth_req_rx(void *msg_ctx, u8 dpp_allowed_roles, int qr_mutual,
 
 		wpa_msg(auth->msg_ctx, MSG_INFO, DPP_EVENT_SCAN_PEER_QR_CODE
 			"%s", hex);
-		wpas_notify_dpp_scan_peer_qrcode(auth->msg_ctx, i_bootstrap,
-						 i_bootstrap_len);
 		return auth;
 	}
 	if (dpp_auth_build_resp_ok(auth) < 0)
@@ -3114,7 +3506,6 @@ dpp_auth_req_rx(void *msg_ctx, u8 dpp_allowed_roles, int qr_mutual,
 not_compatible:
 	wpa_msg(auth->msg_ctx, MSG_INFO, DPP_EVENT_NOT_COMPATIBLE
 		"i-capab=0x%02x", auth->i_capab);
-	wpas_notify_dpp_not_compatible(auth->msg_ctx, auth->i_capab, 1);
 	if (dpp_allowed_roles & DPP_CAPAB_CONFIGURATOR)
 		auth->configurator = 1;
 	else
@@ -3410,7 +3801,6 @@ dpp_auth_resp_rx_status(struct dpp_authentication *auth, const u8 *hdr,
 	if (status == DPP_STATUS_NOT_COMPATIBLE) {
 		wpa_msg(auth->msg_ctx, MSG_INFO, DPP_EVENT_NOT_COMPATIBLE
 			"r-capab=0x%02x", auth->r_capab);
-		wpas_notify_dpp_not_compatible(auth->msg_ctx, auth->r_capab, 0);
 	} else if (status == DPP_STATUS_RESPONSE_PENDING) {
 		u8 role = auth->r_capab & DPP_CAPAB_ROLE_MASK;
 
@@ -3425,7 +3815,6 @@ dpp_auth_resp_rx_status(struct dpp_authentication *auth, const u8 *hdr,
 			wpa_msg(auth->msg_ctx, MSG_INFO,
 				DPP_EVENT_RESPONSE_PENDING "%s",
 				auth->tmp_own_bi ? auth->tmp_own_bi->uri : "");
-			wpas_notify_dpp_resp_pending(auth->msg_ctx);
 		}
 	}
 fail:
@@ -3438,7 +3827,6 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 		 const u8 *attr_start, size_t attr_len)
 {
 	EVP_PKEY *pr;
-	EVP_PKEY_CTX *ctx = NULL;
 	size_t secret_len;
 	const u8 *addr[2];
 	size_t len[2];
@@ -3451,6 +3839,10 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 		wrapped2_len, r_auth_len;
 	u8 r_auth2[DPP_MAX_HASH_LEN];
 	u8 role;
+#ifdef CONFIG_DPP2
+	const u8 *version;
+	u16 version_len;
+#endif /* CONFIG_DPP2 */
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_test == DPP_TEST_STOP_AT_AUTH_RESP) {
@@ -3460,7 +3852,7 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	if (!auth->initiator) {
+	if (!auth->initiator || !auth->peer_bi) {
 		dpp_auth_fail(auth, "Unexpected Authentication Response");
 		return NULL;
 	}
@@ -3525,6 +3917,22 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 		return NULL;
 	}
 
+	auth->peer_version = 1; /* default to the first version */
+#ifdef CONFIG_DPP2
+	version = dpp_get_attr(attr_start, attr_len, DPP_ATTR_PROTOCOL_VERSION,
+			       &version_len);
+	if (version) {
+		if (version_len < 1 || version[0] == 0) {
+			dpp_auth_fail(auth,
+				      "Invalid Protocol Version attribute");
+			return NULL;
+		}
+		auth->peer_version = version[0];
+		wpa_printf(MSG_DEBUG, "DPP: Peer protocol version %u",
+			   auth->peer_version);
+	}
+#endif /* CONFIG_DPP2 */
+
 	status = dpp_get_attr(attr_start, attr_len, DPP_ATTR_STATUS,
 			      &status_len);
 	if (!status || status_len < 1) {
@@ -3568,21 +3976,11 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 	}
 	dpp_debug_print_key("Peer (Responder) Protocol Key", pr);
 
-	ctx = EVP_PKEY_CTX_new(auth->own_protocol_key, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pr) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &secret_len) != 1 ||
-	    secret_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, auth->Nx, &secret_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(auth->own_protocol_key, pr, auth->Nx, &secret_len) < 0) {
 		dpp_auth_fail(auth, "Failed to derive ECDH shared secret");
 		goto fail;
 	}
-	EVP_PKEY_CTX_free(ctx);
-	ctx = NULL;
+	EVP_PKEY_free(auth->peer_protocol_key);
 	auth->peer_protocol_key = pr;
 	pr = NULL;
 
@@ -3641,7 +4039,7 @@ dpp_auth_resp_rx(struct dpp_authentication *auth, const u8 *hdr,
 		goto fail;
 	}
 
-	if (auth->own_bi && auth->peer_bi) {
+	if (auth->own_bi) {
 		/* Mutual authentication */
 		if (dpp_auth_derive_l_initiator(auth) < 0)
 			goto fail;
@@ -3753,7 +4151,6 @@ fail:
 	bin_clear_free(unwrapped, unwrapped_len);
 	bin_clear_free(unwrapped2, unwrapped2_len);
 	EVP_PKEY_free(pr);
-	EVP_PKEY_CTX_free(ctx);
 	return NULL;
 }
 
@@ -3849,7 +4246,11 @@ int dpp_auth_conf_rx(struct dpp_authentication *auth, const u8 *hdr,
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	if (auth->initiator) {
+	if (auth->initiator || !auth->own_bi || !auth->waiting_auth_conf) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: initiator=%d own_bi=%d waiting_auth_conf=%d",
+			   auth->initiator, !!auth->own_bi,
+			   auth->waiting_auth_conf);
 		dpp_auth_fail(auth, "Unexpected Authentication Confirm");
 		return -1;
 	}
@@ -3907,7 +4308,7 @@ int dpp_auth_conf_rx(struct dpp_authentication *auth, const u8 *hdr,
 				      "Initiator Bootstrapping Key Hash mismatch");
 			return -1;
 		}
-	} else if (auth->own_bi && auth->peer_bi) {
+	} else if (auth->peer_bi) {
 		/* Mutual authentication and peer did not include its
 		 * Bootstrapping Key Hash attribute. */
 		dpp_auth_fail(auth,
@@ -3988,6 +4389,99 @@ fail:
 }
 
 
+static int bin_str_eq(const char *val, size_t len, const char *cmp)
+{
+	return os_strlen(cmp) == len && os_memcmp(val, cmp, len) == 0;
+}
+
+
+struct dpp_configuration * dpp_configuration_alloc(const char *type)
+{
+	struct dpp_configuration *conf;
+	const char *end;
+	size_t len;
+
+	conf = os_zalloc(sizeof(*conf));
+	if (!conf)
+		goto fail;
+
+	end = os_strchr(type, ' ');
+	if (end)
+		len = end - type;
+	else
+		len = os_strlen(type);
+
+	if (bin_str_eq(type, len, "psk"))
+		conf->akm = DPP_AKM_PSK;
+	else if (bin_str_eq(type, len, "sae"))
+		conf->akm = DPP_AKM_SAE;
+	else if (bin_str_eq(type, len, "psk-sae") ||
+		 bin_str_eq(type, len, "psk+sae"))
+		conf->akm = DPP_AKM_PSK_SAE;
+	else if (bin_str_eq(type, len, "sae-dpp") ||
+		 bin_str_eq(type, len, "dpp+sae"))
+		conf->akm = DPP_AKM_SAE_DPP;
+	else if (bin_str_eq(type, len, "psk-sae-dpp") ||
+		 bin_str_eq(type, len, "dpp+psk+sae"))
+		conf->akm = DPP_AKM_PSK_SAE_DPP;
+	else if (bin_str_eq(type, len, "dpp"))
+		conf->akm = DPP_AKM_DPP;
+	else
+		goto fail;
+
+	return conf;
+fail:
+	dpp_configuration_free(conf);
+	return NULL;
+}
+
+
+int dpp_akm_psk(enum dpp_akm akm)
+{
+	return akm == DPP_AKM_PSK || akm == DPP_AKM_PSK_SAE ||
+		akm == DPP_AKM_PSK_SAE_DPP;
+}
+
+
+int dpp_akm_sae(enum dpp_akm akm)
+{
+	return akm == DPP_AKM_SAE || akm == DPP_AKM_PSK_SAE ||
+		akm == DPP_AKM_SAE_DPP || akm == DPP_AKM_PSK_SAE_DPP;
+}
+
+
+int dpp_akm_legacy(enum dpp_akm akm)
+{
+	return akm == DPP_AKM_PSK || akm == DPP_AKM_PSK_SAE ||
+		akm == DPP_AKM_SAE;
+}
+
+
+int dpp_akm_dpp(enum dpp_akm akm)
+{
+	return akm == DPP_AKM_DPP || akm == DPP_AKM_SAE_DPP ||
+		akm == DPP_AKM_PSK_SAE_DPP;
+}
+
+
+int dpp_akm_ver2(enum dpp_akm akm)
+{
+	return akm == DPP_AKM_SAE_DPP || akm == DPP_AKM_PSK_SAE_DPP;
+}
+
+
+int dpp_configuration_valid(const struct dpp_configuration *conf)
+{
+	if (conf->ssid_len == 0)
+		return 0;
+	if (dpp_akm_psk(conf->akm) && !conf->passphrase && !conf->psk_set)
+		return 0;
+	if (dpp_akm_sae(conf->akm) && !conf->passphrase)
+		return 0;
+	return 1;
+}
+
+
 void dpp_configuration_free(struct dpp_configuration *conf)
 {
 	if (!conf)
@@ -3998,20 +4492,285 @@ void dpp_configuration_free(struct dpp_configuration *conf)
 }
 
 
+static int dpp_configuration_parse_helper(struct dpp_authentication *auth,
+					  const char *cmd, int idx)
+{
+	const char *pos, *end;
+	struct dpp_configuration *conf_sta = NULL, *conf_ap = NULL;
+	struct dpp_configuration *conf = NULL;
+
+	pos = os_strstr(cmd, " conf=sta-");
+	if (pos) {
+		conf_sta = dpp_configuration_alloc(pos + 10);
+		if (!conf_sta)
+			goto fail;
+		conf_sta->netrole = DPP_NETROLE_STA;
+		conf = conf_sta;
+	}
+
+	pos = os_strstr(cmd, " conf=ap-");
+	if (pos) {
+		conf_ap = dpp_configuration_alloc(pos + 9);
+		if (!conf_ap)
+			goto fail;
+		conf_ap->netrole = DPP_NETROLE_AP;
+		conf = conf_ap;
+	}
+
+	pos = os_strstr(cmd, " conf=configurator");
+	if (pos)
+		auth->provision_configurator = 1;
+
+	if (!conf)
+		return 0;
+
+	pos = os_strstr(cmd, " ssid=");
+	if (pos) {
+		pos += 6;
+		end = os_strchr(pos, ' ');
+		conf->ssid_len = end ? (size_t) (end - pos) : os_strlen(pos);
+		conf->ssid_len /= 2;
+		if (conf->ssid_len > sizeof(conf->ssid) ||
+		    hexstr2bin(pos, conf->ssid, conf->ssid_len) < 0)
+			goto fail;
+	} else {
+#ifdef CONFIG_TESTING_OPTIONS
+		/* use a default SSID for legacy testing reasons */
+		os_memcpy(conf->ssid, "test", 4);
+		conf->ssid_len = 4;
+#else /* CONFIG_TESTING_OPTIONS */
+		goto fail;
+#endif /* CONFIG_TESTING_OPTIONS */
+	}
+
+	pos = os_strstr(cmd, " ssid_charset=");
+	if (pos) {
+		if (conf_ap) {
+			wpa_printf(MSG_INFO,
+				   "DPP: ssid64 option (ssid_charset param) not allowed for AP enrollee");
+			goto fail;
+		}
+		conf->ssid_charset = atoi(pos + 14);
+	}
+
+	pos = os_strstr(cmd, " pass=");
+	if (pos) {
+		size_t pass_len;
+
+		pos += 6;
+		end = os_strchr(pos, ' ');
+		pass_len = end ? (size_t) (end - pos) : os_strlen(pos);
+		pass_len /= 2;
+		if (pass_len > 63 || pass_len < 8)
+			goto fail;
+		conf->passphrase = os_zalloc(pass_len + 1);
+		if (!conf->passphrase ||
+		    hexstr2bin(pos, (u8 *) conf->passphrase, pass_len) < 0)
+			goto fail;
+	}
+
+	pos = os_strstr(cmd, " psk=");
+	if (pos) {
+		pos += 5;
+		if (hexstr2bin(pos, conf->psk, PMK_LEN) < 0)
+			goto fail;
+		conf->psk_set = 1;
+	}
+
+	pos = os_strstr(cmd, " group_id=");
+	if (pos) {
+		size_t group_id_len;
+
+		pos += 10;
+		end = os_strchr(pos, ' ');
+		group_id_len = end ? (size_t) (end - pos) : os_strlen(pos);
+		conf->group_id = os_malloc(group_id_len + 1);
+		if (!conf->group_id)
+			goto fail;
+		os_memcpy(conf->group_id, pos, group_id_len);
+		conf->group_id[group_id_len] = '\0';
+	}
+
+	pos = os_strstr(cmd, " expiry=");
+	if (pos) {
+		long int val;
+
+		pos += 8;
+		val = strtol(pos, NULL, 0);
+		if (val <= 0)
+			goto fail;
+		conf->netaccesskey_expiry = val;
+	}
+
+	if (!dpp_configuration_valid(conf))
+		goto fail;
+
+	if (idx == 0) {
+		auth->conf_sta = conf_sta;
+		auth->conf_ap = conf_ap;
+	} else if (idx == 1) {
+		auth->conf2_sta = conf_sta;
+		auth->conf2_ap = conf_ap;
+	} else {
+		goto fail;
+	}
+	return 0;
+
+fail:
+	dpp_configuration_free(conf_sta);
+	dpp_configuration_free(conf_ap);
+	return -1;
+}
+
+
+static int dpp_configuration_parse(struct dpp_authentication *auth,
+				   const char *cmd)
+{
+	const char *pos;
+	char *tmp;
+	size_t len;
+	int res;
+
+	pos = os_strstr(cmd, " @CONF-OBJ-SEP@ ");
+	if (!pos)
+		return dpp_configuration_parse_helper(auth, cmd, 0);
+
+	len = pos - cmd;
+	tmp = os_malloc(len + 1);
+	if (!tmp)
+		goto fail;
+	os_memcpy(tmp, cmd, len);
+	tmp[len] = '\0';
+	res = dpp_configuration_parse_helper(auth, cmd, 0);
+	str_clear_free(tmp);
+	if (res)
+		goto fail;
+	res = dpp_configuration_parse_helper(auth, cmd + len, 1);
+	if (res)
+		goto fail;
+	return 0;
+fail:
+	dpp_configuration_free(auth->conf_sta);
+	dpp_configuration_free(auth->conf2_sta);
+	dpp_configuration_free(auth->conf_ap);
+	dpp_configuration_free(auth->conf2_ap);
+	return -1;
+}
+
+
+static struct dpp_configurator *
+dpp_configurator_get_id(struct dpp_global *dpp, unsigned int id)
+{
+	struct dpp_configurator *conf;
+
+	if (!dpp)
+		return NULL;
+
+	dl_list_for_each(conf, &dpp->configurator,
+			 struct dpp_configurator, list) {
+		if (conf->id == id)
+			return conf;
+	}
+	return NULL;
+}
+
+
+int dpp_set_configurator(struct dpp_global *dpp, void *msg_ctx,
+			 struct dpp_authentication *auth,
+			 const char *cmd)
+{
+	const char *pos;
+	char *tmp = NULL;
+	int ret = -1;
+
+	if (!cmd)
+		return 0;
+	if (cmd[0] != ' ') {
+		size_t len;
+
+		len = os_strlen(cmd);
+		tmp = os_malloc(len + 2);
+		if (!tmp)
+			goto fail;
+		tmp[0] = ' ';
+		os_memcpy(tmp + 1, cmd, len + 1);
+		cmd = tmp;
+	}
+
+	wpa_printf(MSG_DEBUG, "DPP: Set configurator parameters: %s", cmd);
+
+	pos = os_strstr(cmd, " configurator=");
+	if (pos) {
+		pos += 14;
+		auth->conf = dpp_configurator_get_id(dpp, atoi(pos));
+		if (!auth->conf) {
+			wpa_printf(MSG_INFO,
+				   "DPP: Could not find the specified configurator");
+			goto fail;
+		}
+	}
+
+	pos = os_strstr(cmd, " conn_status=");
+	if (pos) {
+		pos += 13;
+		auth->send_conn_status = atoi(pos);
+	}
+
+	pos = os_strstr(cmd, " akm_use_selector=");
+	if (pos) {
+		pos += 18;
+		auth->akm_use_selector = atoi(pos);
+	}
+
+	if (dpp_configuration_parse(auth, cmd) < 0) {
+		wpa_msg(msg_ctx, MSG_INFO,
+			"DPP: Failed to set configurator parameters");
+		goto fail;
+	}
+	ret = 0;
+fail:
+	os_free(tmp);
+	return ret;
+}
+
+
+static void dpp_free_asymmetric_key(struct dpp_asymmetric_key *key)
+{
+	while (key) {
+		struct dpp_asymmetric_key *next = key->next;
+
+		EVP_PKEY_free(key->csign);
+		str_clear_free(key->config_template);
+		str_clear_free(key->connector_template);
+		os_free(key);
+		key = next;
+	}
+}
+
+
 void dpp_auth_deinit(struct dpp_authentication *auth)
 {
+	unsigned int i;
+
 	if (!auth)
 		return;
 	dpp_configuration_free(auth->conf_ap);
+	dpp_configuration_free(auth->conf2_ap);
 	dpp_configuration_free(auth->conf_sta);
+	dpp_configuration_free(auth->conf2_sta);
 	EVP_PKEY_free(auth->own_protocol_key);
 	EVP_PKEY_free(auth->peer_protocol_key);
 	wpabuf_free(auth->req_msg);
 	wpabuf_free(auth->resp_msg);
 	wpabuf_free(auth->conf_req);
-	os_free(auth->connector);
+	for (i = 0; i < auth->num_conf_obj; i++) {
+		struct dpp_config_obj *conf = &auth->conf_obj[i];
+
+		os_free(conf->connector);
+		wpabuf_free(conf->c_sign_key);
+	}
+	dpp_free_asymmetric_key(auth->conf_key_pkg);
 	wpabuf_free(auth->net_access_key);
-	wpabuf_free(auth->c_sign_key);
 	dpp_bootstrap_info_free(auth->tmp_own_bi);
 #ifdef CONFIG_TESTING_OPTIONS
 	os_free(auth->config_obj_override);
@@ -4027,7 +4786,6 @@ dpp_build_conf_start(struct dpp_authentication *auth,
 		     struct dpp_configuration *conf, size_t tailroom)
 {
 	struct wpabuf *buf;
-	char ssid[6 * sizeof(conf->ssid) + 1];
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (auth->discovery_override)
@@ -4037,21 +4795,35 @@ dpp_build_conf_start(struct dpp_authentication *auth,
 	buf = wpabuf_alloc(200 + tailroom);
 	if (!buf)
 		return NULL;
-	wpabuf_put_str(buf, "{\"wi-fi_tech\":\"infra\",\"discovery\":");
+	json_start_object(buf, NULL);
+	json_add_string(buf, "wi-fi_tech", "infra");
+	json_value_sep(buf);
 #ifdef CONFIG_TESTING_OPTIONS
 	if (auth->discovery_override) {
 		wpa_printf(MSG_DEBUG, "DPP: TESTING - discovery override: '%s'",
 			   auth->discovery_override);
+		wpabuf_put_str(buf, "\"discovery\":");
 		wpabuf_put_str(buf, auth->discovery_override);
-		wpabuf_put_u8(buf, ',');
+		json_value_sep(buf);
 		return buf;
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
-	wpabuf_put_str(buf, "{\"ssid\":\"");
-	json_escape_string(ssid, sizeof(ssid),
-			   (const char *) conf->ssid, conf->ssid_len);
-	wpabuf_put_str(buf, ssid);
-	wpabuf_put_str(buf, "\"},");
+	json_start_object(buf, "discovery");
+	if (((!conf->ssid_charset || auth->peer_version < 2) &&
+	     json_add_string_escape(buf, "ssid", conf->ssid,
+				    conf->ssid_len) < 0) ||
+	    ((conf->ssid_charset && auth->peer_version >= 2) &&
+	     json_add_base64url(buf, "ssid64", conf->ssid,
+				conf->ssid_len) < 0)) {
+		wpabuf_free(buf);
+		return NULL;
+	}
+	if (conf->ssid_charset > 0) {
+		json_value_sep(buf);
+		json_add_int(buf, "ssid_charset", conf->ssid_charset);
+	}
+	json_end_object(buf);
+	json_value_sep(buf);
 
 	return buf;
 }
@@ -4062,50 +4834,77 @@ static int dpp_build_jwk(struct wpabuf *buf, const char *name, EVP_PKEY *key,
 {
 	struct wpabuf *pub;
 	const u8 *pos;
-	char *x = NULL, *y = NULL;
 	int ret = -1;
 
 	pub = dpp_get_pubkey_point(key, 0);
 	if (!pub)
 		goto fail;
-	pos = wpabuf_head(pub);
-	x = (char *) base64_url_encode(pos, curve->prime_len, NULL, 0);
-	pos += curve->prime_len;
-	y = (char *) base64_url_encode(pos, curve->prime_len, NULL, 0);
-	if (!x || !y)
-		goto fail;
 
-	wpabuf_put_str(buf, "\"");
-	wpabuf_put_str(buf, name);
-	wpabuf_put_str(buf, "\":{\"kty\":\"EC\",\"crv\":\"");
-	wpabuf_put_str(buf, curve->jwk_crv);
-	wpabuf_put_str(buf, "\",\"x\":\"");
-	wpabuf_put_str(buf, x);
-	wpabuf_put_str(buf, "\",\"y\":\"");
-	wpabuf_put_str(buf, y);
+	json_start_object(buf, name);
+	json_add_string(buf, "kty", "EC");
+	json_value_sep(buf);
+	json_add_string(buf, "crv", curve->jwk_crv);
+	json_value_sep(buf);
+	pos = wpabuf_head(pub);
+	if (json_add_base64url(buf, "x", pos, curve->prime_len) < 0)
+		goto fail;
+	json_value_sep(buf);
+	pos += curve->prime_len;
+	if (json_add_base64url(buf, "y", pos, curve->prime_len) < 0)
+		goto fail;
 	if (kid) {
-		wpabuf_put_str(buf, "\",\"kid\":\"");
-		wpabuf_put_str(buf, kid);
+		json_value_sep(buf);
+		json_add_string(buf, "kid", kid);
 	}
-	wpabuf_put_str(buf, "\"}");
+	json_end_object(buf);
 	ret = 0;
 fail:
 	wpabuf_free(pub);
-	os_free(x);
-	os_free(y);
 	return ret;
 }
 
 
+static void dpp_build_legacy_cred_params(struct wpabuf *buf,
+					 struct dpp_configuration *conf)
+{
+	if (conf->passphrase && os_strlen(conf->passphrase) < 64) {
+		json_add_string_escape(buf, "pass", conf->passphrase,
+				       os_strlen(conf->passphrase));
+	} else if (conf->psk_set) {
+		char psk[2 * sizeof(conf->psk) + 1];
+
+		wpa_snprintf_hex(psk, sizeof(psk),
+				 conf->psk, sizeof(conf->psk));
+		json_add_string(buf, "psk_hex", psk);
+		forced_memzero(psk, sizeof(psk));
+	}
+}
+
+
+static const char * dpp_netrole_str(enum dpp_netrole netrole)
+{
+	switch (netrole) {
+	case DPP_NETROLE_STA:
+		return "sta";
+	case DPP_NETROLE_AP:
+		return "ap";
+	case DPP_NETROLE_CONFIGURATOR:
+		return "configurator";
+	default:
+		return "??";
+	}
+}
+
+
 static struct wpabuf *
-dpp_build_conf_obj_dpp(struct dpp_authentication *auth, int ap,
+dpp_build_conf_obj_dpp(struct dpp_authentication *auth,
 		       struct dpp_configuration *conf)
 {
 	struct wpabuf *buf = NULL;
 	char *signed1 = NULL, *signed2 = NULL, *signed3 = NULL;
 	size_t tailroom;
 	const struct dpp_curve_params *curve;
-	char jws_prot_hdr[100];
+	struct wpabuf *jws_prot_hdr;
 	size_t signed1_len, signed2_len, signed3_len;
 	struct wpabuf *dppcon = NULL;
 	unsigned char *signature = NULL;
@@ -4117,6 +4916,9 @@ dpp_build_conf_obj_dpp(struct dpp_authentication *auth, int ap,
 	const EVP_MD *sign_md;
 	const BIGNUM *r, *s;
 	size_t extra_len = 1000;
+	int incl_legacy;
+	enum dpp_akm akm;
+	const char *akm_str;
 
 	if (!auth->conf) {
 		wpa_printf(MSG_INFO,
@@ -4133,6 +4935,13 @@ dpp_build_conf_obj_dpp(struct dpp_authentication *auth, int ap,
 	} else {
 		wpa_printf(MSG_DEBUG, "DPP: Unknown signature algorithm");
 		goto fail;
+	}
+
+	akm = conf->akm;
+	if (dpp_akm_ver2(akm) && auth->peer_version < 2) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Convert DPP+legacy credential to DPP-only for peer that does not support version 2");
+		akm = DPP_AKM_DPP;
 	}
 
 #ifdef CONFIG_TESTING_OPTIONS
@@ -4156,14 +4965,21 @@ dpp_build_conf_obj_dpp(struct dpp_authentication *auth, int ap,
 				   auth->groups_override);
 			wpabuf_put_str(dppcon, "\"groups\":");
 			wpabuf_put_str(dppcon, auth->groups_override);
-			wpabuf_put_u8(dppcon, ',');
+			json_value_sep(dppcon);
 		}
 		goto skip_groups;
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
-	wpabuf_printf(dppcon, "{\"groups\":[{\"groupId\":\"%s\",",
-		      conf->group_id ? conf->group_id : "*");
-	wpabuf_printf(dppcon, "\"netRole\":\"%s\"}],", ap ? "ap" : "sta");
+	json_start_object(dppcon, NULL);
+	json_start_array(dppcon, "groups");
+	json_start_object(dppcon, NULL);
+	json_add_string(dppcon, "groupId",
+			conf->group_id ? conf->group_id : "*");
+	json_value_sep(dppcon);
+	json_add_string(dppcon, "netRole", dpp_netrole_str(conf->netrole));
+	json_end_object(dppcon);
+	json_end_array(dppcon);
+	json_value_sep(dppcon);
 #ifdef CONFIG_TESTING_OPTIONS
 skip_groups:
 #endif /* CONFIG_TESTING_OPTIONS */
@@ -4174,30 +4990,40 @@ skip_groups:
 	}
 	if (conf->netaccesskey_expiry) {
 		struct os_tm tm;
+		char expiry[30];
 
 		if (os_gmtime(conf->netaccesskey_expiry, &tm) < 0) {
 			wpa_printf(MSG_DEBUG,
 				   "DPP: Failed to generate expiry string");
 			goto fail;
 		}
-		wpabuf_printf(dppcon,
-			      ",\"expiry\":\"%04u-%02u-%02uT%02u:%02u:%02uZ\"",
-			      tm.year, tm.month, tm.day,
-			      tm.hour, tm.min, tm.sec);
+		os_snprintf(expiry, sizeof(expiry),
+			    "%04u-%02u-%02uT%02u:%02u:%02uZ",
+			    tm.year, tm.month, tm.day,
+			    tm.hour, tm.min, tm.sec);
+		json_value_sep(dppcon);
+		json_add_string(dppcon, "expiry", expiry);
 	}
-	wpabuf_put_u8(dppcon, '}');
+	json_end_object(dppcon);
 	wpa_printf(MSG_DEBUG, "DPP: dppCon: %s",
 		   (const char *) wpabuf_head(dppcon));
 
-	os_snprintf(jws_prot_hdr, sizeof(jws_prot_hdr),
-		    "{\"typ\":\"dppCon\",\"kid\":\"%s\",\"alg\":\"%s\"}",
-		    auth->conf->kid, curve->jws_alg);
-	signed1 = (char *) base64_url_encode((unsigned char *) jws_prot_hdr,
-					     os_strlen(jws_prot_hdr),
-					     &signed1_len, 0);
-	signed2 = (char *) base64_url_encode(wpabuf_head(dppcon),
-					     wpabuf_len(dppcon),
-					     &signed2_len, 0);
+	jws_prot_hdr = wpabuf_alloc(100);
+	if (!jws_prot_hdr)
+		goto fail;
+	json_start_object(jws_prot_hdr, NULL);
+	json_add_string(jws_prot_hdr, "typ", "dppCon");
+	json_value_sep(jws_prot_hdr);
+	json_add_string(jws_prot_hdr, "kid", auth->conf->kid);
+	json_value_sep(jws_prot_hdr);
+	json_add_string(jws_prot_hdr, "alg", curve->jws_alg);
+	json_end_object(jws_prot_hdr);
+	signed1 = base64_url_encode(wpabuf_head(jws_prot_hdr),
+				    wpabuf_len(jws_prot_hdr),
+				    &signed1_len);
+	wpabuf_free(jws_prot_hdr);
+	signed2 = base64_url_encode(wpabuf_head(dppcon), wpabuf_len(dppcon),
+				    &signed2_len);
 	if (!signed1 || !signed2)
 		goto fail;
 
@@ -4247,32 +5073,47 @@ skip_groups:
 	signature_len = 2 * curve->prime_len;
 	wpa_hexdump(MSG_DEBUG, "DPP: signedConnector ECDSA signature (raw r,s)",
 		    signature, signature_len);
-	signed3 = (char *) base64_url_encode(signature, signature_len,
-					     &signed3_len, 0);
+	signed3 = base64_url_encode(signature, signature_len, &signed3_len);
 	if (!signed3)
 		goto fail;
 
+	incl_legacy = dpp_akm_psk(akm) || dpp_akm_sae(akm);
 	tailroom = 1000;
 	tailroom += 2 * curve->prime_len * 4 / 3 + os_strlen(auth->conf->kid);
 	tailroom += signed1_len + signed2_len + signed3_len;
+	if (incl_legacy)
+		tailroom += 1000;
 	buf = dpp_build_conf_start(auth, conf, tailroom);
 	if (!buf)
 		goto fail;
 
-	wpabuf_put_str(buf, "\"cred\":{\"akm\":\"dpp\",\"signedConnector\":\"");
+	if (auth->akm_use_selector && dpp_akm_ver2(akm))
+		akm_str = dpp_akm_selector_str(akm);
+	else
+		akm_str = dpp_akm_str(akm);
+	json_start_object(buf, "cred");
+	json_add_string(buf, "akm", akm_str);
+	json_value_sep(buf);
+	if (incl_legacy) {
+		dpp_build_legacy_cred_params(buf, conf);
+		json_value_sep(buf);
+	}
+	wpabuf_put_str(buf, "\"signedConnector\":\"");
 	wpabuf_put_str(buf, signed1);
 	wpabuf_put_u8(buf, '.');
 	wpabuf_put_str(buf, signed2);
 	wpabuf_put_u8(buf, '.');
 	wpabuf_put_str(buf, signed3);
-	wpabuf_put_str(buf, "\",");
+	wpabuf_put_str(buf, "\"");
+	json_value_sep(buf);
 	if (dpp_build_jwk(buf, "csign", auth->conf->csign, auth->conf->kid,
 			  curve) < 0) {
 		wpa_printf(MSG_DEBUG, "DPP: Failed to build csign JWK");
 		goto fail;
 	}
 
-	wpabuf_put_str(buf, "}}");
+	json_end_object(buf);
+	json_end_object(buf);
 
 	wpa_hexdump_ascii_key(MSG_DEBUG, "DPP: Configuration Object",
 			      wpabuf_head(buf), wpabuf_len(buf));
@@ -4295,39 +5136,26 @@ fail:
 
 
 static struct wpabuf *
-dpp_build_conf_obj_legacy(struct dpp_authentication *auth, int ap,
+dpp_build_conf_obj_legacy(struct dpp_authentication *auth,
 			  struct dpp_configuration *conf)
 {
 	struct wpabuf *buf;
+	const char *akm_str;
 
 	buf = dpp_build_conf_start(auth, conf, 1000);
 	if (!buf)
 		return NULL;
 
-	wpabuf_printf(buf, "\"cred\":{\"akm\":\"%s\",", dpp_akm_str(conf->akm));
-	if (conf->passphrase) {
-		char pass[63 * 6 + 1];
-
-		if (os_strlen(conf->passphrase) > 63) {
-			wpabuf_free(buf);
-			return NULL;
-		}
-
-		json_escape_string(pass, sizeof(pass), conf->passphrase,
-				   os_strlen(conf->passphrase));
-		wpabuf_put_str(buf, "\"pass\":\"");
-		wpabuf_put_str(buf, pass);
-		wpabuf_put_str(buf, "\"");
-	} else {
-		char psk[2 * sizeof(conf->psk) + 1];
-
-		wpa_snprintf_hex(psk, sizeof(psk),
-				 conf->psk, sizeof(conf->psk));
-		wpabuf_put_str(buf, "\"psk_hex\":\"");
-		wpabuf_put_str(buf, psk);
-		wpabuf_put_str(buf, "\"");
-	}
-	wpabuf_put_str(buf, "}}");
+	if (auth->akm_use_selector && dpp_akm_ver2(conf->akm))
+		akm_str = dpp_akm_selector_str(conf->akm);
+	else
+		akm_str = dpp_akm_str(conf->akm);
+	json_start_object(buf, "cred");
+	json_add_string(buf, "akm", akm_str);
+	json_value_sep(buf);
+	dpp_build_legacy_cred_params(buf, conf);
+	json_end_object(buf);
+	json_end_object(buf);
 
 	wpa_hexdump_ascii_key(MSG_DEBUG, "DPP: Configuration Object (legacy)",
 			      wpabuf_head(buf), wpabuf_len(buf));
@@ -4337,37 +5165,534 @@ dpp_build_conf_obj_legacy(struct dpp_authentication *auth, int ap,
 
 
 static struct wpabuf *
-dpp_build_conf_obj(struct dpp_authentication *auth, int ap)
+dpp_build_conf_obj(struct dpp_authentication *auth, enum dpp_netrole netrole,
+		   int idx)
 {
-	struct dpp_configuration *conf;
+	struct dpp_configuration *conf = NULL;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (auth->config_obj_override) {
+		if (idx != 0)
+			return NULL;
 		wpa_printf(MSG_DEBUG, "DPP: Testing - Config Object override");
 		return wpabuf_alloc_copy(auth->config_obj_override,
 					 os_strlen(auth->config_obj_override));
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	conf = ap ? auth->conf_ap : auth->conf_sta;
+	if (idx == 0) {
+		if (netrole == DPP_NETROLE_STA)
+			conf = auth->conf_sta;
+		else if (netrole == DPP_NETROLE_AP)
+			conf = auth->conf_ap;
+	} else if (idx == 1) {
+		if (netrole == DPP_NETROLE_STA)
+			conf = auth->conf2_sta;
+		else if (netrole == DPP_NETROLE_AP)
+			conf = auth->conf2_ap;
+	}
 	if (!conf) {
-		wpa_printf(MSG_DEBUG,
-			   "DPP: No configuration available for Enrollee(%s) - reject configuration request",
-			   ap ? "ap" : "sta");
+		if (idx == 0)
+			wpa_printf(MSG_DEBUG,
+				   "DPP: No configuration available for Enrollee(%s) - reject configuration request",
+				   dpp_netrole_str(netrole));
 		return NULL;
 	}
 
-	if (conf->akm == DPP_AKM_DPP)
-		return dpp_build_conf_obj_dpp(auth, ap, conf);
-	return dpp_build_conf_obj_legacy(auth, ap, conf);
+	if (dpp_akm_dpp(conf->akm))
+		return dpp_build_conf_obj_dpp(auth, conf);
+	return dpp_build_conf_obj_legacy(auth, conf);
+}
+
+
+#ifdef CONFIG_DPP2
+
+static struct wpabuf * dpp_build_conf_params(void)
+{
+	struct wpabuf *buf;
+	size_t len;
+	/* TODO: proper template values */
+	const char *conf_template = "{\"wi-fi_tech\":\"infra\",\"discovery\":{\"ssid\":\"test\"},\"cred\":{\"akm\":\"dpp\"}}";
+	const char *connector_template = NULL;
+
+	len = 100 + os_strlen(conf_template);
+	if (connector_template)
+		len += os_strlen(connector_template);
+	buf = wpabuf_alloc(len);
+	if (!buf)
+		return NULL;
+
+	/*
+	 * DPPConfigurationParameters ::= SEQUENCE {
+	 *    configurationTemplate	UTF8String,
+	 *    connectorTemplate		UTF8String OPTIONAL}
+	 */
+
+	asn1_put_utf8string(buf, conf_template);
+	if (connector_template)
+		asn1_put_utf8string(buf, conf_template);
+	return asn1_encaps(buf, ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE);
+}
+
+
+static struct wpabuf * dpp_build_attribute(void)
+{
+	struct wpabuf *conf_params, *attr;
+
+	/*
+	 * aa-DPPConfigurationParameters ATTRIBUTE ::=
+	 * { TYPE DPPConfigurationParameters IDENTIFIED BY id-DPPConfigParams }
+	 *
+	 * Attribute ::= SEQUENCE {
+	 *    type OBJECT IDENTIFIER,
+	 *    values SET SIZE(1..MAX) OF Type
+	 */
+	conf_params = dpp_build_conf_params();
+	conf_params = asn1_encaps(conf_params, ASN1_CLASS_UNIVERSAL,
+				  ASN1_TAG_SET);
+	if (!conf_params)
+		return NULL;
+
+	attr = wpabuf_alloc(100 + wpabuf_len(conf_params));
+	if (!attr) {
+		wpabuf_clear_free(conf_params);
+		return NULL;
+	}
+
+	asn1_put_oid(attr, &asn1_dpp_config_params_oid);
+	wpabuf_put_buf(attr, conf_params);
+	wpabuf_clear_free(conf_params);
+
+	return asn1_encaps(attr, ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE);
+}
+
+
+static struct wpabuf * dpp_build_key_alg(const struct dpp_curve_params *curve)
+{
+	const struct asn1_oid *oid;
+	struct wpabuf *params, *res;
+
+	switch (curve->ike_group) {
+	case 19:
+		oid = &asn1_prime256v1_oid;
+		break;
+	case 20:
+		oid = &asn1_secp384r1_oid;
+		break;
+	case 21:
+		oid = &asn1_secp521r1_oid;
+		break;
+	case 28:
+		oid = &asn1_brainpoolP256r1_oid;
+		break;
+	case 29:
+		oid = &asn1_brainpoolP384r1_oid;
+		break;
+	case 30:
+		oid = &asn1_brainpoolP512r1_oid;
+		break;
+	default:
+		return NULL;
+	}
+
+	params = wpabuf_alloc(20);
+	if (!params)
+		return NULL;
+	asn1_put_oid(params, oid); /* namedCurve */
+
+	res = asn1_build_alg_id(&asn1_ec_public_key_oid, params);
+	wpabuf_free(params);
+	return res;
+}
+
+
+static struct wpabuf * dpp_build_key_pkg(struct dpp_authentication *auth)
+{
+	struct wpabuf *key = NULL, *attr, *alg, *priv_key = NULL;
+	EC_KEY *eckey;
+	unsigned char *der = NULL;
+	int der_len;
+
+	eckey = EVP_PKEY_get0_EC_KEY(auth->conf->csign);
+	if (!eckey)
+		return NULL;
+
+	EC_KEY_set_enc_flags(eckey, EC_PKEY_NO_PUBKEY);
+	der_len = i2d_ECPrivateKey(eckey, &der);
+	if (der_len > 0)
+		priv_key = wpabuf_alloc_copy(der, der_len);
+	OPENSSL_free(der);
+
+	alg = dpp_build_key_alg(auth->conf->curve);
+
+	/* Attributes ::= SET OF Attribute { { OneAsymmetricKeyAttributes } } */
+	attr = dpp_build_attribute();
+	attr = asn1_encaps(attr, ASN1_CLASS_UNIVERSAL, ASN1_TAG_SET);
+	if (!priv_key || !attr || !alg)
+		goto fail;
+
+	/*
+	 * OneAsymmetricKey ::= SEQUENCE {
+	 *    version			Version,
+	 *    privateKeyAlgorithm	PrivateKeyAlgorithmIdentifier,
+	 *    privateKey		PrivateKey,
+	 *    attributes		[0] Attributes OPTIONAL,
+	 *    ...,
+	 *    [[2: publicKey		[1] BIT STRING OPTIONAL ]],
+	 *    ...
+	 * }
+	 */
+
+	key = wpabuf_alloc(100 + wpabuf_len(alg) + wpabuf_len(priv_key) +
+			   wpabuf_len(attr));
+	if (!key)
+		goto fail;
+
+	asn1_put_integer(key, 1); /* version = v2(1) */
+
+	/* PrivateKeyAlgorithmIdentifier */
+	wpabuf_put_buf(key, alg);
+
+	/* PrivateKey ::= OCTET STRING */
+	asn1_put_octet_string(key, priv_key);
+
+	/* [0] Attributes OPTIONAL */
+	asn1_put_hdr(key, ASN1_CLASS_CONTEXT_SPECIFIC, 1, 0, wpabuf_len(attr));
+	wpabuf_put_buf(key, attr);
+
+fail:
+	wpabuf_clear_free(attr);
+	wpabuf_clear_free(priv_key);
+	wpabuf_free(alg);
+
+	/*
+	 * DPPAsymmetricKeyPackage ::= AsymmetricKeyPackage
+	 *
+	 * AsymmetricKeyPackage ::= SEQUENCE SIZE (1..MAX) OF OneAsymmetricKey
+	 *
+	 * OneAsymmetricKey ::= SEQUENCE
+	 */
+	return asn1_encaps(asn1_encaps(key,
+				       ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE),
+			   ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE);
+	return key;
+}
+
+
+static struct wpabuf * dpp_build_pbkdf2_alg_id(const struct wpabuf *salt,
+					       size_t hash_len)
+{
+	struct wpabuf *params = NULL, *buf = NULL, *prf = NULL;
+	const struct asn1_oid *oid;
+
+	/*
+	 * PBKDF2-params ::= SEQUENCE {
+	 *    salt CHOICE {
+	 *       specified OCTET STRING,
+	 *       otherSource AlgorithmIdentifier}
+	 *    iterationCount INTEGER (1..MAX),
+	 *    keyLength INTEGER (1..MAX),
+	 *    prf AlgorithmIdentifier}
+	 *
+	 * salt is an 64 octet value, iterationCount is 1000, keyLength is based
+	 * on Configurator signing key length, prf is
+	 * id-hmacWithSHA{256,384,512} based on Configurator signing key.
+	 */
+
+	if (hash_len == 32)
+		oid = &asn1_pbkdf2_hmac_sha256_oid;
+	else if (hash_len == 48)
+		oid = &asn1_pbkdf2_hmac_sha384_oid;
+	else if (hash_len == 64)
+		oid = &asn1_pbkdf2_hmac_sha512_oid;
+	else
+		goto fail;
+	prf = asn1_build_alg_id(oid, NULL);
+	if (!prf)
+		goto fail;
+	params = wpabuf_alloc(100 + wpabuf_len(salt) + wpabuf_len(prf));
+	if (!params)
+		goto fail;
+	asn1_put_octet_string(params, salt); /* salt.specified */
+	asn1_put_integer(params, 1000); /* iterationCount */
+	asn1_put_integer(params, hash_len); /* keyLength */
+	wpabuf_put_buf(params, prf);
+	params = asn1_encaps(params, ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE);
+	if (!params)
+		goto fail;
+	buf = asn1_build_alg_id(&asn1_pbkdf2_oid, params);
+fail:
+	wpabuf_free(params);
+	wpabuf_free(prf);
+	return buf;
 }
 
 
 static struct wpabuf *
-dpp_build_conf_resp(struct dpp_authentication *auth, const u8 *e_nonce,
-		    u16 e_nonce_len, int ap)
+dpp_build_pw_recipient_info(struct dpp_authentication *auth, size_t hash_len,
+			    const struct wpabuf *cont_enc_key)
 {
-	struct wpabuf *conf;
+	struct wpabuf *pwri = NULL, *enc_key = NULL, *key_der_alg = NULL,
+		*key_enc_alg = NULL, *salt;
+	u8 kek[DPP_MAX_HASH_LEN];
+	const u8 *key;
+	size_t key_len;
+
+	salt = wpabuf_alloc(64);
+	if (!salt || os_get_random(wpabuf_put(salt, 64), 64) < 0)
+		goto fail;
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: PBKDF2 salt", salt);
+
+	/* TODO: For initial testing, use ke as the key. Replace this with a
+	 * new key once that has been defined. */
+	key = auth->ke;
+	key_len = auth->curve->hash_len;
+	wpa_hexdump_key(MSG_DEBUG, "DPP: PBKDF2 key", key, key_len);
+
+	if (dpp_pbkdf2(hash_len, key, key_len, wpabuf_head(salt), 64, 1000,
+		       kek, hash_len)) {
+		wpa_printf(MSG_DEBUG, "DPP: PBKDF2 failed");
+		goto fail;
+	}
+	wpa_hexdump_key(MSG_DEBUG, "DPP: key-encryption key from PBKDF2",
+			kek, hash_len);
+
+	enc_key = wpabuf_alloc(hash_len + AES_BLOCK_SIZE);
+	if (!enc_key ||
+	    aes_siv_encrypt(kek, hash_len, wpabuf_head(cont_enc_key),
+			    wpabuf_len(cont_enc_key), 0, NULL, NULL,
+			    wpabuf_put(enc_key, hash_len + AES_BLOCK_SIZE)) < 0)
+		goto fail;
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: encryptedKey", enc_key);
+
+	/*
+	 * PasswordRecipientInfo ::= SEQUENCE {
+	 *    version			CMSVersion,
+	 *    keyDerivationAlgorithm [0] KeyDerivationAlgorithmIdentifier OPTIONAL,
+	 *    keyEncryptionAlgorithm	KeyEncryptionAlgorithmIdentifier,
+	 *    encryptedKey		EncryptedKey}
+	 *
+	 * version is 0, keyDerivationAlgorithm is id-PKBDF2, and the
+	 * parameters contains PBKDF2-params SEQUENCE.
+	 */
+
+	key_der_alg = dpp_build_pbkdf2_alg_id(salt, hash_len);
+	key_enc_alg = asn1_build_alg_id(&asn1_aes_siv_cmac_aead_256_oid, NULL);
+	if (!key_der_alg || !key_enc_alg)
+		goto fail;
+	pwri = wpabuf_alloc(100 + wpabuf_len(key_der_alg) +
+			    wpabuf_len(key_enc_alg) + wpabuf_len(enc_key));
+	if (!pwri)
+		goto fail;
+
+	/* version = 0 */
+	asn1_put_integer(pwri, 0);
+
+	/* [0] KeyDerivationAlgorithmIdentifier */
+	asn1_put_hdr(pwri, ASN1_CLASS_CONTEXT_SPECIFIC, 1, 0,
+		     wpabuf_len(key_der_alg));
+	wpabuf_put_buf(pwri, key_der_alg);
+
+	/* KeyEncryptionAlgorithmIdentifier */
+	wpabuf_put_buf(pwri, key_enc_alg);
+
+	/* EncryptedKey ::= OCTET STRING */
+	asn1_put_octet_string(pwri, enc_key);
+
+fail:
+	wpabuf_clear_free(key_der_alg);
+	wpabuf_free(key_enc_alg);
+	wpabuf_free(enc_key);
+	wpabuf_free(salt);
+	forced_memzero(kek, sizeof(kek));
+	return asn1_encaps(pwri, ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE);
+}
+
+
+static struct wpabuf *
+dpp_build_recipient_info(struct dpp_authentication *auth, size_t hash_len,
+			 const struct wpabuf *cont_enc_key)
+{
+	struct wpabuf *pwri;
+
+	/*
+	 * RecipientInfo ::= CHOICE {
+	 *    ktri		KeyTransRecipientInfo,
+	 *    kari	[1]	KeyAgreeRecipientInfo,
+	 *    kekri	[2]	KEKRecipientInfo,
+	 *    pwri	[3]	PasswordRecipientInfo,
+	 *    ori	[4]	OtherRecipientInfo}
+	 *
+	 * Shall always use the pwri CHOICE.
+	 */
+
+	pwri = dpp_build_pw_recipient_info(auth, hash_len, cont_enc_key);
+	return asn1_encaps(pwri, ASN1_CLASS_CONTEXT_SPECIFIC, 3);
+}
+
+
+static struct wpabuf *
+dpp_build_enc_cont_info(struct dpp_authentication *auth, size_t hash_len,
+			const struct wpabuf *cont_enc_key)
+{
+	struct wpabuf *key_pkg, *enc_cont_info = NULL, *enc_cont = NULL,
+		*enc_alg;
+	const struct asn1_oid *oid;
+	size_t enc_cont_len;
+
+	/*
+	 * EncryptedContentInfo ::= SEQUENCE {
+	 *    contentType			ContentType,
+	 *    contentEncryptionAlgorithm  ContentEncryptionAlgorithmIdentifier,
+	 *    encryptedContent	[0] IMPLICIT	EncryptedContent OPTIONAL}
+	 */
+
+	if (hash_len == 32)
+		oid = &asn1_aes_siv_cmac_aead_256_oid;
+	else if (hash_len == 48)
+		oid = &asn1_aes_siv_cmac_aead_384_oid;
+	else if (hash_len == 64)
+		oid = &asn1_aes_siv_cmac_aead_512_oid;
+	else
+		return NULL;
+
+	key_pkg = dpp_build_key_pkg(auth);
+	enc_alg = asn1_build_alg_id(oid, NULL);
+	if (!key_pkg || !enc_alg)
+		goto fail;
+
+	wpa_hexdump_buf_key(MSG_MSGDUMP, "DPP: DPPAsymmetricKeyPackage",
+			    key_pkg);
+
+	enc_cont_len = wpabuf_len(key_pkg) + AES_BLOCK_SIZE;
+	enc_cont = wpabuf_alloc(enc_cont_len);
+	if (!enc_cont ||
+	    aes_siv_encrypt(wpabuf_head(cont_enc_key), wpabuf_len(cont_enc_key),
+			    wpabuf_head(key_pkg), wpabuf_len(key_pkg),
+			    0, NULL, NULL,
+			    wpabuf_put(enc_cont, enc_cont_len)) < 0)
+		goto fail;
+
+	enc_cont_info = wpabuf_alloc(100 + wpabuf_len(enc_alg) +
+				     wpabuf_len(enc_cont));
+	if (!enc_cont_info)
+		goto fail;
+
+	/* ContentType ::= OBJECT IDENTIFIER */
+	asn1_put_oid(enc_cont_info, &asn1_dpp_asymmetric_key_package_oid);
+
+	/* ContentEncryptionAlgorithmIdentifier ::= AlgorithmIdentifier */
+	wpabuf_put_buf(enc_cont_info, enc_alg);
+
+	/* encryptedContent [0] IMPLICIT EncryptedContent OPTIONAL
+	 * EncryptedContent ::= OCTET STRING */
+	asn1_put_hdr(enc_cont_info, ASN1_CLASS_CONTEXT_SPECIFIC, 0, 0,
+		     wpabuf_len(enc_cont));
+	wpabuf_put_buf(enc_cont_info, enc_cont);
+
+fail:
+	wpabuf_clear_free(key_pkg);
+	wpabuf_free(enc_cont);
+	wpabuf_free(enc_alg);
+	return enc_cont_info;
+}
+
+
+static struct wpabuf * dpp_gen_random(size_t len)
+{
+	struct wpabuf *key;
+
+	key = wpabuf_alloc(len);
+	if (!key || os_get_random(wpabuf_put(key, len), len) < 0) {
+		wpabuf_free(key);
+		key = NULL;
+	}
+	wpa_hexdump_buf_key(MSG_DEBUG, "DPP: content-encryption key", key);
+	return key;
+}
+
+
+static struct wpabuf * dpp_build_enveloped_data(struct dpp_authentication *auth)
+{
+	struct wpabuf *env = NULL;
+	struct wpabuf *recipient_info = NULL, *enc_cont_info = NULL;
+	struct wpabuf *cont_enc_key = NULL;
+	size_t hash_len;
+
+	if (!auth->conf) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No Configurator instance selected for the session - cannot build DPPEnvelopedData");
+		return NULL;
+	}
+
+	if (!auth->provision_configurator) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Configurator provisioning not allowed");
+		return NULL;
+	}
+
+	wpa_printf(MSG_DEBUG, "DPP: Building DPPEnvelopedData");
+
+	hash_len = auth->conf->curve->hash_len;
+	cont_enc_key = dpp_gen_random(hash_len);
+	if (!cont_enc_key)
+		goto fail;
+	recipient_info = dpp_build_recipient_info(auth, hash_len, cont_enc_key);
+	enc_cont_info = dpp_build_enc_cont_info(auth, hash_len, cont_enc_key);
+	if (!recipient_info || !enc_cont_info)
+		goto fail;
+
+	env = wpabuf_alloc(wpabuf_len(recipient_info) +
+			   wpabuf_len(enc_cont_info) +
+			   100);
+	if (!env)
+		goto fail;
+
+	/*
+	 * DPPEnvelopedData ::= EnvelopedData
+	 *
+	 * EnvelopedData ::= SEQUENCE {
+	 *    version			CMSVersion,
+	 *    originatorInfo	[0]	IMPLICIT OriginatorInfo OPTIONAL,
+	 *    recipientInfos		RecipientInfos,
+	 *    encryptedContentInfo	EncryptedContentInfo,
+	 *    unprotectedAttrs  [1] IMPLICIT	UnprotectedAttributes OPTIONAL}
+	 *
+	 * For DPP, version is 3, both originatorInfo and
+	 * unprotectedAttrs are omitted, and recipientInfos contains a single
+	 * RecipientInfo.
+	 */
+
+	/* EnvelopedData.version = 3 */
+	asn1_put_integer(env, 3);
+
+	/* RecipientInfos ::= SET SIZE (1..MAX) OF RecipientInfo */
+	asn1_put_set(env, recipient_info);
+
+	/* EncryptedContentInfo ::= SEQUENCE */
+	asn1_put_sequence(env, enc_cont_info);
+
+	env = asn1_encaps(env, ASN1_CLASS_UNIVERSAL, ASN1_TAG_SEQUENCE);
+	wpa_hexdump_buf(MSG_MSGDUMP, "DPP: DPPEnvelopedData", env);
+out:
+	wpabuf_clear_free(cont_enc_key);
+	wpabuf_clear_free(recipient_info);
+	wpabuf_free(enc_cont_info);
+	return env;
+fail:
+	wpabuf_free(env);
+	env = NULL;
+	goto out;
+}
+
+#endif /* CONFIG_DPP2 */
+
+
+static struct wpabuf *
+dpp_build_conf_resp(struct dpp_authentication *auth, const u8 *e_nonce,
+		    u16 e_nonce_len, enum dpp_netrole netrole)
+{
+	struct wpabuf *conf = NULL, *conf2 = NULL, *env_data = NULL;
 	size_t clear_len, attr_len;
 	struct wpabuf *clear = NULL, *msg = NULL;
 	u8 *wrapped;
@@ -4375,17 +5700,34 @@ dpp_build_conf_resp(struct dpp_authentication *auth, const u8 *e_nonce,
 	size_t len[1];
 	enum dpp_status_error status;
 
-	conf = dpp_build_conf_obj(auth, ap);
-	if (conf) {
-		wpa_hexdump_ascii(MSG_DEBUG, "DPP: configurationObject JSON",
-				  wpabuf_head(conf), wpabuf_len(conf));
+	if (netrole == DPP_NETROLE_CONFIGURATOR) {
+#ifdef CONFIG_DPP2
+		env_data = dpp_build_enveloped_data(auth);
+#endif /* CONFIG_DPP2 */
+	} else {
+		conf = dpp_build_conf_obj(auth, netrole, 0);
+		if (conf) {
+			wpa_hexdump_ascii(MSG_DEBUG,
+					  "DPP: configurationObject JSON",
+					  wpabuf_head(conf), wpabuf_len(conf));
+			conf2 = dpp_build_conf_obj(auth, netrole, 1);
+		}
 	}
-	status = conf ? DPP_STATUS_OK : DPP_STATUS_CONFIGURE_FAILURE;
+	status = (conf || env_data) ? DPP_STATUS_OK :
+		DPP_STATUS_CONFIGURE_FAILURE;
+	auth->conf_resp_status = status;
 
-	/* { E-nonce, configurationObject}ke */
+	/* { E-nonce, configurationObject[, sendConnStatus]}ke */
 	clear_len = 4 + e_nonce_len;
 	if (conf)
 		clear_len += 4 + wpabuf_len(conf);
+	if (conf2)
+		clear_len += 4 + wpabuf_len(conf2);
+	if (env_data)
+		clear_len += 4 + wpabuf_len(env_data);
+	if (auth->peer_version >= 2 && auth->send_conn_status &&
+	    netrole == DPP_NETROLE_STA)
+		clear_len += 4;
 	clear = wpabuf_alloc(clear_len);
 	attr_len = 4 + 1 + 4 + clear_len + AES_BLOCK_SIZE;
 #ifdef CONFIG_TESTING_OPTIONS
@@ -4432,6 +5774,26 @@ skip_e_nonce:
 		wpabuf_put_le16(clear, DPP_ATTR_CONFIG_OBJ);
 		wpabuf_put_le16(clear, wpabuf_len(conf));
 		wpabuf_put_buf(clear, conf);
+	}
+	if (auth->peer_version >= 2 && conf2) {
+		wpabuf_put_le16(clear, DPP_ATTR_CONFIG_OBJ);
+		wpabuf_put_le16(clear, wpabuf_len(conf2));
+		wpabuf_put_buf(clear, conf2);
+	} else if (conf2) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Second Config Object available, but peer does not support more than one");
+	}
+	if (env_data) {
+		wpabuf_put_le16(clear, DPP_ATTR_ENVELOPED_DATA);
+		wpabuf_put_le16(clear, wpabuf_len(env_data));
+		wpabuf_put_buf(clear, env_data);
+	}
+
+	if (auth->peer_version >= 2 && auth->send_conn_status &&
+	    netrole == DPP_NETROLE_STA) {
+		wpa_printf(MSG_DEBUG, "DPP: sendConnStatus");
+		wpabuf_put_le16(clear, DPP_ATTR_SEND_CONN_STATUS);
+		wpabuf_put_le16(clear, 0);
 	}
 
 #ifdef CONFIG_TESTING_OPTIONS
@@ -4480,8 +5842,10 @@ skip_wrapped_data:
 	wpa_hexdump_buf(MSG_DEBUG,
 			"DPP: Configuration Response attributes", msg);
 out:
-	wpabuf_free(conf);
-	wpabuf_free(clear);
+	wpabuf_clear_free(conf);
+	wpabuf_clear_free(conf2);
+	wpabuf_clear_free(env_data);
+	wpabuf_clear_free(clear);
 
 	return msg;
 fail:
@@ -4501,7 +5865,7 @@ dpp_conf_req_rx(struct dpp_authentication *auth, const u8 *attr_start,
 	size_t unwrapped_len = 0;
 	struct wpabuf *resp = NULL;
 	struct json_token *root = NULL, *token;
-	int ap;
+	enum dpp_netrole netrole;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (dpp_test == DPP_TEST_STOP_AT_CONF_REQ) {
@@ -4553,6 +5917,7 @@ dpp_conf_req_rx(struct dpp_authentication *auth, const u8 *attr_start,
 		goto fail;
 	}
 	wpa_hexdump(MSG_DEBUG, "DPP: Enrollee Nonce", e_nonce, e_nonce_len);
+	os_memcpy(auth->e_nonce, e_nonce, e_nonce_len);
 
 	config_attr = dpp_get_attr(unwrapped, unwrapped_len,
 				   DPP_ATTR_CONFIG_ATTR_OBJ,
@@ -4598,9 +5963,11 @@ dpp_conf_req_rx(struct dpp_authentication *auth, const u8 *attr_start,
 	}
 	wpa_printf(MSG_DEBUG, "DPP: netRole = '%s'", token->string);
 	if (os_strcmp(token->string, "sta") == 0) {
-		ap = 0;
+		netrole = DPP_NETROLE_STA;
 	} else if (os_strcmp(token->string, "ap") == 0) {
-		ap = 1;
+		netrole = DPP_NETROLE_AP;
+	} else if (os_strcmp(token->string, "configurator") == 0) {
+		netrole = DPP_NETROLE_CONFIGURATOR;
 	} else {
 		wpa_printf(MSG_DEBUG, "DPP: Unsupported netRole '%s'",
 			   token->string);
@@ -4608,7 +5975,27 @@ dpp_conf_req_rx(struct dpp_authentication *auth, const u8 *attr_start,
 		goto fail;
 	}
 
-	resp = dpp_build_conf_resp(auth, e_nonce, e_nonce_len, ap);
+	token = json_get_member(root, "mudurl");
+	if (token && token->type == JSON_STRING)
+		wpa_printf(MSG_DEBUG, "DPP: mudurl = '%s'", token->string);
+
+	token = json_get_member(root, "bandSupport");
+	if (token && token->type == JSON_ARRAY) {
+		wpa_printf(MSG_DEBUG, "DPP: bandSupport");
+		token = token->child;
+		while (token) {
+			if (token->type != JSON_NUMBER)
+				wpa_printf(MSG_DEBUG,
+					   "DPP: Invalid bandSupport array member type");
+			else
+				wpa_printf(MSG_DEBUG,
+					   "DPP: Supported global operating class: %d",
+					   token->number);
+			token = token->sibling;
+		}
+	}
+
+	resp = dpp_build_conf_resp(auth, e_nonce, e_nonce_len, netrole);
 
 fail:
 	json_free(root);
@@ -4697,7 +6084,7 @@ fail:
 }
 
 
-static int dpp_parse_cred_legacy(struct dpp_authentication *auth,
+static int dpp_parse_cred_legacy(struct dpp_config_obj *conf,
 				 struct json_token *cred)
 {
 	struct json_token *pass, *psk_hex;
@@ -4714,29 +6101,28 @@ static int dpp_parse_cred_legacy(struct dpp_authentication *auth,
 				      pass->string, len);
 		if (len < 8 || len > 63)
 			return -1;
-		os_strlcpy(auth->passphrase, pass->string,
-			   sizeof(auth->passphrase));
+		os_strlcpy(conf->passphrase, pass->string,
+			   sizeof(conf->passphrase));
 	} else if (psk_hex && psk_hex->type == JSON_STRING) {
-		if (auth->akm == DPP_AKM_SAE) {
+		if (dpp_akm_sae(conf->akm) && !dpp_akm_psk(conf->akm)) {
 			wpa_printf(MSG_DEBUG,
 				   "DPP: Unexpected psk_hex with akm=sae");
 			return -1;
 		}
 		if (os_strlen(psk_hex->string) != PMK_LEN * 2 ||
-		    hexstr2bin(psk_hex->string, auth->psk, PMK_LEN) < 0) {
+		    hexstr2bin(psk_hex->string, conf->psk, PMK_LEN) < 0) {
 			wpa_printf(MSG_DEBUG, "DPP: Invalid psk_hex encoding");
 			return -1;
 		}
 		wpa_hexdump_key(MSG_DEBUG, "DPP: Legacy PSK",
-				auth->psk, PMK_LEN);
-		auth->psk_set = 1;
+				conf->psk, PMK_LEN);
+		conf->psk_set = 1;
 	} else {
 		wpa_printf(MSG_DEBUG, "DPP: No pass or psk_hex strings found");
 		return -1;
 	}
 
-	if ((auth->akm == DPP_AKM_SAE || auth->akm == DPP_AKM_PSK_SAE) &&
-	    !auth->passphrase[0]) {
+	if (dpp_akm_sae(conf->akm) && !conf->passphrase[0]) {
 		wpa_printf(MSG_DEBUG, "DPP: No pass for sae found");
 		return -1;
 	}
@@ -4760,7 +6146,7 @@ static EVP_PKEY * dpp_parse_jwk(struct json_token *jwk,
 		goto fail;
 	}
 	if (os_strcmp(token->string, "EC") != 0) {
-		wpa_printf(MSG_DEBUG, "DPP: Unexpected JWK kty '%s",
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected JWK kty '%s'",
 			   token->string);
 		goto fail;
 	}
@@ -4813,6 +6199,7 @@ static EVP_PKEY * dpp_parse_jwk(struct json_token *jwk,
 
 	pkey = dpp_set_pubkey_point_group(group, wpabuf_head(x), wpabuf_head(y),
 					  wpabuf_len(x));
+	EC_GROUP_free(group);
 	*key_curve = curve;
 
 fail:
@@ -4903,6 +6290,7 @@ int dpp_key_expired(const char *timestamp, os_time_t *expiry)
 
 
 static int dpp_parse_connector(struct dpp_authentication *auth,
+			       struct dpp_config_obj *conf,
 			       const unsigned char *payload,
 			       u16 payload_len)
 {
@@ -5030,7 +6418,7 @@ static int dpp_check_pubkey_match(EVP_PKEY *pub, struct wpabuf *r_hash)
 }
 
 
-static void dpp_copy_csign(struct dpp_authentication *auth, EVP_PKEY *csign)
+static void dpp_copy_csign(struct dpp_config_obj *conf, EVP_PKEY *csign)
 {
 	unsigned char *der = NULL;
 	int der_len;
@@ -5038,13 +6426,14 @@ static void dpp_copy_csign(struct dpp_authentication *auth, EVP_PKEY *csign)
 	der_len = i2d_PUBKEY(csign, &der);
 	if (der_len <= 0)
 		return;
-	wpabuf_free(auth->c_sign_key);
-	auth->c_sign_key = wpabuf_alloc_copy(der, der_len);
+	wpabuf_free(conf->c_sign_key);
+	conf->c_sign_key = wpabuf_alloc_copy(der, der_len);
 	OPENSSL_free(der);
 }
 
 
-static void dpp_copy_netaccesskey(struct dpp_authentication *auth)
+static void dpp_copy_netaccesskey(struct dpp_authentication *auth,
+				  struct dpp_config_obj *conf)
 {
 	unsigned char *der = NULL;
 	int der_len;
@@ -5112,8 +6501,7 @@ dpp_process_signed_connector(struct dpp_signed_connector_info *info,
 		ret = DPP_STATUS_INVALID_CONNECTOR;
 		goto fail;
 	}
-	prot_hdr = base64_url_decode((const unsigned char *) pos,
-				     end - pos, &prot_hdr_len);
+	prot_hdr = base64_url_decode(pos, end - pos, &prot_hdr_len);
 	if (!prot_hdr) {
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Failed to base64url decode signedConnector JWS Protected Header");
@@ -5145,8 +6533,7 @@ dpp_process_signed_connector(struct dpp_signed_connector_info *info,
 		goto fail;
 	}
 	signed_end = end - 1;
-	info->payload = base64_url_decode((const unsigned char *) pos,
-					  end - pos, &info->payload_len);
+	info->payload = base64_url_decode(pos, end - pos, &info->payload_len);
 	if (!info->payload) {
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Failed to base64url decode signedConnector JWS Payload");
@@ -5157,8 +6544,7 @@ dpp_process_signed_connector(struct dpp_signed_connector_info *info,
 			  "DPP: signedConnector - JWS Payload",
 			  info->payload, info->payload_len);
 	pos = end + 1;
-	signature = base64_url_decode((const unsigned char *) pos,
-				      os_strlen(pos), &signature_len);
+	signature = base64_url_decode(pos, os_strlen(pos), &signature_len);
 	if (!signature) {
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Failed to base64url decode signedConnector signature");
@@ -5238,6 +6624,7 @@ fail:
 
 
 static int dpp_parse_cred_dpp(struct dpp_authentication *auth,
+			      struct dpp_config_obj *conf,
 			      struct json_token *cred)
 {
 	struct dpp_signed_connector_info info;
@@ -5248,6 +6635,13 @@ static int dpp_parse_cred_dpp(struct dpp_authentication *auth,
 	const char *signed_connector;
 
 	os_memset(&info, 0, sizeof(info));
+
+	if (dpp_akm_psk(conf->akm) || dpp_akm_sae(conf->akm)) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Legacy credential included in Connector credential");
+		if (dpp_parse_cred_legacy(conf, cred) < 0)
+			return -1;
+	}
 
 	wpa_printf(MSG_DEBUG, "DPP: Connector credential");
 
@@ -5284,16 +6678,17 @@ static int dpp_parse_cred_dpp(struct dpp_authentication *auth,
 					 signed_connector) != DPP_STATUS_OK)
 		goto fail;
 
-	if (dpp_parse_connector(auth, info.payload, info.payload_len) < 0) {
+	if (dpp_parse_connector(auth, conf,
+				info.payload, info.payload_len) < 0) {
 		wpa_printf(MSG_DEBUG, "DPP: Failed to parse connector");
 		goto fail;
 	}
 
-	os_free(auth->connector);
-	auth->connector = os_strdup(signed_connector);
+	os_free(conf->connector);
+	conf->connector = os_strdup(signed_connector);
 
-	dpp_copy_csign(auth, csign_pub);
-	dpp_copy_netaccesskey(auth);
+	dpp_copy_csign(conf, csign_pub);
+	dpp_copy_netaccesskey(auth, conf);
 
 	ret = 0;
 fail:
@@ -5314,6 +6709,31 @@ const char * dpp_akm_str(enum dpp_akm akm)
 		return "sae";
 	case DPP_AKM_PSK_SAE:
 		return "psk+sae";
+	case DPP_AKM_SAE_DPP:
+		return "dpp+sae";
+	case DPP_AKM_PSK_SAE_DPP:
+		return "dpp+psk+sae";
+	default:
+		return "??";
+	}
+}
+
+
+const char * dpp_akm_selector_str(enum dpp_akm akm)
+{
+	switch (akm) {
+	case DPP_AKM_DPP:
+		return "506F9A02";
+	case DPP_AKM_PSK:
+		return "000FAC02+000FAC06";
+	case DPP_AKM_SAE:
+		return "000FAC08";
+	case DPP_AKM_PSK_SAE:
+		return "000FAC02+000FAC06+000FAC08";
+	case DPP_AKM_SAE_DPP:
+		return "506F9A02+000FAC08";
+	case DPP_AKM_PSK_SAE_DPP:
+		return "506F9A02+000FAC08+000FAC02+000FAC06";
 	default:
 		return "??";
 	}
@@ -5322,6 +6742,9 @@ const char * dpp_akm_str(enum dpp_akm akm)
 
 static enum dpp_akm dpp_akm_from_str(const char *akm)
 {
+	const char *pos;
+	int dpp = 0, psk = 0, sae = 0;
+
 	if (os_strcmp(akm, "psk") == 0)
 		return DPP_AKM_PSK;
 	if (os_strcmp(akm, "sae") == 0)
@@ -5330,6 +6753,42 @@ static enum dpp_akm dpp_akm_from_str(const char *akm)
 		return DPP_AKM_PSK_SAE;
 	if (os_strcmp(akm, "dpp") == 0)
 		return DPP_AKM_DPP;
+	if (os_strcmp(akm, "dpp+sae") == 0)
+		return DPP_AKM_SAE_DPP;
+	if (os_strcmp(akm, "dpp+psk+sae") == 0)
+		return DPP_AKM_PSK_SAE_DPP;
+
+	pos = akm;
+	while (*pos) {
+		if (os_strlen(pos) < 8)
+			break;
+		if (os_strncasecmp(pos, "506F9A02", 8) == 0)
+			dpp = 1;
+		else if (os_strncasecmp(pos, "000FAC02", 8) == 0)
+			psk = 1;
+		else if (os_strncasecmp(pos, "000FAC06", 8) == 0)
+			psk = 1;
+		else if (os_strncasecmp(pos, "000FAC08", 8) == 0)
+			sae = 1;
+		pos += 8;
+		if (*pos != '+')
+			break;
+		pos++;
+	}
+
+	if (dpp && psk && sae)
+		return DPP_AKM_PSK_SAE_DPP;
+	if (dpp && sae)
+		return DPP_AKM_SAE_DPP;
+	if (dpp)
+		return DPP_AKM_DPP;
+	if (psk && sae)
+		return DPP_AKM_PSK_SAE;
+	if (sae)
+		return DPP_AKM_SAE;
+	if (psk)
+		return DPP_AKM_PSK;
+
 	return DPP_AKM_UNKNOWN;
 }
 
@@ -5339,6 +6798,8 @@ static int dpp_parse_conf_obj(struct dpp_authentication *auth,
 {
 	int ret = -1;
 	struct json_token *root, *token, *discovery, *cred;
+	struct dpp_config_obj *conf;
+	struct wpabuf *ssid64 = NULL;
 
 	root = json_parse((const char *) conf_obj, conf_obj_len);
 	if (!root)
@@ -5366,19 +6827,52 @@ static int dpp_parse_conf_obj(struct dpp_authentication *auth,
 		goto fail;
 	}
 
-	token = json_get_member(discovery, "ssid");
-	if (!token || token->type != JSON_STRING) {
-		dpp_auth_fail(auth, "No discovery::ssid string value found");
+	ssid64 = json_get_member_base64url(discovery, "ssid64");
+	if (ssid64) {
+		wpa_hexdump_ascii(MSG_DEBUG, "DPP: discovery::ssid64",
+				  wpabuf_head(ssid64), wpabuf_len(ssid64));
+		if (wpabuf_len(ssid64) > SSID_MAX_LEN) {
+			dpp_auth_fail(auth, "Too long discovery::ssid64 value");
+			goto fail;
+		}
+	} else {
+		token = json_get_member(discovery, "ssid");
+		if (!token || token->type != JSON_STRING) {
+			dpp_auth_fail(auth,
+				      "No discovery::ssid string value found");
+			goto fail;
+		}
+		wpa_hexdump_ascii(MSG_DEBUG, "DPP: discovery::ssid",
+				  token->string, os_strlen(token->string));
+		if (os_strlen(token->string) > SSID_MAX_LEN) {
+			dpp_auth_fail(auth,
+				      "Too long discovery::ssid string value");
+			goto fail;
+		}
+	}
+
+	if (auth->num_conf_obj == DPP_MAX_CONF_OBJ) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No room for this many Config Objects - ignore this one");
+		ret = 0;
 		goto fail;
 	}
-	wpa_hexdump_ascii(MSG_DEBUG, "DPP: discovery::ssid",
-			  token->string, os_strlen(token->string));
-	if (os_strlen(token->string) > SSID_MAX_LEN) {
-		dpp_auth_fail(auth, "Too long discovery::ssid string value");
-		goto fail;
+	conf = &auth->conf_obj[auth->num_conf_obj++];
+
+	if (ssid64) {
+		conf->ssid_len = wpabuf_len(ssid64);
+		os_memcpy(conf->ssid, wpabuf_head(ssid64), conf->ssid_len);
+	} else {
+		conf->ssid_len = os_strlen(token->string);
+		os_memcpy(conf->ssid, token->string, conf->ssid_len);
 	}
-	auth->ssid_len = os_strlen(token->string);
-	os_memcpy(auth->ssid, token->string, auth->ssid_len);
+
+	token = json_get_member(discovery, "ssid_charset");
+	if (token && token->type == JSON_NUMBER) {
+		conf->ssid_charset = token->number;
+		wpa_printf(MSG_DEBUG, "DPP: ssid_charset=%d",
+			   conf->ssid_charset);
+	}
 
 	cred = json_get_member(root, "cred");
 	if (!cred || cred->type != JSON_OBJECT) {
@@ -5391,14 +6885,13 @@ static int dpp_parse_conf_obj(struct dpp_authentication *auth,
 		dpp_auth_fail(auth, "No cred::akm string value found");
 		goto fail;
 	}
-	auth->akm = dpp_akm_from_str(token->string);
+	conf->akm = dpp_akm_from_str(token->string);
 
-	if (auth->akm == DPP_AKM_PSK || auth->akm == DPP_AKM_SAE ||
-	    auth->akm == DPP_AKM_PSK_SAE) {
-		if (dpp_parse_cred_legacy(auth, cred) < 0)
+	if (dpp_akm_legacy(conf->akm)) {
+		if (dpp_parse_cred_legacy(conf, cred) < 0)
 			goto fail;
-	} else if (auth->akm == DPP_AKM_DPP) {
-		if (dpp_parse_cred_dpp(auth, cred) < 0)
+	} else if (dpp_akm_dpp(conf->akm)) {
+		if (dpp_parse_cred_dpp(auth, conf, cred) < 0)
 			goto fail;
 	} else {
 		wpa_printf(MSG_DEBUG, "DPP: Unsupported akm: %s",
@@ -5410,9 +6903,713 @@ static int dpp_parse_conf_obj(struct dpp_authentication *auth,
 	wpa_printf(MSG_DEBUG, "DPP: JSON parsing completed successfully");
 	ret = 0;
 fail:
+	wpabuf_free(ssid64);
 	json_free(root);
 	return ret;
 }
+
+
+#ifdef CONFIG_DPP2
+
+struct dpp_enveloped_data {
+	const u8 *enc_cont;
+	size_t enc_cont_len;
+	const u8 *enc_key;
+	size_t enc_key_len;
+	const u8 *salt;
+	size_t pbkdf2_key_len;
+	size_t prf_hash_len;
+};
+
+
+static int dpp_parse_recipient_infos(const u8 *pos, size_t len,
+				     struct dpp_enveloped_data *data)
+{
+	struct asn1_hdr hdr;
+	const u8 *end = pos + len;
+	const u8 *next, *e_end;
+	struct asn1_oid oid;
+	int val;
+	const u8 *params;
+	size_t params_len;
+
+	wpa_hexdump(MSG_MSGDUMP, "DPP: RecipientInfos", pos, len);
+
+	/*
+	 * RecipientInfo ::= CHOICE {
+	 *    ktri		KeyTransRecipientInfo,
+	 *    kari	[1]	KeyAgreeRecipientInfo,
+	 *    kekri	[2]	KEKRecipientInfo,
+	 *    pwri	[3]	PasswordRecipientInfo,
+	 *    ori	[4]	OtherRecipientInfo}
+	 *
+	 * Shall always use the pwri CHOICE.
+	 */
+
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_CONTEXT_SPECIFIC || hdr.tag != 3) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected CHOICE [3] (pwri) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		return -1;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: PasswordRecipientInfo",
+		    hdr.payload, hdr.length);
+	pos = hdr.payload;
+	end = pos + hdr.length;
+
+	/*
+	 * PasswordRecipientInfo ::= SEQUENCE {
+	 *    version			CMSVersion,
+	 *    keyDerivationAlgorithm [0] KeyDerivationAlgorithmIdentifier OPTIONAL,
+	 *    keyEncryptionAlgorithm	KeyEncryptionAlgorithmIdentifier,
+	 *    encryptedKey		EncryptedKey}
+	 *
+	 * version is 0, keyDerivationAlgorithm is id-PKBDF2, and the
+	 * parameters contains PBKDF2-params SEQUENCE.
+	 */
+
+	if (asn1_get_sequence(pos, end - pos, &hdr, &end) < 0)
+		return -1;
+	pos = hdr.payload;
+
+	if (asn1_get_integer(pos, end - pos, &val, &pos) < 0)
+		return -1;
+	if (val != 0) {
+		wpa_printf(MSG_DEBUG, "DPP: pwri.version != 0");
+		return -1;
+	}
+
+	wpa_hexdump(MSG_MSGDUMP, "DPP: Remaining PasswordRecipientInfo after version",
+		    pos, end - pos);
+
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_CONTEXT_SPECIFIC || hdr.tag != 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected keyDerivationAlgorithm [0] - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		return -1;
+	}
+	pos = hdr.payload;
+	e_end = pos + hdr.length;
+
+	/* KeyDerivationAlgorithmIdentifier ::= AlgorithmIdentifier */
+	if (asn1_get_alg_id(pos, e_end - pos, &oid, &params, &params_len,
+			    &next) < 0)
+		return -1;
+	if (!asn1_oid_equal(&oid, &asn1_pbkdf2_oid)) {
+		char buf[80];
+
+		asn1_oid_to_str(&oid, buf, sizeof(buf));
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unexpected KeyDerivationAlgorithmIdentifier %s",
+			   buf);
+		return -1;
+	}
+
+	/*
+	 * PBKDF2-params ::= SEQUENCE {
+	 *    salt CHOICE {
+	 *       specified OCTET STRING,
+	 *       otherSource AlgorithmIdentifier}
+	 *    iterationCount INTEGER (1..MAX),
+	 *    keyLength INTEGER (1..MAX),
+	 *    prf AlgorithmIdentifier}
+	 *
+	 * salt is an 64 octet value, iterationCount is 1000, keyLength is based
+	 * on Configurator signing key length, prf is
+	 * id-hmacWithSHA{256,384,512} based on Configurator signing key.
+	 */
+	if (!params ||
+	    asn1_get_sequence(params, params_len, &hdr, &e_end) < 0)
+		return -1;
+	pos = hdr.payload;
+
+	if (asn1_get_next(pos, e_end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL ||
+	    hdr.tag != ASN1_TAG_OCTETSTRING) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected OCTETSTRING (salt.specified) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		return -1;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: salt.specified",
+		    hdr.payload, hdr.length);
+	if (hdr.length != 64) {
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected salt length %u",
+			   hdr.length);
+		return -1;
+	}
+	data->salt = hdr.payload;
+	pos = hdr.payload + hdr.length;
+
+	if (asn1_get_integer(pos, e_end - pos, &val, &pos) < 0)
+		return -1;
+	if (val != 1000) {
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected iterationCount %d", val);
+		return -1;
+	}
+
+	if (asn1_get_integer(pos, e_end - pos, &val, &pos) < 0)
+		return -1;
+	if (val != 32 && val != 48 && val != 64) {
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected keyLength %d", val);
+		return -1;
+	}
+	data->pbkdf2_key_len = val;
+
+	if (asn1_get_sequence(pos, e_end - pos, &hdr, NULL) < 0 ||
+	    asn1_get_oid(hdr.payload, hdr.length, &oid, &pos) < 0) {
+		wpa_printf(MSG_DEBUG, "DPP: Could not parse prf");
+		return -1;
+	}
+	if (asn1_oid_equal(&oid, &asn1_pbkdf2_hmac_sha256_oid)) {
+		data->prf_hash_len = 32;
+	} else if (asn1_oid_equal(&oid, &asn1_pbkdf2_hmac_sha384_oid)) {
+		data->prf_hash_len = 48;
+	} else if (asn1_oid_equal(&oid, &asn1_pbkdf2_hmac_sha512_oid)) {
+		data->prf_hash_len = 64;
+	} else {
+		char buf[80];
+
+		asn1_oid_to_str(&oid, buf, sizeof(buf));
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected PBKDF2-params.prf %s",
+			   buf);
+		return -1;
+	}
+
+	pos = next;
+
+	/* keyEncryptionAlgorithm KeyEncryptionAlgorithmIdentifier
+	 *
+	 * KeyEncryptionAlgorithmIdentifier ::= AlgorithmIdentifier
+	 *
+	 * id-alg-AES-SIV-CMAC-aed-256, id-alg-AES-SIV-CMAC-aed-384, or
+	 * id-alg-AES-SIV-CMAC-aed-512. */
+	if (asn1_get_alg_id(pos, end - pos, &oid, NULL, NULL, &pos) < 0)
+		return -1;
+	if (!asn1_oid_equal(&oid, &asn1_aes_siv_cmac_aead_256_oid) &&
+	    !asn1_oid_equal(&oid, &asn1_aes_siv_cmac_aead_384_oid) &&
+	    !asn1_oid_equal(&oid, &asn1_aes_siv_cmac_aead_512_oid)) {
+		char buf[80];
+
+		asn1_oid_to_str(&oid, buf, sizeof(buf));
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unexpected KeyEncryptionAlgorithmIdentifier %s",
+			   buf);
+		return -1;
+	}
+
+	/*
+	 * encryptedKey EncryptedKey
+	 *
+	 * EncryptedKey ::= OCTET STRING
+	 */
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL ||
+	    hdr.tag != ASN1_TAG_OCTETSTRING) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected OCTETSTRING (pwri.encryptedKey) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		return -1;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: pwri.encryptedKey",
+		    hdr.payload, hdr.length);
+	data->enc_key = hdr.payload;
+	data->enc_key_len = hdr.length;
+
+	return 0;
+}
+
+
+static int dpp_parse_encrypted_content_info(const u8 *pos, const u8 *end,
+					    struct dpp_enveloped_data *data)
+{
+	struct asn1_hdr hdr;
+	struct asn1_oid oid;
+
+	/*
+	 * EncryptedContentInfo ::= SEQUENCE {
+	 *    contentType			ContentType,
+	 *    contentEncryptionAlgorithm  ContentEncryptionAlgorithmIdentifier,
+	 *    encryptedContent	[0] IMPLICIT	EncryptedContent OPTIONAL}
+	 */
+	if (asn1_get_sequence(pos, end - pos, &hdr, &pos) < 0)
+		return -1;
+	wpa_hexdump(MSG_MSGDUMP, "DPP: EncryptedContentInfo",
+		    hdr.payload, hdr.length);
+	if (pos < end) {
+		wpa_hexdump(MSG_DEBUG,
+			    "DPP: Unexpected extra data after EncryptedContentInfo",
+			    pos, end - pos);
+		return -1;
+	}
+
+	end = pos;
+	pos = hdr.payload;
+
+	/* ContentType ::= OBJECT IDENTIFIER */
+	if (asn1_get_oid(pos, end - pos, &oid, &pos) < 0) {
+		wpa_printf(MSG_DEBUG, "DPP: Could not parse ContentType");
+		return -1;
+	}
+	if (!asn1_oid_equal(&oid, &asn1_dpp_asymmetric_key_package_oid)) {
+		char buf[80];
+
+		asn1_oid_to_str(&oid, buf, sizeof(buf));
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected ContentType %s", buf);
+		return -1;
+	}
+
+	/* ContentEncryptionAlgorithmIdentifier ::= AlgorithmIdentifier */
+	if (asn1_get_alg_id(pos, end - pos, &oid, NULL, NULL, &pos) < 0)
+		return -1;
+	if (!asn1_oid_equal(&oid, &asn1_aes_siv_cmac_aead_256_oid) &&
+	    !asn1_oid_equal(&oid, &asn1_aes_siv_cmac_aead_384_oid) &&
+	    !asn1_oid_equal(&oid, &asn1_aes_siv_cmac_aead_512_oid)) {
+		char buf[80];
+
+		asn1_oid_to_str(&oid, buf, sizeof(buf));
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unexpected ContentEncryptionAlgorithmIdentifier %s",
+			   buf);
+		return -1;
+	}
+	/* ignore optional parameters */
+
+	/* encryptedContent [0] IMPLICIT EncryptedContent OPTIONAL
+	 * EncryptedContent ::= OCTET STRING */
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_CONTEXT_SPECIFIC || hdr.tag != 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected [0] IMPLICIT (EncryptedContent) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		return -1;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: EncryptedContent",
+		    hdr.payload, hdr.length);
+	data->enc_cont = hdr.payload;
+	data->enc_cont_len = hdr.length;
+	return 0;
+}
+
+
+static int dpp_parse_enveloped_data(const u8 *env_data, size_t env_data_len,
+				    struct dpp_enveloped_data *data)
+{
+	struct asn1_hdr hdr;
+	const u8 *pos, *end;
+	int val;
+
+	os_memset(data, 0, sizeof(*data));
+
+	/*
+	 * DPPEnvelopedData ::= EnvelopedData
+	 *
+	 * EnvelopedData ::= SEQUENCE {
+	 *    version			CMSVersion,
+	 *    originatorInfo	[0]	IMPLICIT OriginatorInfo OPTIONAL,
+	 *    recipientInfos		RecipientInfos,
+	 *    encryptedContentInfo	EncryptedContentInfo,
+	 *    unprotectedAttrs  [1] IMPLICIT	UnprotectedAttributes OPTIONAL}
+	 *
+	 * CMSVersion ::= INTEGER
+	 *
+	 * RecipientInfos ::= SET SIZE (1..MAX) OF RecipientInfo
+	 *
+	 * For DPP, version is 3, both originatorInfo and
+	 * unprotectedAttrs are omitted, and recipientInfos contains a single
+	 * RecipientInfo.
+	 */
+	if (asn1_get_sequence(env_data, env_data_len, &hdr, &end) < 0)
+		return -1;
+	pos = hdr.payload;
+	if (end < env_data + env_data_len) {
+		wpa_hexdump(MSG_DEBUG,
+			    "DPP: Unexpected extra data after DPPEnvelopedData",
+			    end, env_data + env_data_len - end);
+		return -1;
+	}
+
+	if (asn1_get_integer(pos, end - pos, &val, &pos) < 0)
+		return -1;
+	if (val != 3) {
+		wpa_printf(MSG_DEBUG, "DPP: EnvelopedData.version != 3");
+		return -1;
+	}
+
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL || hdr.tag != ASN1_TAG_SET) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected SET (RecipientInfos) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		return -1;
+	}
+
+	if (dpp_parse_recipient_infos(hdr.payload, hdr.length, data) < 0)
+		return -1;
+	return dpp_parse_encrypted_content_info(hdr.payload + hdr.length, end,
+						data);
+}
+
+
+static struct dpp_asymmetric_key *
+dpp_parse_one_asymmetric_key(const u8 *buf, size_t len)
+{
+	struct asn1_hdr hdr;
+	const u8 *pos = buf, *end = buf + len, *next;
+	int val;
+	const u8 *params;
+	size_t params_len;
+	struct asn1_oid oid;
+	char txt[80];
+	struct dpp_asymmetric_key *key;
+	EC_KEY *eckey;
+
+	wpa_hexdump_key(MSG_MSGDUMP, "DPP: OneAsymmetricKey", buf, len);
+
+	key = os_zalloc(sizeof(*key));
+	if (!key)
+		return NULL;
+
+	/*
+	 * OneAsymmetricKey ::= SEQUENCE {
+	 *    version			Version,
+	 *    privateKeyAlgorithm	PrivateKeyAlgorithmIdentifier,
+	 *    privateKey		PrivateKey,
+	 *    attributes		[0] Attributes OPTIONAL,
+	 *    ...,
+	 *    [[2: publicKey		[1] BIT STRING OPTIONAL ]],
+	 *    ...
+	 * }
+	 */
+	if (asn1_get_sequence(pos, end - pos, &hdr, &end) < 0)
+		goto fail;
+	pos = hdr.payload;
+
+	/* Version ::= INTEGER { v1(0), v2(1) } (v1, ..., v2) */
+	if (asn1_get_integer(pos, end - pos, &val, &pos) < 0)
+		goto fail;
+	if (val != 1) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unsupported DPPAsymmetricKeyPackage version %d",
+			   val);
+		goto fail;
+	}
+
+	/* PrivateKeyAlgorithmIdentifier ::= AlgorithmIdentifier */
+	if (asn1_get_alg_id(pos, end - pos, &oid, &params, &params_len,
+			    &pos) < 0)
+		goto fail;
+	if (!asn1_oid_equal(&oid, &asn1_ec_public_key_oid)) {
+		asn1_oid_to_str(&oid, txt, sizeof(txt));
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unsupported PrivateKeyAlgorithmIdentifier %s",
+			   txt);
+		goto fail;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: PrivateKeyAlgorithmIdentifier params",
+		    params, params_len);
+	/*
+	 * ECParameters ::= CHOICE {
+	 *    namedCurve	OBJECT IDENTIFIER
+	 *    -- implicitCurve	NULL
+	 *    -- specifiedCurve	SpecifiedECDomain}
+	 */
+	if (!params || asn1_get_oid(params, params_len, &oid, &next) < 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Could not parse ECParameters.namedCurve");
+		goto fail;
+	}
+	asn1_oid_to_str(&oid, txt, sizeof(txt));
+	wpa_printf(MSG_MSGDUMP, "DPP: namedCurve %s", txt);
+	/* Assume the curve is identified within ECPrivateKey, so that this
+	 * separate indication is not really needed. */
+
+	/*
+	 * PrivateKey ::= OCTET STRING
+	 *    (Contains DER encoding of ECPrivateKey)
+	 */
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL ||
+	    hdr.tag != ASN1_TAG_OCTETSTRING) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected OCTETSTRING (PrivateKey) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		goto fail;
+	}
+	wpa_hexdump_key(MSG_MSGDUMP, "DPP: PrivateKey",
+			hdr.payload, hdr.length);
+	pos = hdr.payload + hdr.length;
+	eckey = d2i_ECPrivateKey(NULL, &hdr.payload, hdr.length);
+	if (!eckey) {
+		wpa_printf(MSG_INFO,
+			   "DPP: OpenSSL: d2i_ECPrivateKey() failed: %s",
+			   ERR_error_string(ERR_get_error(), NULL));
+		goto fail;
+	}
+	key->csign = EVP_PKEY_new();
+	if (!key->csign || EVP_PKEY_assign_EC_KEY(key->csign, eckey) != 1) {
+		EC_KEY_free(eckey);
+		goto fail;
+	}
+	if (wpa_debug_show_keys)
+		dpp_debug_print_key("DPP: Received c-sign-key", key->csign);
+
+	/*
+	 * Attributes ::= SET OF Attribute { { OneAsymmetricKeyAttributes } }
+	 *
+	 * Exactly one instance of type Attribute in OneAsymmetricKey.
+	 */
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_CONTEXT_SPECIFIC || hdr.tag != 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected [0] Attributes - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		goto fail;
+	}
+	wpa_hexdump_key(MSG_MSGDUMP, "DPP: Attributes",
+			hdr.payload, hdr.length);
+	if (hdr.payload + hdr.length < end) {
+		wpa_hexdump_key(MSG_MSGDUMP,
+				"DPP: Ignore additional data at the end of OneAsymmetricKey",
+				hdr.payload + hdr.length,
+				end - (hdr.payload + hdr.length));
+	}
+	pos = hdr.payload;
+	end = hdr.payload + hdr.length;
+
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL || hdr.tag != ASN1_TAG_SET) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected SET (Attributes) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		goto fail;
+	}
+	if (hdr.payload + hdr.length < end) {
+		wpa_hexdump_key(MSG_MSGDUMP,
+				"DPP: Ignore additional data at the end of OneAsymmetricKey (after SET)",
+				hdr.payload + hdr.length,
+				end - (hdr.payload + hdr.length));
+	}
+	pos = hdr.payload;
+	end = hdr.payload + hdr.length;
+
+	/*
+	 * OneAsymmetricKeyAttributes ATTRIBUTE ::= {
+	 *    aa-DPPConfigurationParameters,
+	 *    ... -- For local profiles
+	 * }
+	 *
+	 * aa-DPPConfigurationParameters ATTRIBUTE ::=
+	 * { TYPE DPPConfigurationParameters IDENTIFIED BY id-DPPConfigParams }
+	 *
+	 * Attribute ::= SEQUENCE {
+	 *    type OBJECT IDENTIFIER,
+	 *    values SET SIZE(1..MAX) OF Type
+	 *
+	 * Exactly one instance of ATTRIBUTE in attrValues.
+	 */
+	if (asn1_get_sequence(pos, end - pos, &hdr, &pos) < 0)
+		goto fail;
+	if (pos < end) {
+		wpa_hexdump_key(MSG_MSGDUMP,
+				"DPP: Ignore additional data at the end of ATTRIBUTE",
+				pos, end - pos);
+	}
+	end = pos;
+	pos = hdr.payload;
+
+	if (asn1_get_oid(pos, end - pos, &oid, &pos) < 0)
+		goto fail;
+	if (!asn1_oid_equal(&oid, &asn1_dpp_config_params_oid)) {
+		asn1_oid_to_str(&oid, txt, sizeof(txt));
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unexpected Attribute identifier %s", txt);
+		goto fail;
+	}
+
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL || hdr.tag != ASN1_TAG_SET) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected SET (Attribute) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		goto fail;
+	}
+	pos = hdr.payload;
+	end = hdr.payload + hdr.length;
+
+	/*
+	 * DPPConfigurationParameters ::= SEQUENCE {
+	 *    configurationTemplate	UTF8String,
+	 *    connectorTemplate		UTF8String OPTIONAL}
+	 */
+
+	wpa_hexdump_key(MSG_MSGDUMP, "DPP: DPPConfigurationParameters",
+			pos, end - pos);
+	if (asn1_get_sequence(pos, end - pos, &hdr, &pos) < 0)
+		goto fail;
+	if (pos < end) {
+		wpa_hexdump_key(MSG_MSGDUMP,
+				"DPP: Ignore additional data after DPPConfigurationParameters",
+				pos, end - pos);
+	}
+	end = pos;
+	pos = hdr.payload;
+
+	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	    hdr.class != ASN1_CLASS_UNIVERSAL ||
+	    hdr.tag != ASN1_TAG_UTF8STRING) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Expected UTF8STRING (configurationTemplate) - found class %d tag 0x%x",
+			   hdr.class, hdr.tag);
+		goto fail;
+	}
+	wpa_hexdump_ascii_key(MSG_MSGDUMP, "DPP: configurationTemplate",
+			      hdr.payload, hdr.length);
+	key->config_template = os_zalloc(hdr.length + 1);
+	if (!key->config_template)
+		goto fail;
+	os_memcpy(key->config_template, hdr.payload, hdr.length);
+
+	pos = hdr.payload + hdr.length;
+
+	if (pos < end) {
+		if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+		    hdr.class != ASN1_CLASS_UNIVERSAL ||
+		    hdr.tag != ASN1_TAG_UTF8STRING) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: Expected UTF8STRING (connectorTemplate) - found class %d tag 0x%x",
+				   hdr.class, hdr.tag);
+			goto fail;
+		}
+		wpa_hexdump_ascii_key(MSG_MSGDUMP, "DPP: connectorTemplate",
+				      hdr.payload, hdr.length);
+		key->connector_template = os_zalloc(hdr.length + 1);
+		if (!key->connector_template)
+			goto fail;
+		os_memcpy(key->connector_template, hdr.payload, hdr.length);
+	}
+
+	return key;
+fail:
+	wpa_printf(MSG_DEBUG, "DPP: Failed to parse OneAsymmetricKey");
+	dpp_free_asymmetric_key(key);
+	return NULL;
+}
+
+
+static struct dpp_asymmetric_key *
+dpp_parse_dpp_asymmetric_key_package(const u8 *key_pkg, size_t key_pkg_len)
+{
+	struct asn1_hdr hdr;
+	const u8 *pos = key_pkg, *end = key_pkg + key_pkg_len;
+	struct dpp_asymmetric_key *first = NULL, *last = NULL, *key;
+
+	wpa_hexdump_key(MSG_MSGDUMP, "DPP: DPPAsymmetricKeyPackage",
+			key_pkg, key_pkg_len);
+
+	/*
+	 * DPPAsymmetricKeyPackage ::= AsymmetricKeyPackage
+	 *
+	 * AsymmetricKeyPackage ::= SEQUENCE SIZE (1..MAX) OF OneAsymmetricKey
+	 */
+	while (pos < end) {
+		if (asn1_get_sequence(pos, end - pos, &hdr, &pos) < 0 ||
+		    !(key = dpp_parse_one_asymmetric_key(hdr.payload,
+							 hdr.length))) {
+			dpp_free_asymmetric_key(first);
+			return NULL;
+		}
+		if (!last) {
+			first = last = key;
+		} else {
+			last->next = key;
+			last = key;
+		}
+	}
+
+	return first;
+}
+
+
+static int dpp_conf_resp_env_data(struct dpp_authentication *auth,
+				  const u8 *env_data, size_t env_data_len)
+{
+	const u8 *key;
+	size_t key_len;
+	u8 kek[DPP_MAX_HASH_LEN];
+	u8 cont_encr_key[DPP_MAX_HASH_LEN];
+	size_t cont_encr_key_len;
+	int res;
+	u8 *key_pkg;
+	size_t key_pkg_len;
+	struct dpp_enveloped_data data;
+	struct dpp_asymmetric_key *keys;
+
+	wpa_hexdump(MSG_DEBUG, "DPP: DPPEnvelopedData", env_data, env_data_len);
+
+	if (dpp_parse_enveloped_data(env_data, env_data_len, &data) < 0)
+		return -1;
+
+	/* TODO: For initial testing, use ke as the key. Replace this with a
+	 * new key once that has been defined. */
+	key = auth->ke;
+	key_len = auth->curve->hash_len;
+	wpa_hexdump_key(MSG_DEBUG, "DPP: PBKDF2 key", key, key_len);
+
+	if (dpp_pbkdf2(data.prf_hash_len, key, key_len, data.salt, 64, 1000,
+		       kek, data.pbkdf2_key_len)) {
+		wpa_printf(MSG_DEBUG, "DPP: PBKDF2 failed");
+		return -1;
+	}
+	wpa_hexdump_key(MSG_DEBUG, "DPP: key-encryption key from PBKDF2",
+			kek, data.pbkdf2_key_len);
+
+	if (data.enc_key_len < AES_BLOCK_SIZE ||
+	    data.enc_key_len > sizeof(cont_encr_key) + AES_BLOCK_SIZE) {
+		wpa_printf(MSG_DEBUG, "DPP: Invalid encryptedKey length");
+		return -1;
+	}
+	res = aes_siv_decrypt(kek, data.pbkdf2_key_len,
+			      data.enc_key, data.enc_key_len,
+			      0, NULL, NULL, cont_encr_key);
+	forced_memzero(kek, data.pbkdf2_key_len);
+	if (res < 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: AES-SIV decryption of encryptedKey failed");
+		return -1;
+	}
+	cont_encr_key_len = data.enc_key_len - AES_BLOCK_SIZE;
+	wpa_hexdump_key(MSG_DEBUG, "DPP: content-encryption key",
+			cont_encr_key, cont_encr_key_len);
+
+	if (data.enc_cont_len < AES_BLOCK_SIZE)
+		return -1;
+	key_pkg_len = data.enc_cont_len - AES_BLOCK_SIZE;
+	key_pkg = os_malloc(key_pkg_len);
+	if (!key_pkg)
+		return -1;
+	res = aes_siv_decrypt(cont_encr_key, cont_encr_key_len,
+			      data.enc_cont, data.enc_cont_len,
+			      0, NULL, NULL, key_pkg);
+	forced_memzero(cont_encr_key, cont_encr_key_len);
+	if (res < 0) {
+		bin_clear_free(key_pkg, key_pkg_len);
+		wpa_printf(MSG_DEBUG,
+			   "DPP: AES-SIV decryption of encryptedContent failed");
+		return -1;
+	}
+
+	keys = dpp_parse_dpp_asymmetric_key_package(key_pkg, key_pkg_len);
+	bin_clear_free(key_pkg, key_pkg_len);
+	dpp_free_asymmetric_key(auth->conf_key_pkg);
+	auth->conf_key_pkg = keys;
+
+	return keys != NULL;;
+}
+
+#endif /* CONFIG_DPP2 */
 
 
 int dpp_conf_resp_rx(struct dpp_authentication *auth,
@@ -5420,11 +7617,15 @@ int dpp_conf_resp_rx(struct dpp_authentication *auth,
 {
 	const u8 *wrapped_data, *e_nonce, *status, *conf_obj;
 	u16 wrapped_data_len, e_nonce_len, status_len, conf_obj_len;
+	const u8 *env_data;
+	u16 env_data_len;
 	const u8 *addr[1];
 	size_t len[1];
 	u8 *unwrapped = NULL;
 	size_t unwrapped_len = 0;
 	int ret = -1;
+
+	auth->conf_resp_status = 255;
 
 	if (dpp_check_attrs(wpabuf_head(resp), wpabuf_len(resp)) < 0) {
 		dpp_auth_fail(auth, "Invalid attribute in config response");
@@ -5486,23 +7687,47 @@ int dpp_conf_resp_rx(struct dpp_authentication *auth,
 			      "Missing or invalid required DPP Status attribute");
 		goto fail;
 	}
+	auth->conf_resp_status = status[0];
 	wpa_printf(MSG_DEBUG, "DPP: Status %u", status[0]);
 	if (status[0] != DPP_STATUS_OK) {
 		dpp_auth_fail(auth, "Configurator rejected configuration");
 		goto fail;
 	}
 
-	conf_obj = dpp_get_attr(unwrapped, unwrapped_len,
-				DPP_ATTR_CONFIG_OBJ, &conf_obj_len);
-	if (!conf_obj) {
+	env_data = dpp_get_attr(unwrapped, unwrapped_len,
+				DPP_ATTR_ENVELOPED_DATA, &env_data_len);
+#ifdef CONFIG_DPP2
+	if (env_data &&
+	    dpp_conf_resp_env_data(auth, env_data, env_data_len) < 0)
+		goto fail;
+#endif /* CONFIG_DPP2 */
+
+	conf_obj = dpp_get_attr(unwrapped, unwrapped_len, DPP_ATTR_CONFIG_OBJ,
+				&conf_obj_len);
+	if (!conf_obj && !env_data) {
 		dpp_auth_fail(auth,
 			      "Missing required Configuration Object attribute");
 		goto fail;
 	}
-	wpa_hexdump_ascii(MSG_DEBUG, "DPP: configurationObject JSON",
-			  conf_obj, conf_obj_len);
-	if (dpp_parse_conf_obj(auth, conf_obj, conf_obj_len) < 0)
-		goto fail;
+	while (conf_obj) {
+		wpa_hexdump_ascii(MSG_DEBUG, "DPP: configurationObject JSON",
+				  conf_obj, conf_obj_len);
+		if (dpp_parse_conf_obj(auth, conf_obj, conf_obj_len) < 0)
+			goto fail;
+		conf_obj = dpp_get_attr_next(conf_obj, unwrapped, unwrapped_len,
+					     DPP_ATTR_CONFIG_OBJ,
+					     &conf_obj_len);
+	}
+
+#ifdef CONFIG_DPP2
+	status = dpp_get_attr(unwrapped, unwrapped_len,
+			      DPP_ATTR_SEND_CONN_STATUS, &status_len);
+	if (status) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Configurator requested connection status result");
+		auth->conn_status_requested = 1;
+	}
+#endif /* CONFIG_DPP2 */
 
 	ret = 0;
 
@@ -5510,6 +7735,359 @@ fail:
 	os_free(unwrapped);
 	return ret;
 }
+
+
+#ifdef CONFIG_DPP2
+
+enum dpp_status_error dpp_conf_result_rx(struct dpp_authentication *auth,
+					 const u8 *hdr,
+					 const u8 *attr_start, size_t attr_len)
+{
+	const u8 *wrapped_data, *status, *e_nonce;
+	u16 wrapped_data_len, status_len, e_nonce_len;
+	const u8 *addr[2];
+	size_t len[2];
+	u8 *unwrapped = NULL;
+	size_t unwrapped_len = 0;
+	enum dpp_status_error ret = 256;
+
+	wrapped_data = dpp_get_attr(attr_start, attr_len, DPP_ATTR_WRAPPED_DATA,
+				    &wrapped_data_len);
+	if (!wrapped_data || wrapped_data_len < AES_BLOCK_SIZE) {
+		dpp_auth_fail(auth,
+			      "Missing or invalid required Wrapped Data attribute");
+		goto fail;
+	}
+	wpa_hexdump(MSG_DEBUG, "DPP: Wrapped data",
+		    wrapped_data, wrapped_data_len);
+
+	attr_len = wrapped_data - 4 - attr_start;
+
+	addr[0] = hdr;
+	len[0] = DPP_HDR_LEN;
+	addr[1] = attr_start;
+	len[1] = attr_len;
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[0]", addr[0], len[0]);
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[1]", addr[1], len[1]);
+	wpa_hexdump(MSG_DEBUG, "DPP: AES-SIV ciphertext",
+		    wrapped_data, wrapped_data_len);
+	unwrapped_len = wrapped_data_len - AES_BLOCK_SIZE;
+	unwrapped = os_malloc(unwrapped_len);
+	if (!unwrapped)
+		goto fail;
+	if (aes_siv_decrypt(auth->ke, auth->curve->hash_len,
+			    wrapped_data, wrapped_data_len,
+			    2, addr, len, unwrapped) < 0) {
+		dpp_auth_fail(auth, "AES-SIV decryption failed");
+		goto fail;
+	}
+	wpa_hexdump(MSG_DEBUG, "DPP: AES-SIV cleartext",
+		    unwrapped, unwrapped_len);
+
+	if (dpp_check_attrs(unwrapped, unwrapped_len) < 0) {
+		dpp_auth_fail(auth, "Invalid attribute in unwrapped data");
+		goto fail;
+	}
+
+	e_nonce = dpp_get_attr(unwrapped, unwrapped_len,
+			       DPP_ATTR_ENROLLEE_NONCE,
+			       &e_nonce_len);
+	if (!e_nonce || e_nonce_len != auth->curve->nonce_len) {
+		dpp_auth_fail(auth,
+			      "Missing or invalid Enrollee Nonce attribute");
+		goto fail;
+	}
+	wpa_hexdump(MSG_DEBUG, "DPP: Enrollee Nonce", e_nonce, e_nonce_len);
+	if (os_memcmp(e_nonce, auth->e_nonce, e_nonce_len) != 0) {
+		dpp_auth_fail(auth, "Enrollee Nonce mismatch");
+		wpa_hexdump(MSG_DEBUG, "DPP: Expected Enrollee Nonce",
+			    auth->e_nonce, e_nonce_len);
+		goto fail;
+	}
+
+	status = dpp_get_attr(unwrapped, unwrapped_len, DPP_ATTR_STATUS,
+			      &status_len);
+	if (!status || status_len < 1) {
+		dpp_auth_fail(auth,
+			      "Missing or invalid required DPP Status attribute");
+		goto fail;
+	}
+	wpa_printf(MSG_DEBUG, "DPP: Status %u", status[0]);
+	ret = status[0];
+
+fail:
+	bin_clear_free(unwrapped, unwrapped_len);
+	return ret;
+}
+
+
+struct wpabuf * dpp_build_conf_result(struct dpp_authentication *auth,
+				      enum dpp_status_error status)
+{
+	struct wpabuf *msg, *clear;
+	size_t nonce_len, clear_len, attr_len;
+	const u8 *addr[2];
+	size_t len[2];
+	u8 *wrapped;
+
+	nonce_len = auth->curve->nonce_len;
+	clear_len = 5 + 4 + nonce_len;
+	attr_len = 4 + clear_len + AES_BLOCK_SIZE;
+	clear = wpabuf_alloc(clear_len);
+	msg = dpp_alloc_msg(DPP_PA_CONFIGURATION_RESULT, attr_len);
+	if (!clear || !msg)
+		goto fail;
+
+	/* DPP Status */
+	dpp_build_attr_status(clear, status);
+
+	/* E-nonce */
+	wpabuf_put_le16(clear, DPP_ATTR_ENROLLEE_NONCE);
+	wpabuf_put_le16(clear, nonce_len);
+	wpabuf_put_data(clear, auth->e_nonce, nonce_len);
+
+	/* OUI, OUI type, Crypto Suite, DPP frame type */
+	addr[0] = wpabuf_head_u8(msg) + 2;
+	len[0] = 3 + 1 + 1 + 1;
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[0]", addr[0], len[0]);
+
+	/* Attributes before Wrapped Data (none) */
+	addr[1] = wpabuf_put(msg, 0);
+	len[1] = 0;
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[1]", addr[1], len[1]);
+
+	/* Wrapped Data */
+	wpabuf_put_le16(msg, DPP_ATTR_WRAPPED_DATA);
+	wpabuf_put_le16(msg, wpabuf_len(clear) + AES_BLOCK_SIZE);
+	wrapped = wpabuf_put(msg, wpabuf_len(clear) + AES_BLOCK_SIZE);
+
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: AES-SIV cleartext", clear);
+	if (aes_siv_encrypt(auth->ke, auth->curve->hash_len,
+			    wpabuf_head(clear), wpabuf_len(clear),
+			    2, addr, len, wrapped) < 0)
+		goto fail;
+
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: Configuration Result attributes", msg);
+	wpabuf_free(clear);
+	return msg;
+fail:
+	wpabuf_free(clear);
+	wpabuf_free(msg);
+	return NULL;
+}
+
+
+static int valid_channel_list(const char *val)
+{
+	while (*val) {
+		if (!((*val >= '0' && *val <= '9') ||
+		      *val == '/' || *val == ','))
+			return 0;
+		val++;
+	}
+
+	return 1;
+}
+
+
+enum dpp_status_error dpp_conn_status_result_rx(struct dpp_authentication *auth,
+						const u8 *hdr,
+						const u8 *attr_start,
+						size_t attr_len,
+						u8 *ssid, size_t *ssid_len,
+						char **channel_list)
+{
+	const u8 *wrapped_data, *status, *e_nonce;
+	u16 wrapped_data_len, status_len, e_nonce_len;
+	const u8 *addr[2];
+	size_t len[2];
+	u8 *unwrapped = NULL;
+	size_t unwrapped_len = 0;
+	enum dpp_status_error ret = 256;
+	struct json_token *root = NULL, *token;
+	struct wpabuf *ssid64;
+
+	*ssid_len = 0;
+	*channel_list = NULL;
+
+	wrapped_data = dpp_get_attr(attr_start, attr_len, DPP_ATTR_WRAPPED_DATA,
+				    &wrapped_data_len);
+	if (!wrapped_data || wrapped_data_len < AES_BLOCK_SIZE) {
+		dpp_auth_fail(auth,
+			      "Missing or invalid required Wrapped Data attribute");
+		goto fail;
+	}
+	wpa_hexdump(MSG_DEBUG, "DPP: Wrapped data",
+		    wrapped_data, wrapped_data_len);
+
+	attr_len = wrapped_data - 4 - attr_start;
+
+	addr[0] = hdr;
+	len[0] = DPP_HDR_LEN;
+	addr[1] = attr_start;
+	len[1] = attr_len;
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[0]", addr[0], len[0]);
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[1]", addr[1], len[1]);
+	wpa_hexdump(MSG_DEBUG, "DPP: AES-SIV ciphertext",
+		    wrapped_data, wrapped_data_len);
+	unwrapped_len = wrapped_data_len - AES_BLOCK_SIZE;
+	unwrapped = os_malloc(unwrapped_len);
+	if (!unwrapped)
+		goto fail;
+	if (aes_siv_decrypt(auth->ke, auth->curve->hash_len,
+			    wrapped_data, wrapped_data_len,
+			    2, addr, len, unwrapped) < 0) {
+		dpp_auth_fail(auth, "AES-SIV decryption failed");
+		goto fail;
+	}
+	wpa_hexdump(MSG_DEBUG, "DPP: AES-SIV cleartext",
+		    unwrapped, unwrapped_len);
+
+	if (dpp_check_attrs(unwrapped, unwrapped_len) < 0) {
+		dpp_auth_fail(auth, "Invalid attribute in unwrapped data");
+		goto fail;
+	}
+
+	e_nonce = dpp_get_attr(unwrapped, unwrapped_len,
+			       DPP_ATTR_ENROLLEE_NONCE,
+			       &e_nonce_len);
+	if (!e_nonce || e_nonce_len != auth->curve->nonce_len) {
+		dpp_auth_fail(auth,
+			      "Missing or invalid Enrollee Nonce attribute");
+		goto fail;
+	}
+	wpa_hexdump(MSG_DEBUG, "DPP: Enrollee Nonce", e_nonce, e_nonce_len);
+	if (os_memcmp(e_nonce, auth->e_nonce, e_nonce_len) != 0) {
+		dpp_auth_fail(auth, "Enrollee Nonce mismatch");
+		wpa_hexdump(MSG_DEBUG, "DPP: Expected Enrollee Nonce",
+			    auth->e_nonce, e_nonce_len);
+		goto fail;
+	}
+
+	status = dpp_get_attr(unwrapped, unwrapped_len, DPP_ATTR_CONN_STATUS,
+			      &status_len);
+	if (!status) {
+		dpp_auth_fail(auth,
+			      "Missing required DPP Connection Status attribute");
+		goto fail;
+	}
+	wpa_hexdump_ascii(MSG_DEBUG, "DPP: connStatus JSON",
+			  status, status_len);
+
+	root = json_parse((const char *) status, status_len);
+	if (!root) {
+		dpp_auth_fail(auth, "Could not parse connStatus");
+		goto fail;
+	}
+
+	ssid64 = json_get_member_base64url(root, "ssid64");
+	if (ssid64 && wpabuf_len(ssid64) <= SSID_MAX_LEN) {
+		*ssid_len = wpabuf_len(ssid64);
+		os_memcpy(ssid, wpabuf_head(ssid64), *ssid_len);
+	}
+	wpabuf_free(ssid64);
+
+	token = json_get_member(root, "channelList");
+	if (token && token->type == JSON_STRING &&
+	    valid_channel_list(token->string))
+		*channel_list = os_strdup(token->string);
+
+	token = json_get_member(root, "result");
+	if (!token || token->type != JSON_NUMBER) {
+		dpp_auth_fail(auth, "No connStatus - result");
+		goto fail;
+	}
+	wpa_printf(MSG_DEBUG, "DPP: result %d", token->number);
+	ret = token->number;
+
+fail:
+	json_free(root);
+	bin_clear_free(unwrapped, unwrapped_len);
+	return ret;
+}
+
+
+struct wpabuf * dpp_build_conn_status_result(struct dpp_authentication *auth,
+					     enum dpp_status_error result,
+					     const u8 *ssid, size_t ssid_len,
+					     const char *channel_list)
+{
+	struct wpabuf *msg = NULL, *clear = NULL, *json;
+	size_t nonce_len, clear_len, attr_len;
+	const u8 *addr[2];
+	size_t len[2];
+	u8 *wrapped;
+
+	json = wpabuf_alloc(1000);
+	if (!json)
+		return NULL;
+	json_start_object(json, NULL);
+	json_add_int(json, "result", result);
+	if (ssid) {
+		json_value_sep(json);
+		if (json_add_base64url(json, "ssid64", ssid, ssid_len) < 0)
+			goto fail;
+	}
+	if (channel_list) {
+		json_value_sep(json);
+		json_add_string(json, "channelList", channel_list);
+	}
+	json_end_object(json);
+	wpa_hexdump_ascii(MSG_DEBUG, "DPP: connStatus JSON",
+			  wpabuf_head(json), wpabuf_len(json));
+
+	nonce_len = auth->curve->nonce_len;
+	clear_len = 5 + 4 + nonce_len + 4 + wpabuf_len(json);
+	attr_len = 4 + clear_len + AES_BLOCK_SIZE;
+	clear = wpabuf_alloc(clear_len);
+	msg = dpp_alloc_msg(DPP_PA_CONNECTION_STATUS_RESULT, attr_len);
+	if (!clear || !msg)
+		goto fail;
+
+	/* E-nonce */
+	wpabuf_put_le16(clear, DPP_ATTR_ENROLLEE_NONCE);
+	wpabuf_put_le16(clear, nonce_len);
+	wpabuf_put_data(clear, auth->e_nonce, nonce_len);
+
+	/* DPP Connection Status */
+	wpabuf_put_le16(clear, DPP_ATTR_CONN_STATUS);
+	wpabuf_put_le16(clear, wpabuf_len(json));
+	wpabuf_put_buf(clear, json);
+
+	/* OUI, OUI type, Crypto Suite, DPP frame type */
+	addr[0] = wpabuf_head_u8(msg) + 2;
+	len[0] = 3 + 1 + 1 + 1;
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[0]", addr[0], len[0]);
+
+	/* Attributes before Wrapped Data (none) */
+	addr[1] = wpabuf_put(msg, 0);
+	len[1] = 0;
+	wpa_hexdump(MSG_DEBUG, "DDP: AES-SIV AD[1]", addr[1], len[1]);
+
+	/* Wrapped Data */
+	wpabuf_put_le16(msg, DPP_ATTR_WRAPPED_DATA);
+	wpabuf_put_le16(msg, wpabuf_len(clear) + AES_BLOCK_SIZE);
+	wrapped = wpabuf_put(msg, wpabuf_len(clear) + AES_BLOCK_SIZE);
+
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: AES-SIV cleartext", clear);
+	if (aes_siv_encrypt(auth->ke, auth->curve->hash_len,
+			    wpabuf_head(clear), wpabuf_len(clear),
+			    2, addr, len, wrapped) < 0)
+		goto fail;
+
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: Connection Status Result attributes",
+			msg);
+	wpabuf_free(json);
+	wpabuf_free(clear);
+	return msg;
+fail:
+	wpabuf_free(json);
+	wpabuf_free(clear);
+	wpabuf_free(msg);
+	return NULL;
+}
+
+#endif /* CONFIG_DPP2 */
 
 
 void dpp_configurator_free(struct dpp_configurator *conf)
@@ -5546,15 +8124,41 @@ int dpp_configurator_get_key(const struct dpp_configurator *conf, char *buf,
 }
 
 
+static int dpp_configurator_gen_kid(struct dpp_configurator *conf)
+{
+	struct wpabuf *csign_pub = NULL;
+	u8 kid_hash[SHA256_MAC_LEN];
+	const u8 *addr[1];
+	size_t len[1];
+	int res;
+
+	csign_pub = dpp_get_pubkey_point(conf->csign, 1);
+	if (!csign_pub) {
+		wpa_printf(MSG_INFO, "DPP: Failed to extract C-sign-key");
+		return -1;
+	}
+
+	/* kid = SHA256(ANSI X9.63 uncompressed C-sign-key) */
+	addr[0] = wpabuf_head(csign_pub);
+	len[0] = wpabuf_len(csign_pub);
+	res = sha256_vector(1, addr, len, kid_hash);
+	wpabuf_free(csign_pub);
+	if (res < 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Failed to derive kid for C-sign-key");
+		return -1;
+	}
+
+	conf->kid = base64_url_encode(kid_hash, sizeof(kid_hash), NULL);
+	return conf->kid ? 0 : -1;
+}
+
+
 struct dpp_configurator *
 dpp_keygen_configurator(const char *curve, const u8 *privkey,
 			size_t privkey_len)
 {
 	struct dpp_configurator *conf;
-	struct wpabuf *csign_pub = NULL;
-	u8 kid_hash[SHA256_MAC_LEN];
-	const u8 *addr[1];
-	size_t len[1];
 
 	conf = os_zalloc(sizeof(*conf));
 	if (!conf)
@@ -5580,32 +8184,12 @@ dpp_keygen_configurator(const char *curve, const u8 *privkey,
 		goto fail;
 	conf->own = 1;
 
-	csign_pub = dpp_get_pubkey_point(conf->csign, 1);
-	if (!csign_pub) {
-		wpa_printf(MSG_INFO, "DPP: Failed to extract C-sign-key");
+	if (dpp_configurator_gen_kid(conf) < 0)
 		goto fail;
-	}
-
-	/* kid = SHA256(ANSI X9.63 uncompressed C-sign-key) */
-	addr[0] = wpabuf_head(csign_pub);
-	len[0] = wpabuf_len(csign_pub);
-	if (sha256_vector(1, addr, len, kid_hash) < 0) {
-		wpa_printf(MSG_DEBUG,
-			   "DPP: Failed to derive kid for C-sign-key");
-		goto fail;
-	}
-
-	conf->kid = (char *) base64_url_encode(kid_hash, sizeof(kid_hash),
-					       NULL, 0);
-	if (!conf->kid)
-		goto fail;
-out:
-	wpabuf_free(csign_pub);
 	return conf;
 fail:
 	dpp_configurator_free(conf);
-	conf = NULL;
-	goto out;
+	return NULL;
 }
 
 
@@ -5637,13 +8221,16 @@ int dpp_configurator_own_config(struct dpp_authentication *auth,
 	auth->own_protocol_key = dpp_gen_keypair(auth->curve);
 	if (!auth->own_protocol_key)
 		return -1;
-	dpp_copy_netaccesskey(auth);
+	dpp_copy_netaccesskey(auth, &auth->conf_obj[0]);
 	auth->peer_protocol_key = auth->own_protocol_key;
-	dpp_copy_csign(auth, auth->conf->csign);
+	dpp_copy_csign(&auth->conf_obj[0], auth->conf->csign);
 
-	conf_obj = dpp_build_conf_obj(auth, ap);
-	if (!conf_obj)
+	conf_obj = dpp_build_conf_obj(auth, ap, 0);
+	if (!conf_obj) {
+		wpabuf_free(auth->conf_obj[0].c_sign_key);
+		auth->conf_obj[0].c_sign_key = NULL;
 		goto fail;
+	}
 	ret = dpp_parse_conf_obj(auth, wpabuf_head(conf_obj),
 				 wpabuf_len(conf_obj));
 fail:
@@ -5824,7 +8411,6 @@ dpp_peer_intro(struct dpp_introduction *intro, const char *own_connector,
 	const char *pos, *end;
 	unsigned char *own_conn = NULL;
 	size_t own_conn_len;
-	EVP_PKEY_CTX *ctx = NULL;
 	size_t Nx_len;
 	u8 Nx[DPP_MAX_SHARED_SECRET_LEN];
 
@@ -5859,8 +8445,7 @@ dpp_peer_intro(struct dpp_introduction *intro, const char *own_connector,
 		wpa_printf(MSG_DEBUG, "DPP: Own connector is missing the second dot (.)");
 		goto fail;
 	}
-	own_conn = base64_url_decode((const unsigned char *) pos,
-				     end - pos, &own_conn_len);
+	own_conn = base64_url_decode(pos, end - pos, &own_conn_len);
 	if (!own_conn) {
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Failed to base64url decode own signedConnector JWS Payload");
@@ -5938,18 +8523,8 @@ dpp_peer_intro(struct dpp_introduction *intro, const char *own_connector,
 	}
 
 	/* ECDH: N = nk * PK */
-	ctx = EVP_PKEY_CTX_new(own_key, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, peer_key) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Nx_len) != 1 ||
-	    Nx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Nx, &Nx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(own_key, peer_key, Nx, &Nx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (N.x)",
 			Nx, Nx_len);
@@ -5972,7 +8547,6 @@ fail:
 	if (ret != DPP_STATUS_OK)
 		os_memset(intro, 0, sizeof(*intro));
 	os_memset(Nx, 0, sizeof(Nx));
-	EVP_PKEY_CTX_free(ctx);
 	os_free(own_conn);
 	os_free(signed_connector);
 	os_free(info.payload);
@@ -5992,6 +8566,7 @@ static EVP_PKEY * dpp_pkex_get_role_elem(const struct dpp_curve_params *curve,
 	EC_GROUP *group;
 	size_t len = curve->prime_len;
 	const u8 *x, *y;
+	EVP_PKEY *res;
 
 	switch (curve->ike_group) {
 	case 19:
@@ -6025,14 +8600,16 @@ static EVP_PKEY * dpp_pkex_get_role_elem(const struct dpp_curve_params *curve,
 	group = EC_GROUP_new_by_curve_name(OBJ_txt2nid(curve->name));
 	if (!group)
 		return NULL;
-	return dpp_set_pubkey_point_group(group, x, y, len);
+	res = dpp_set_pubkey_point_group(group, x, y, len);
+	EC_GROUP_free(group);
+	return res;
 }
 
 
 static EC_POINT * dpp_pkex_derive_Qi(const struct dpp_curve_params *curve,
 				     const u8 *mac_init, const char *code,
 				     const char *identifier, BN_CTX *bnctx,
-				     const EC_GROUP **ret_group)
+				     EC_GROUP **ret_group)
 {
 	u8 hash[DPP_MAX_HASH_LEN];
 	const u8 *addr[3];
@@ -6101,8 +8678,10 @@ out:
 	EC_KEY_free(Pi_ec);
 	EVP_PKEY_free(Pi);
 	BN_clear_free(hash_bn);
-	if (ret_group)
+	if (ret_group && Qi)
 		*ret_group = group2;
+	else
+		EC_GROUP_free(group2);
 	return Qi;
 fail:
 	EC_POINT_free(Qi);
@@ -6114,7 +8693,7 @@ fail:
 static EC_POINT * dpp_pkex_derive_Qr(const struct dpp_curve_params *curve,
 				     const u8 *mac_resp, const char *code,
 				     const char *identifier, BN_CTX *bnctx,
-				     const EC_GROUP **ret_group)
+				     EC_GROUP **ret_group)
 {
 	u8 hash[DPP_MAX_HASH_LEN];
 	const u8 *addr[3];
@@ -6183,8 +8762,10 @@ out:
 	EC_KEY_free(Pr_ec);
 	EVP_PKEY_free(Pr);
 	BN_clear_free(hash_bn);
-	if (ret_group)
+	if (ret_group && Qr)
 		*ret_group = group2;
+	else
+		EC_GROUP_free(group2);
 	return Qr;
 fail:
 	EC_POINT_free(Qr);
@@ -6225,13 +8806,14 @@ static int dpp_test_gen_invalid_key(struct wpabuf *msg,
 
 		if (EC_POINT_set_affine_coordinates_GFp(group, point, x, y,
 							ctx) != 1) {
-#ifdef OPENSSL_IS_BORINGSSL
-		/* Unlike OpenSSL, BoringSSL returns an error from
-		 * EC_POINT_set_affine_coordinates_GFp() is not on the curve. */
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L || defined(OPENSSL_IS_BORINGSSL)
+		/* Unlike older OpenSSL versions, OpenSSL 1.1.1 and BoringSSL
+		 * return an error from EC_POINT_set_affine_coordinates_GFp()
+		 * when the point is not on the curve. */
 			break;
-#else /* OPENSSL_IS_BORINGSSL */
+#else /* >=1.1.0 or OPENSSL_IS_BORINGSSL */
 			goto fail;
-#endif /* OPENSSL_IS_BORINGSSL */
+#endif /* >= 1.1.0 or OPENSSL_IS_BORINGSSL */
 		}
 
 		if (!EC_POINT_is_on_curve(group, point, ctx))
@@ -6252,6 +8834,7 @@ fail:
 	BN_free(y);
 	EC_POINT_free(point);
 	BN_CTX_free(ctx);
+	EC_GROUP_free(group);
 
 	return ret;
 }
@@ -6263,7 +8846,7 @@ static struct wpabuf * dpp_pkex_build_exchange_req(struct dpp_pkex *pkex)
 	EC_KEY *X_ec = NULL;
 	const EC_POINT *X_point;
 	BN_CTX *bnctx = NULL;
-	const EC_GROUP *group;
+	EC_GROUP *group = NULL;
 	EC_POINT *Qi = NULL, *M = NULL;
 	struct wpabuf *M_buf = NULL;
 	BIGNUM *Mx = NULL, *My = NULL;
@@ -6385,6 +8968,7 @@ out:
 	BN_clear_free(Mx);
 	BN_clear_free(My);
 	BN_CTX_free(bnctx);
+	EC_GROUP_free(group);
 	return msg;
 fail:
 	wpa_printf(MSG_INFO, "DPP: Failed to build PKEX Exchange Request");
@@ -6588,6 +9172,32 @@ static int dpp_pkex_derive_z(const u8 *mac_init, const u8 *mac_resp,
 }
 
 
+static int dpp_pkex_identifier_match(const u8 *attr_id, u16 attr_id_len,
+				     const char *identifier)
+{
+	if (!attr_id && identifier) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No PKEX code identifier received, but expected one");
+		return 0;
+	}
+
+	if (attr_id && !identifier) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: PKEX code identifier received, but not expecting one");
+		return 0;
+	}
+
+	if (attr_id && identifier &&
+	    (os_strlen(identifier) != attr_id_len ||
+	     os_memcmp(identifier, attr_id, attr_id_len) != 0)) {
+		wpa_printf(MSG_DEBUG, "DPP: PKEX code identifier mismatch");
+		return 0;
+	}
+
+	return 1;
+}
+
+
 struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 					   struct dpp_bootstrap_info *bi,
 					   const u8 *own_mac,
@@ -6603,7 +9213,7 @@ struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 	struct dpp_pkex *pkex = NULL;
 	EC_POINT *Qi = NULL, *Qr = NULL, *M = NULL, *X = NULL, *N = NULL;
 	BN_CTX *bnctx = NULL;
-	const EC_GROUP *group;
+	EC_GROUP *group = NULL;
 	BIGNUM *Mx = NULL, *My = NULL;
 	EC_KEY *Y_ec = NULL, *X_ec = NULL;;
 	const EC_POINT *Y_point;
@@ -6611,7 +9221,6 @@ struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 	u8 Kx[DPP_MAX_SHARED_SECRET_LEN];
 	size_t Kx_len;
 	int res;
-	EVP_PKEY_CTX *ctx = NULL;
 
 	if (bi->pkex_t >= PKEX_COUNTER_T_LIMIT) {
 		wpa_msg(msg_ctx, MSG_INFO, DPP_EVENT_FAIL
@@ -6632,19 +9241,11 @@ struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
+	attr_id_len = 0;
 	attr_id = dpp_get_attr(buf, len, DPP_ATTR_CODE_IDENTIFIER,
 			       &attr_id_len);
-	if (!attr_id && identifier) {
-		wpa_printf(MSG_DEBUG,
-			   "DPP: No PKEX code identifier received, but expected one");
+	if (!dpp_pkex_identifier_match(attr_id, attr_id_len, identifier))
 		return NULL;
-	}
-	if (attr_id && identifier &&
-	    (os_strlen(identifier) != attr_id_len ||
-	     os_memcmp(identifier, attr_id, attr_id_len) != 0)) {
-		wpa_printf(MSG_DEBUG, "DPP: PKEX code identifier mismatch");
-		return NULL;
-	}
 
 	attr_group = dpp_get_attr(buf, len, DPP_ATTR_FINITE_CYCLIC_GROUP,
 				  &attr_group_len);
@@ -6786,18 +9387,8 @@ struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 		goto fail;
 
 	/* K = y * X' */
-	ctx = EVP_PKEY_CTX_new(pkex->y, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pkex->x) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Kx_len) != 1 ||
-	    Kx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Kx, &Kx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(pkex->y, pkex->x, Kx, &Kx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (K.x)",
 			Kx, Kx_len);
@@ -6815,7 +9406,6 @@ struct dpp_pkex * dpp_pkex_rx_exchange_req(void *msg_ctx,
 	pkex->exchange_done = 1;
 
 out:
-	EVP_PKEY_CTX_free(ctx);
 	BN_CTX_free(bnctx);
 	EC_POINT_free(Qi);
 	EC_POINT_free(Qr);
@@ -6828,6 +9418,7 @@ out:
 	EC_POINT_free(X);
 	EC_KEY_free(X_ec);
 	EC_KEY_free(Y_ec);
+	EC_GROUP_free(group);
 	return pkex;
 fail:
 	wpa_printf(MSG_DEBUG, "DPP: PKEX Exchange Request processing failed");
@@ -6956,13 +9547,12 @@ struct wpabuf * dpp_pkex_rx_exchange_resp(struct dpp_pkex *pkex,
 {
 	const u8 *attr_status, *attr_id, *attr_key, *attr_group;
 	u16 attr_status_len, attr_id_len, attr_key_len, attr_group_len;
-	const EC_GROUP *group;
+	EC_GROUP *group = NULL;
 	BN_CTX *bnctx = NULL;
 	struct wpabuf *msg = NULL, *A_pub = NULL, *X_pub = NULL, *Y_pub = NULL;
 	const struct dpp_curve_params *curve = pkex->own_bi->curve;
 	EC_POINT *Qr = NULL, *Y = NULL, *N = NULL;
 	BIGNUM *Nx = NULL, *Ny = NULL;
-	EVP_PKEY_CTX *ctx = NULL;
 	EC_KEY *Y_ec = NULL;
 	size_t Jx_len, Kx_len;
 	u8 Jx[DPP_MAX_SHARED_SECRET_LEN], Kx[DPP_MAX_SHARED_SECRET_LEN];
@@ -7016,16 +9606,11 @@ struct wpabuf * dpp_pkex_rx_exchange_resp(struct dpp_pkex *pkex,
 		return NULL;
 	}
 
+	attr_id_len = 0;
 	attr_id = dpp_get_attr(buf, buflen, DPP_ATTR_CODE_IDENTIFIER,
 			       &attr_id_len);
-	if (!attr_id && pkex->identifier) {
-		wpa_printf(MSG_DEBUG,
-			   "DPP: No PKEX code identifier received, but expected one");
-		return NULL;
-	}
-	if (attr_id && pkex->identifier &&
-	    (os_strlen(pkex->identifier) != attr_id_len ||
-	     os_memcmp(pkex->identifier, attr_id, attr_id_len) != 0)) {
+	if (!dpp_pkex_identifier_match(attr_id, attr_id_len,
+				       pkex->identifier)) {
 		dpp_pkex_fail(pkex, "PKEX code identifier mismatch");
 		return NULL;
 	}
@@ -7079,18 +9664,8 @@ struct wpabuf * dpp_pkex_rx_exchange_resp(struct dpp_pkex *pkex,
 	if (!pkex->y ||
 	    EVP_PKEY_set1_EC_KEY(pkex->y, Y_ec) != 1)
 		goto fail;
-	ctx = EVP_PKEY_CTX_new(pkex->own_bi->pubkey, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pkex->y) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Jx_len) != 1 ||
-	    Jx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Jx, &Jx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(pkex->own_bi->pubkey, pkex->y, Jx, &Jx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (J.x)",
 			Jx, Jx_len);
@@ -7114,19 +9689,8 @@ struct wpabuf * dpp_pkex_rx_exchange_resp(struct dpp_pkex *pkex,
 	wpa_hexdump(MSG_DEBUG, "DPP: u", u, curve->hash_len);
 
 	/* K = x * Y’ */
-	EVP_PKEY_CTX_free(ctx);
-	ctx = EVP_PKEY_CTX_new(pkex->x, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pkex->y) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Kx_len) != 1 ||
-	    Kx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Kx, &Kx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(pkex->x, pkex->y, Kx, &Kx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (K.x)",
 			Kx, Kx_len);
@@ -7156,8 +9720,8 @@ out:
 	BN_free(Nx);
 	BN_free(Ny);
 	EC_KEY_free(Y_ec);
-	EVP_PKEY_CTX_free(ctx);
 	BN_CTX_free(bnctx);
+	EC_GROUP_free(group);
 	return msg;
 fail:
 	wpa_printf(MSG_DEBUG, "DPP: PKEX Exchange Response processing failed");
@@ -7283,7 +9847,6 @@ struct wpabuf * dpp_pkex_rx_commit_reveal_req(struct dpp_pkex *pkex,
 					      const u8 *buf, size_t buflen)
 {
 	const struct dpp_curve_params *curve = pkex->own_bi->curve;
-	EVP_PKEY_CTX *ctx = NULL;
 	size_t Jx_len, Lx_len;
 	u8 Jx[DPP_MAX_SHARED_SECRET_LEN];
 	u8 Lx[DPP_MAX_SHARED_SECRET_LEN];
@@ -7367,18 +9930,8 @@ struct wpabuf * dpp_pkex_rx_commit_reveal_req(struct dpp_pkex *pkex,
 			    pkex->peer_bootstrap_key);
 
 	/* ECDH: J' = y * A' */
-	ctx = EVP_PKEY_CTX_new(pkex->y, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pkex->peer_bootstrap_key) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Jx_len) != 1 ||
-	    Jx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Jx, &Jx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(pkex->y, pkex->peer_bootstrap_key, Jx, &Jx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (J.x)",
 			Jx, Jx_len);
@@ -7414,19 +9967,8 @@ struct wpabuf * dpp_pkex_rx_commit_reveal_req(struct dpp_pkex *pkex,
 	wpa_printf(MSG_DEBUG, "DPP: Valid u (I-Auth tag) received");
 
 	/* ECDH: L = b * X' */
-	EVP_PKEY_CTX_free(ctx);
-	ctx = EVP_PKEY_CTX_new(pkex->own_bi->pubkey, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pkex->x) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Lx_len) != 1 ||
-	    Lx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Lx, &Lx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(pkex->own_bi->pubkey, pkex->x, Lx, &Lx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (L.x)",
 			Lx, Lx_len);
@@ -7452,7 +9994,6 @@ struct wpabuf * dpp_pkex_rx_commit_reveal_req(struct dpp_pkex *pkex,
 		goto fail;
 
 out:
-	EVP_PKEY_CTX_free(ctx);
 	os_free(unwrapped);
 	wpabuf_free(A_pub);
 	wpabuf_free(B_pub);
@@ -7481,7 +10022,6 @@ int dpp_pkex_rx_commit_reveal_resp(struct dpp_pkex *pkex, const u8 *hdr,
 	u8 v[DPP_MAX_HASH_LEN];
 	size_t Lx_len;
 	u8 Lx[DPP_MAX_SHARED_SECRET_LEN];
-	EVP_PKEY_CTX *ctx = NULL;
 	struct wpabuf *B_pub = NULL, *X_pub = NULL, *Y_pub = NULL;
 
 #ifdef CONFIG_TESTING_OPTIONS
@@ -7552,18 +10092,8 @@ int dpp_pkex_rx_commit_reveal_resp(struct dpp_pkex *pkex, const u8 *hdr,
 			    pkex->peer_bootstrap_key);
 
 	/* ECDH: L' = x * B' */
-	ctx = EVP_PKEY_CTX_new(pkex->x, NULL);
-	if (!ctx ||
-	    EVP_PKEY_derive_init(ctx) != 1 ||
-	    EVP_PKEY_derive_set_peer(ctx, pkex->peer_bootstrap_key) != 1 ||
-	    EVP_PKEY_derive(ctx, NULL, &Lx_len) != 1 ||
-	    Lx_len > DPP_MAX_SHARED_SECRET_LEN ||
-	    EVP_PKEY_derive(ctx, Lx, &Lx_len) != 1) {
-		wpa_printf(MSG_ERROR,
-			   "DPP: Failed to derive ECDH shared secret: %s",
-			   ERR_error_string(ERR_get_error(), NULL));
+	if (dpp_ecdh(pkex->x, pkex->peer_bootstrap_key, Lx, &Lx_len) < 0)
 		goto fail;
-	}
 
 	wpa_hexdump_key(MSG_DEBUG, "DPP: ECDH shared secret (L.x)",
 			Lx, Lx_len);
@@ -7603,7 +10133,6 @@ out:
 	wpabuf_free(B_pub);
 	wpabuf_free(X_pub);
 	wpabuf_free(Y_pub);
-	EVP_PKEY_CTX_free(ctx);
 	os_free(unwrapped);
 	return ret;
 fail:
@@ -7650,8 +10179,7 @@ char * dpp_corrupt_connector_signature(const char *connector)
 
 	wpa_printf(MSG_DEBUG, "DPP: Original base64url encoded signature: %s",
 		   pos);
-	signature = base64_url_decode((const unsigned char *) pos,
-				      os_strlen(pos), &signature_len);
+	signature = base64_url_decode(pos, os_strlen(pos), &signature_len);
 	if (!signature || signature_len == 0)
 		goto fail;
 	wpa_hexdump(MSG_DEBUG, "DPP: Original Connector signature",
@@ -7659,8 +10187,7 @@ char * dpp_corrupt_connector_signature(const char *connector)
 	signature[signature_len - 1] ^= 0x01;
 	wpa_hexdump(MSG_DEBUG, "DPP: Corrupted Connector signature",
 		    signature, signature_len);
-	signed3 = (char *) base64_url_encode(signature, signature_len,
-					     &signed3_len, 0);
+	signed3 = base64_url_encode(signature, signature_len, &signed3_len);
 	if (!signed3)
 		goto fail;
 	os_memcpy(pos, signed3, signed3_len);
@@ -7678,3 +10205,1982 @@ fail:
 	goto out;
 }
 #endif /* CONFIG_TESTING_OPTIONS */
+
+
+#ifdef CONFIG_DPP2
+
+struct dpp_pfs * dpp_pfs_init(const u8 *net_access_key,
+			      size_t net_access_key_len)
+{
+	struct wpabuf *pub = NULL;
+	EVP_PKEY *own_key;
+	struct dpp_pfs *pfs;
+
+	pfs = os_zalloc(sizeof(*pfs));
+	if (!pfs)
+		return NULL;
+
+	own_key = dpp_set_keypair(&pfs->curve, net_access_key,
+				  net_access_key_len);
+	if (!own_key) {
+		wpa_printf(MSG_ERROR, "DPP: Failed to parse own netAccessKey");
+		goto fail;
+	}
+	EVP_PKEY_free(own_key);
+
+	pfs->ecdh = crypto_ecdh_init(pfs->curve->ike_group);
+	if (!pfs->ecdh)
+		goto fail;
+
+	pub = crypto_ecdh_get_pubkey(pfs->ecdh, 0);
+	pub = wpabuf_zeropad(pub, pfs->curve->prime_len);
+	if (!pub)
+		goto fail;
+
+	pfs->ie = wpabuf_alloc(5 + wpabuf_len(pub));
+	if (!pfs->ie)
+		goto fail;
+	wpabuf_put_u8(pfs->ie, WLAN_EID_EXTENSION);
+	wpabuf_put_u8(pfs->ie, 1 + 2 + wpabuf_len(pub));
+	wpabuf_put_u8(pfs->ie, WLAN_EID_EXT_OWE_DH_PARAM);
+	wpabuf_put_le16(pfs->ie, pfs->curve->ike_group);
+	wpabuf_put_buf(pfs->ie, pub);
+	wpabuf_free(pub);
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: Diffie-Hellman Parameter element",
+			pfs->ie);
+
+	return pfs;
+fail:
+	wpabuf_free(pub);
+	dpp_pfs_free(pfs);
+	return NULL;
+}
+
+
+int dpp_pfs_process(struct dpp_pfs *pfs, const u8 *peer_ie, size_t peer_ie_len)
+{
+	if (peer_ie_len < 2)
+		return -1;
+	if (WPA_GET_LE16(peer_ie) != pfs->curve->ike_group) {
+		wpa_printf(MSG_DEBUG, "DPP: Peer used different group for PFS");
+		return -1;
+	}
+
+	pfs->secret = crypto_ecdh_set_peerkey(pfs->ecdh, 0, peer_ie + 2,
+					      peer_ie_len - 2);
+	pfs->secret = wpabuf_zeropad(pfs->secret, pfs->curve->prime_len);
+	if (!pfs->secret) {
+		wpa_printf(MSG_DEBUG, "DPP: Invalid peer DH public key");
+		return -1;
+	}
+	wpa_hexdump_buf_key(MSG_DEBUG, "DPP: DH shared secret", pfs->secret);
+	return 0;
+}
+
+
+void dpp_pfs_free(struct dpp_pfs *pfs)
+{
+	if (!pfs)
+		return;
+	crypto_ecdh_deinit(pfs->ecdh);
+	wpabuf_free(pfs->ie);
+	wpabuf_clear_free(pfs->secret);
+	os_free(pfs);
+}
+
+#endif /* CONFIG_DPP2 */
+
+
+static unsigned int dpp_next_id(struct dpp_global *dpp)
+{
+	struct dpp_bootstrap_info *bi;
+	unsigned int max_id = 0;
+
+	dl_list_for_each(bi, &dpp->bootstrap, struct dpp_bootstrap_info, list) {
+		if (bi->id > max_id)
+			max_id = bi->id;
+	}
+	return max_id + 1;
+}
+
+
+static int dpp_bootstrap_del(struct dpp_global *dpp, unsigned int id)
+{
+	struct dpp_bootstrap_info *bi, *tmp;
+	int found = 0;
+
+	if (!dpp)
+		return -1;
+
+	dl_list_for_each_safe(bi, tmp, &dpp->bootstrap,
+			      struct dpp_bootstrap_info, list) {
+		if (id && bi->id != id)
+			continue;
+		found = 1;
+		dl_list_del(&bi->list);
+		dpp_bootstrap_info_free(bi);
+	}
+
+	if (id == 0)
+		return 0; /* flush succeeds regardless of entries found */
+	return found ? 0 : -1;
+}
+
+
+struct dpp_bootstrap_info * dpp_add_qr_code(struct dpp_global *dpp,
+					    const char *uri)
+{
+	struct dpp_bootstrap_info *bi;
+
+	if (!dpp)
+		return NULL;
+
+	bi = dpp_parse_uri(uri);
+	if (!bi)
+		return NULL;
+
+	bi->type = DPP_BOOTSTRAP_QR_CODE;
+	bi->id = dpp_next_id(dpp);
+	dl_list_add(&dpp->bootstrap, &bi->list);
+	return bi;
+}
+
+
+struct dpp_bootstrap_info * dpp_add_nfc_uri(struct dpp_global *dpp,
+					    const char *uri)
+{
+	struct dpp_bootstrap_info *bi;
+
+	if (!dpp)
+		return NULL;
+
+	bi = dpp_parse_uri(uri);
+	if (!bi)
+		return NULL;
+
+	bi->type = DPP_BOOTSTRAP_NFC_URI;
+	bi->id = dpp_next_id(dpp);
+	dl_list_add(&dpp->bootstrap, &bi->list);
+	return bi;
+}
+
+
+int dpp_bootstrap_gen(struct dpp_global *dpp, const char *cmd)
+{
+	char *mac = NULL, *info = NULL, *curve = NULL;
+	char *key = NULL;
+	u8 *privkey = NULL;
+	size_t privkey_len = 0;
+	int ret = -1;
+	struct dpp_bootstrap_info *bi;
+
+	if (!dpp)
+		return -1;
+
+	bi = os_zalloc(sizeof(*bi));
+	if (!bi)
+		goto fail;
+
+	if (os_strstr(cmd, "type=qrcode"))
+		bi->type = DPP_BOOTSTRAP_QR_CODE;
+	else if (os_strstr(cmd, "type=pkex"))
+		bi->type = DPP_BOOTSTRAP_PKEX;
+	else if (os_strstr(cmd, "type=nfc-uri"))
+		bi->type = DPP_BOOTSTRAP_NFC_URI;
+	else
+		goto fail;
+
+	bi->chan = get_param(cmd, " chan=");
+	mac = get_param(cmd, " mac=");
+	info = get_param(cmd, " info=");
+	curve = get_param(cmd, " curve=");
+	key = get_param(cmd, " key=");
+
+	if (key) {
+		privkey_len = os_strlen(key) / 2;
+		privkey = os_malloc(privkey_len);
+		if (!privkey ||
+		    hexstr2bin(key, privkey, privkey_len) < 0)
+			goto fail;
+	}
+
+	if (dpp_keygen(bi, curve, privkey, privkey_len) < 0 ||
+	    dpp_parse_uri_chan_list(bi, bi->chan) < 0 ||
+	    dpp_parse_uri_mac(bi, mac) < 0 ||
+	    dpp_parse_uri_info(bi, info) < 0 ||
+	    dpp_gen_uri(bi) < 0)
+		goto fail;
+
+	bi->id = dpp_next_id(dpp);
+	dl_list_add(&dpp->bootstrap, &bi->list);
+	ret = bi->id;
+	bi = NULL;
+fail:
+	os_free(curve);
+	os_free(mac);
+	os_free(info);
+	str_clear_free(key);
+	bin_clear_free(privkey, privkey_len);
+	dpp_bootstrap_info_free(bi);
+	return ret;
+}
+
+
+struct dpp_bootstrap_info *
+dpp_bootstrap_get_id(struct dpp_global *dpp, unsigned int id)
+{
+	struct dpp_bootstrap_info *bi;
+
+	if (!dpp)
+		return NULL;
+
+	dl_list_for_each(bi, &dpp->bootstrap, struct dpp_bootstrap_info, list) {
+		if (bi->id == id)
+			return bi;
+	}
+	return NULL;
+}
+
+
+int dpp_bootstrap_remove(struct dpp_global *dpp, const char *id)
+{
+	unsigned int id_val;
+
+	if (os_strcmp(id, "*") == 0) {
+		id_val = 0;
+	} else {
+		id_val = atoi(id);
+		if (id_val == 0)
+			return -1;
+	}
+
+	return dpp_bootstrap_del(dpp, id_val);
+}
+
+
+struct dpp_bootstrap_info *
+dpp_pkex_finish(struct dpp_global *dpp, struct dpp_pkex *pkex, const u8 *peer,
+		unsigned int freq)
+{
+	struct dpp_bootstrap_info *bi;
+
+	bi = os_zalloc(sizeof(*bi));
+	if (!bi)
+		return NULL;
+	bi->id = dpp_next_id(dpp);
+	bi->type = DPP_BOOTSTRAP_PKEX;
+	os_memcpy(bi->mac_addr, peer, ETH_ALEN);
+	bi->num_freq = 1;
+	bi->freq[0] = freq;
+	bi->curve = pkex->own_bi->curve;
+	bi->pubkey = pkex->peer_bootstrap_key;
+	pkex->peer_bootstrap_key = NULL;
+	if (dpp_bootstrap_key_hash(bi) < 0) {
+		dpp_bootstrap_info_free(bi);
+		return NULL;
+	}
+	dpp_pkex_free(pkex);
+	dl_list_add(&dpp->bootstrap, &bi->list);
+	return bi;
+}
+
+
+const char * dpp_bootstrap_get_uri(struct dpp_global *dpp, unsigned int id)
+{
+	struct dpp_bootstrap_info *bi;
+
+	bi = dpp_bootstrap_get_id(dpp, id);
+	if (!bi)
+		return NULL;
+	return bi->uri;
+}
+
+
+int dpp_bootstrap_info(struct dpp_global *dpp, int id,
+		       char *reply, int reply_size)
+{
+	struct dpp_bootstrap_info *bi;
+	char pkhash[2 * SHA256_MAC_LEN + 1];
+
+	bi = dpp_bootstrap_get_id(dpp, id);
+	if (!bi)
+		return -1;
+	wpa_snprintf_hex(pkhash, sizeof(pkhash), bi->pubkey_hash,
+			 SHA256_MAC_LEN);
+	return os_snprintf(reply, reply_size, "type=%s\n"
+			   "mac_addr=" MACSTR "\n"
+			   "info=%s\n"
+			   "num_freq=%u\n"
+			   "use_freq=%u\n"
+			   "curve=%s\n"
+			   "pkhash=%s\n",
+			   dpp_bootstrap_type_txt(bi->type),
+			   MAC2STR(bi->mac_addr),
+			   bi->info ? bi->info : "",
+			   bi->num_freq,
+			   bi->num_freq == 1 ? bi->freq[0] : 0,
+			   bi->curve->name,
+			   pkhash);
+}
+
+
+void dpp_bootstrap_find_pair(struct dpp_global *dpp, const u8 *i_bootstrap,
+			     const u8 *r_bootstrap,
+			     struct dpp_bootstrap_info **own_bi,
+			     struct dpp_bootstrap_info **peer_bi)
+{
+	struct dpp_bootstrap_info *bi;
+
+	*own_bi = NULL;
+	*peer_bi = NULL;
+	if (!dpp)
+		return;
+
+	dl_list_for_each(bi, &dpp->bootstrap, struct dpp_bootstrap_info, list) {
+		if (!*own_bi && bi->own &&
+		    os_memcmp(bi->pubkey_hash, r_bootstrap,
+			      SHA256_MAC_LEN) == 0) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: Found matching own bootstrapping information");
+			*own_bi = bi;
+		}
+
+		if (!*peer_bi && !bi->own &&
+		    os_memcmp(bi->pubkey_hash, i_bootstrap,
+			      SHA256_MAC_LEN) == 0) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: Found matching peer bootstrapping information");
+			*peer_bi = bi;
+		}
+
+		if (*own_bi && *peer_bi)
+			break;
+	}
+
+}
+
+
+static int dpp_nfc_update_bi_channel(struct dpp_bootstrap_info *own_bi,
+				     struct dpp_bootstrap_info *peer_bi)
+{
+	unsigned int i, freq = 0;
+	enum hostapd_hw_mode mode;
+	u8 op_class, channel;
+	char chan[20];
+
+	if (peer_bi->num_freq == 0)
+		return 0; /* no channel preference/constraint */
+
+	for (i = 0; i < peer_bi->num_freq; i++) {
+		if (own_bi->num_freq == 0 ||
+		    freq_included(own_bi->freq, own_bi->num_freq,
+				  peer_bi->freq[i])) {
+			freq = peer_bi->freq[i];
+			break;
+		}
+	}
+	if (!freq) {
+		wpa_printf(MSG_DEBUG, "DPP: No common channel found");
+		return -1;
+	}
+
+	mode = ieee80211_freq_to_channel_ext(freq, 0, 0, &op_class, &channel);
+	if (mode == NUM_HOSTAPD_MODES) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Could not determine operating class or channel number for %u MHz",
+			   freq);
+	}
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Selected %u MHz (op_class %u channel %u) as the negotiation channel based on information from NFC negotiated handover",
+		   freq, op_class, channel);
+	os_snprintf(chan, sizeof(chan), "%u/%u", op_class, channel);
+	os_free(own_bi->chan);
+	own_bi->chan = os_strdup(chan);
+	own_bi->freq[0] = freq;
+	own_bi->num_freq = 1;
+	os_free(peer_bi->chan);
+	peer_bi->chan = os_strdup(chan);
+	peer_bi->freq[0] = freq;
+	peer_bi->num_freq = 1;
+
+	return dpp_gen_uri(own_bi);
+}
+
+
+static int dpp_nfc_update_bi_key(struct dpp_bootstrap_info *own_bi,
+				 struct dpp_bootstrap_info *peer_bi)
+{
+	if (peer_bi->curve == own_bi->curve)
+		return 0;
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Update own bootstrapping key to match peer curve from NFC handover");
+
+	EVP_PKEY_free(own_bi->pubkey);
+	own_bi->pubkey = NULL;
+
+	if (dpp_keygen(own_bi, peer_bi->curve->name, NULL, 0) < 0 ||
+	    dpp_gen_uri(own_bi) < 0)
+		goto fail;
+
+	return 0;
+fail:
+	dl_list_del(&own_bi->list);
+	dpp_bootstrap_info_free(own_bi);
+	return -1;
+}
+
+
+int dpp_nfc_update_bi(struct dpp_bootstrap_info *own_bi,
+		      struct dpp_bootstrap_info *peer_bi)
+{
+	if (dpp_nfc_update_bi_channel(own_bi, peer_bi) < 0 ||
+	    dpp_nfc_update_bi_key(own_bi, peer_bi) < 0)
+		return -1;
+	return 0;
+}
+
+
+static unsigned int dpp_next_configurator_id(struct dpp_global *dpp)
+{
+	struct dpp_configurator *conf;
+	unsigned int max_id = 0;
+
+	dl_list_for_each(conf, &dpp->configurator, struct dpp_configurator,
+			 list) {
+		if (conf->id > max_id)
+			max_id = conf->id;
+	}
+	return max_id + 1;
+}
+
+
+int dpp_configurator_add(struct dpp_global *dpp, const char *cmd)
+{
+	char *curve = NULL;
+	char *key = NULL;
+	u8 *privkey = NULL;
+	size_t privkey_len = 0;
+	int ret = -1;
+	struct dpp_configurator *conf = NULL;
+
+	curve = get_param(cmd, " curve=");
+	key = get_param(cmd, " key=");
+
+	if (key) {
+		privkey_len = os_strlen(key) / 2;
+		privkey = os_malloc(privkey_len);
+		if (!privkey ||
+		    hexstr2bin(key, privkey, privkey_len) < 0)
+			goto fail;
+	}
+
+	conf = dpp_keygen_configurator(curve, privkey, privkey_len);
+	if (!conf)
+		goto fail;
+
+	conf->id = dpp_next_configurator_id(dpp);
+	dl_list_add(&dpp->configurator, &conf->list);
+	ret = conf->id;
+	conf = NULL;
+fail:
+	os_free(curve);
+	str_clear_free(key);
+	bin_clear_free(privkey, privkey_len);
+	dpp_configurator_free(conf);
+	return ret;
+}
+
+
+static int dpp_configurator_del(struct dpp_global *dpp, unsigned int id)
+{
+	struct dpp_configurator *conf, *tmp;
+	int found = 0;
+
+	if (!dpp)
+		return -1;
+
+	dl_list_for_each_safe(conf, tmp, &dpp->configurator,
+			      struct dpp_configurator, list) {
+		if (id && conf->id != id)
+			continue;
+		found = 1;
+		dl_list_del(&conf->list);
+		dpp_configurator_free(conf);
+	}
+
+	if (id == 0)
+		return 0; /* flush succeeds regardless of entries found */
+	return found ? 0 : -1;
+}
+
+
+int dpp_configurator_remove(struct dpp_global *dpp, const char *id)
+{
+	unsigned int id_val;
+
+	if (os_strcmp(id, "*") == 0) {
+		id_val = 0;
+	} else {
+		id_val = atoi(id);
+		if (id_val == 0)
+			return -1;
+	}
+
+	return dpp_configurator_del(dpp, id_val);
+}
+
+
+int dpp_configurator_get_key_id(struct dpp_global *dpp, unsigned int id,
+				char *buf, size_t buflen)
+{
+	struct dpp_configurator *conf;
+
+	conf = dpp_configurator_get_id(dpp, id);
+	if (!conf)
+		return -1;
+
+	return dpp_configurator_get_key(conf, buf, buflen);
+}
+
+
+#ifdef CONFIG_DPP2
+
+int dpp_configurator_from_backup(struct dpp_global *dpp,
+				 struct dpp_asymmetric_key *key)
+{
+	struct dpp_configurator *conf;
+	const EC_KEY *eckey;
+	const EC_GROUP *group;
+	int nid;
+	const struct dpp_curve_params *curve;
+
+	if (!key->csign)
+		return -1;
+	eckey = EVP_PKEY_get0_EC_KEY(key->csign);
+	if (!eckey)
+		return -1;
+	group = EC_KEY_get0_group(eckey);
+	if (!group)
+		return -1;
+	nid = EC_GROUP_get_curve_name(group);
+	curve = dpp_get_curve_nid(nid);
+	if (!curve) {
+		wpa_printf(MSG_INFO, "DPP: Unsupported group in c-sign-key");
+		return -1;
+	}
+
+	conf = os_zalloc(sizeof(*conf));
+	if (!conf)
+		return -1;
+	conf->curve = curve;
+	conf->csign = key->csign;
+	key->csign = NULL;
+	conf->own = 1;
+	if (dpp_configurator_gen_kid(conf) < 0) {
+		dpp_configurator_free(conf);
+		return -1;
+	}
+
+	conf->id = dpp_next_configurator_id(dpp);
+	dl_list_add(&dpp->configurator, &conf->list);
+	return conf->id;
+}
+
+
+static void dpp_controller_conn_status_result_wait_timeout(void *eloop_ctx,
+							   void *timeout_ctx);
+
+
+static void dpp_connection_free(struct dpp_connection *conn)
+{
+	if (conn->sock >= 0) {
+		wpa_printf(MSG_DEBUG, "DPP: Close Controller socket %d",
+			   conn->sock);
+		eloop_unregister_sock(conn->sock, EVENT_TYPE_READ);
+		eloop_unregister_sock(conn->sock, EVENT_TYPE_WRITE);
+		close(conn->sock);
+	}
+	eloop_cancel_timeout(dpp_controller_conn_status_result_wait_timeout,
+			     conn, NULL);
+	wpabuf_free(conn->msg);
+	wpabuf_free(conn->msg_out);
+	dpp_auth_deinit(conn->auth);
+	os_free(conn);
+}
+
+
+static void dpp_connection_remove(struct dpp_connection *conn)
+{
+	dl_list_del(&conn->list);
+	dpp_connection_free(conn);
+}
+
+
+static void dpp_tcp_init_flush(struct dpp_global *dpp)
+{
+	struct dpp_connection *conn, *tmp;
+
+	dl_list_for_each_safe(conn, tmp, &dpp->tcp_init, struct dpp_connection,
+			      list)
+		dpp_connection_remove(conn);
+}
+
+
+static void dpp_relay_controller_free(struct dpp_relay_controller *ctrl)
+{
+	struct dpp_connection *conn, *tmp;
+
+	dl_list_for_each_safe(conn, tmp, &ctrl->conn, struct dpp_connection,
+			      list)
+		dpp_connection_remove(conn);
+	os_free(ctrl);
+}
+
+
+static void dpp_relay_flush_controllers(struct dpp_global *dpp)
+{
+	struct dpp_relay_controller *ctrl, *tmp;
+
+	if (!dpp)
+		return;
+
+	dl_list_for_each_safe(ctrl, tmp, &dpp->controllers,
+			      struct dpp_relay_controller, list) {
+		dl_list_del(&ctrl->list);
+		dpp_relay_controller_free(ctrl);
+	}
+}
+
+#endif /* CONFIG_DPP2 */
+
+
+struct dpp_global * dpp_global_init(struct dpp_global_config *config)
+{
+	struct dpp_global *dpp;
+
+	dpp = os_zalloc(sizeof(*dpp));
+	if (!dpp)
+		return NULL;
+	dpp->msg_ctx = config->msg_ctx;
+#ifdef CONFIG_DPP2
+	dpp->cb_ctx = config->cb_ctx;
+	dpp->process_conf_obj = config->process_conf_obj;
+#endif /* CONFIG_DPP2 */
+
+	dl_list_init(&dpp->bootstrap);
+	dl_list_init(&dpp->configurator);
+#ifdef CONFIG_DPP2
+	dl_list_init(&dpp->controllers);
+	dl_list_init(&dpp->tcp_init);
+#endif /* CONFIG_DPP2 */
+
+	return dpp;
+}
+
+
+void dpp_global_clear(struct dpp_global *dpp)
+{
+	if (!dpp)
+		return;
+
+	dpp_bootstrap_del(dpp, 0);
+	dpp_configurator_del(dpp, 0);
+#ifdef CONFIG_DPP2
+	dpp_tcp_init_flush(dpp);
+	dpp_relay_flush_controllers(dpp);
+	dpp_controller_stop(dpp);
+#endif /* CONFIG_DPP2 */
+}
+
+
+void dpp_global_deinit(struct dpp_global *dpp)
+{
+	dpp_global_clear(dpp);
+	os_free(dpp);
+}
+
+
+#ifdef CONFIG_DPP2
+
+static void dpp_controller_rx(int sd, void *eloop_ctx, void *sock_ctx);
+static void dpp_conn_tx_ready(int sock, void *eloop_ctx, void *sock_ctx);
+static void dpp_controller_auth_success(struct dpp_connection *conn,
+					int initiator);
+
+
+int dpp_relay_add_controller(struct dpp_global *dpp,
+			     struct dpp_relay_config *config)
+{
+	struct dpp_relay_controller *ctrl;
+
+	if (!dpp)
+		return -1;
+
+	ctrl = os_zalloc(sizeof(*ctrl));
+	if (!ctrl)
+		return -1;
+	dl_list_init(&ctrl->conn);
+	ctrl->global = dpp;
+	os_memcpy(&ctrl->ipaddr, config->ipaddr, sizeof(*config->ipaddr));
+	os_memcpy(ctrl->pkhash, config->pkhash, SHA256_MAC_LEN);
+	ctrl->cb_ctx = config->cb_ctx;
+	ctrl->tx = config->tx;
+	ctrl->gas_resp_tx = config->gas_resp_tx;
+	dl_list_add(&dpp->controllers, &ctrl->list);
+	return 0;
+}
+
+
+static struct dpp_relay_controller *
+dpp_relay_controller_get(struct dpp_global *dpp, const u8 *pkhash)
+{
+	struct dpp_relay_controller *ctrl;
+
+	if (!dpp)
+		return NULL;
+
+	dl_list_for_each(ctrl, &dpp->controllers, struct dpp_relay_controller,
+			 list) {
+		if (os_memcmp(pkhash, ctrl->pkhash, SHA256_MAC_LEN) == 0)
+			return ctrl;
+	}
+
+	return NULL;
+}
+
+
+static void dpp_controller_gas_done(struct dpp_connection *conn)
+{
+	struct dpp_authentication *auth = conn->auth;
+
+	if (auth->peer_version >= 2 &&
+	    auth->conf_resp_status == DPP_STATUS_OK) {
+		wpa_printf(MSG_DEBUG, "DPP: Wait for Configuration Result");
+		auth->waiting_conf_result = 1;
+		return;
+	}
+
+	wpa_msg(conn->ctrl->global->msg_ctx, MSG_INFO, DPP_EVENT_CONF_SENT);
+	dpp_connection_remove(conn);
+}
+
+
+static int dpp_tcp_send(struct dpp_connection *conn)
+{
+	int res;
+
+	if (!conn->msg_out) {
+		eloop_unregister_sock(conn->sock, EVENT_TYPE_WRITE);
+		conn->write_eloop = 0;
+		return -1;
+	}
+	res = send(conn->sock,
+		   wpabuf_head_u8(conn->msg_out) + conn->msg_out_pos,
+		   wpabuf_len(conn->msg_out) - conn->msg_out_pos, 0);
+	if (res < 0) {
+		wpa_printf(MSG_DEBUG, "DPP: Failed to send buffer: %s",
+			   strerror(errno));
+		dpp_connection_remove(conn);
+		return -1;
+	}
+
+	conn->msg_out_pos += res;
+	if (wpabuf_len(conn->msg_out) > conn->msg_out_pos) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: %u/%u bytes of message sent to Controller",
+			   (unsigned int) conn->msg_out_pos,
+			   (unsigned int) wpabuf_len(conn->msg_out));
+		if (!conn->write_eloop &&
+		    eloop_register_sock(conn->sock, EVENT_TYPE_WRITE,
+					dpp_conn_tx_ready, conn, NULL) == 0)
+			conn->write_eloop = 1;
+		return 1;
+	}
+
+	wpa_printf(MSG_DEBUG, "DPP: Full message sent over TCP");
+	wpabuf_free(conn->msg_out);
+	conn->msg_out = NULL;
+	conn->msg_out_pos = 0;
+	eloop_unregister_sock(conn->sock, EVENT_TYPE_WRITE);
+	conn->write_eloop = 0;
+	if (!conn->read_eloop &&
+	    eloop_register_sock(conn->sock, EVENT_TYPE_READ,
+				dpp_controller_rx, conn, NULL) == 0)
+		conn->read_eloop = 1;
+	if (conn->on_tcp_tx_complete_remove) {
+		dpp_connection_remove(conn);
+	} else if (conn->ctrl && conn->on_tcp_tx_complete_gas_done &&
+		   conn->auth) {
+		dpp_controller_gas_done(conn);
+	} else if (conn->on_tcp_tx_complete_auth_ok) {
+		conn->on_tcp_tx_complete_auth_ok = 0;
+		dpp_controller_auth_success(conn, 1);
+	}
+
+	return 0;
+}
+
+
+static void dpp_controller_start_gas_client(struct dpp_connection *conn)
+{
+	struct dpp_authentication *auth = conn->auth;
+	struct wpabuf *buf;
+	int netrole_ap = 0; /* TODO: make this configurable */
+
+	buf = dpp_build_conf_req_helper(auth, "Test", netrole_ap, NULL, NULL);
+	if (!buf) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No configuration request data available");
+		return;
+	}
+
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = wpabuf_alloc(4 + wpabuf_len(buf) - 1);
+	if (!conn->msg_out) {
+		wpabuf_free(buf);
+		return;
+	}
+	wpabuf_put_be32(conn->msg_out, wpabuf_len(buf) - 1);
+	wpabuf_put_data(conn->msg_out, wpabuf_head_u8(buf) + 1,
+			wpabuf_len(buf) - 1);
+	wpabuf_free(buf);
+
+	if (dpp_tcp_send(conn) == 1) {
+		if (!conn->write_eloop) {
+			if (eloop_register_sock(conn->sock, EVENT_TYPE_WRITE,
+						dpp_conn_tx_ready,
+						conn, NULL) < 0)
+				return;
+			conn->write_eloop = 1;
+		}
+	}
+}
+
+
+static void dpp_controller_auth_success(struct dpp_connection *conn,
+					int initiator)
+{
+	struct dpp_authentication *auth = conn->auth;
+
+	if (!auth)
+		return;
+
+	wpa_printf(MSG_DEBUG, "DPP: Authentication succeeded");
+	wpa_msg(conn->global->msg_ctx, MSG_INFO,
+		DPP_EVENT_AUTH_SUCCESS "init=%d", initiator);
+#ifdef CONFIG_TESTING_OPTIONS
+	if (dpp_test == DPP_TEST_STOP_AT_AUTH_CONF) {
+		wpa_printf(MSG_INFO,
+			   "DPP: TESTING - stop at Authentication Confirm");
+		if (auth->configurator) {
+			/* Prevent GAS response */
+			auth->auth_success = 0;
+		}
+		return;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
+
+	if (!auth->configurator)
+		dpp_controller_start_gas_client(conn);
+}
+
+
+static void dpp_conn_tx_ready(int sock, void *eloop_ctx, void *sock_ctx)
+{
+	struct dpp_connection *conn = eloop_ctx;
+
+	wpa_printf(MSG_DEBUG, "DPP: TCP socket %d ready for TX", sock);
+	dpp_tcp_send(conn);
+}
+
+
+static int dpp_ipaddr_to_sockaddr(struct sockaddr *addr, socklen_t *addrlen,
+				  const struct hostapd_ip_addr *ipaddr,
+				  int port)
+{
+	struct sockaddr_in *dst;
+#ifdef CONFIG_IPV6
+	struct sockaddr_in6 *dst6;
+#endif /* CONFIG_IPV6 */
+
+	switch (ipaddr->af) {
+	case AF_INET:
+		dst = (struct sockaddr_in *) addr;
+		os_memset(dst, 0, sizeof(*dst));
+		dst->sin_family = AF_INET;
+		dst->sin_addr.s_addr = ipaddr->u.v4.s_addr;
+		dst->sin_port = htons(port);
+		*addrlen = sizeof(*dst);
+		break;
+#ifdef CONFIG_IPV6
+	case AF_INET6:
+		dst6 = (struct sockaddr_in6 *) addr;
+		os_memset(dst6, 0, sizeof(*dst6));
+		dst6->sin6_family = AF_INET6;
+		os_memcpy(&dst6->sin6_addr, &ipaddr->u.v6,
+			  sizeof(struct in6_addr));
+		dst6->sin6_port = htons(port);
+		*addrlen = sizeof(*dst6);
+		break;
+#endif /* CONFIG_IPV6 */
+	default:
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static struct dpp_connection *
+dpp_relay_new_conn(struct dpp_relay_controller *ctrl, const u8 *src,
+		   unsigned int freq)
+{
+	struct dpp_connection *conn;
+	struct sockaddr_storage addr;
+	socklen_t addrlen;
+	char txt[100];
+
+	if (dl_list_len(&ctrl->conn) >= 15) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Too many ongoing Relay connections to the Controller - cannot start a new one");
+		return NULL;
+	}
+
+	if (dpp_ipaddr_to_sockaddr((struct sockaddr *) &addr, &addrlen,
+				   &ctrl->ipaddr, DPP_TCP_PORT) < 0)
+		return NULL;
+
+	conn = os_zalloc(sizeof(*conn));
+	if (!conn)
+		return NULL;
+
+	conn->global = ctrl->global;
+	conn->relay = ctrl;
+	os_memcpy(conn->mac_addr, src, ETH_ALEN);
+	conn->freq = freq;
+
+	conn->sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (conn->sock < 0)
+		goto fail;
+	wpa_printf(MSG_DEBUG, "DPP: TCP relay socket %d connection to %s",
+		   conn->sock, hostapd_ip_txt(&ctrl->ipaddr, txt, sizeof(txt)));
+
+	if (fcntl(conn->sock, F_SETFL, O_NONBLOCK) != 0) {
+		wpa_printf(MSG_DEBUG, "DPP: fnctl(O_NONBLOCK) failed: %s",
+			   strerror(errno));
+		goto fail;
+	}
+
+	if (connect(conn->sock, (struct sockaddr *) &addr, addrlen) < 0) {
+		if (errno != EINPROGRESS) {
+			wpa_printf(MSG_DEBUG, "DPP: Failed to connect: %s",
+				   strerror(errno));
+			goto fail;
+		}
+
+		/*
+		 * Continue connecting in the background; eloop will call us
+		 * once the connection is ready (or failed).
+		 */
+	}
+
+	if (eloop_register_sock(conn->sock, EVENT_TYPE_WRITE,
+				dpp_conn_tx_ready, conn, NULL) < 0)
+		goto fail;
+	conn->write_eloop = 1;
+
+	/* TODO: eloop timeout to clear a connection if it does not complete
+	 * properly */
+
+	dl_list_add(&ctrl->conn, &conn->list);
+	return conn;
+fail:
+	dpp_connection_free(conn);
+	return NULL;
+}
+
+
+static struct wpabuf * dpp_tcp_encaps(const u8 *hdr, const u8 *buf, size_t len)
+{
+	struct wpabuf *msg;
+
+	msg = wpabuf_alloc(4 + 1 + DPP_HDR_LEN + len);
+	if (!msg)
+		return NULL;
+	wpabuf_put_be32(msg, 1 + DPP_HDR_LEN + len);
+	wpabuf_put_u8(msg, WLAN_PA_VENDOR_SPECIFIC);
+	wpabuf_put_data(msg, hdr, DPP_HDR_LEN);
+	wpabuf_put_data(msg, buf, len);
+	wpa_hexdump_buf(MSG_MSGDUMP, "DPP: Outgoing TCP message", msg);
+	return msg;
+}
+
+
+static int dpp_relay_tx(struct dpp_connection *conn, const u8 *hdr,
+			const u8 *buf, size_t len)
+{
+	u8 type = hdr[DPP_HDR_LEN - 1];
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Continue already established Relay/Controller connection for this session");
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = dpp_tcp_encaps(hdr, buf, len);
+	if (!conn->msg_out) {
+		dpp_connection_remove(conn);
+		return -1;
+	}
+
+	/* TODO: for proto ver 1, need to do remove connection based on GAS Resp
+	 * TX status */
+	if (type == DPP_PA_CONFIGURATION_RESULT)
+		conn->on_tcp_tx_complete_remove = 1;
+	dpp_tcp_send(conn);
+	return 0;
+}
+
+
+int dpp_relay_rx_action(struct dpp_global *dpp, const u8 *src, const u8 *hdr,
+			const u8 *buf, size_t len, unsigned int freq,
+			const u8 *i_bootstrap, const u8 *r_bootstrap)
+{
+	struct dpp_relay_controller *ctrl;
+	struct dpp_connection *conn;
+	u8 type = hdr[DPP_HDR_LEN - 1];
+
+	/* Check if there is an already started session for this peer and if so,
+	 * continue that session (send this over TCP) and return 0.
+	 */
+	if (type != DPP_PA_PEER_DISCOVERY_REQ &&
+	    type != DPP_PA_PEER_DISCOVERY_RESP) {
+		dl_list_for_each(ctrl, &dpp->controllers,
+				 struct dpp_relay_controller, list) {
+			dl_list_for_each(conn, &ctrl->conn,
+					 struct dpp_connection, list) {
+				if (os_memcmp(src, conn->mac_addr,
+					      ETH_ALEN) == 0)
+					return dpp_relay_tx(conn, hdr, buf, len);
+			}
+		}
+	}
+
+	if (!r_bootstrap)
+		return -1;
+
+	ctrl = dpp_relay_controller_get(dpp, r_bootstrap);
+	if (!ctrl)
+		return -1;
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Authentication Request for a configured Controller");
+	conn = dpp_relay_new_conn(ctrl, src, freq);
+	if (!conn)
+		return -1;
+
+	conn->msg_out = dpp_tcp_encaps(hdr, buf, len);
+	if (!conn->msg_out) {
+		dpp_connection_remove(conn);
+		return -1;
+	}
+	/* Message will be sent in dpp_conn_tx_ready() */
+
+	return 0;
+}
+
+
+int dpp_relay_rx_gas_req(struct dpp_global *dpp, const u8 *src, const u8 *data,
+			 size_t data_len)
+{
+	struct dpp_relay_controller *ctrl;
+	struct dpp_connection *conn, *found = NULL;
+	struct wpabuf *msg;
+
+	/* Check if there is a successfully completed authentication for this
+	 * and if so, continue that session (send this over TCP) and return 0.
+	 */
+	dl_list_for_each(ctrl, &dpp->controllers,
+			 struct dpp_relay_controller, list) {
+		if (found)
+			break;
+		dl_list_for_each(conn, &ctrl->conn,
+				 struct dpp_connection, list) {
+			if (os_memcmp(src, conn->mac_addr,
+				      ETH_ALEN) == 0) {
+				found = conn;
+				break;
+			}
+		}
+	}
+
+	if (!found)
+		return -1;
+
+	msg = wpabuf_alloc(4 + 1 + data_len);
+	if (!msg)
+		return -1;
+	wpabuf_put_be32(msg, 1 + data_len);
+	wpabuf_put_u8(msg, WLAN_PA_GAS_INITIAL_REQ);
+	wpabuf_put_data(msg, data, data_len);
+	wpa_hexdump_buf(MSG_MSGDUMP, "DPP: Outgoing TCP message", msg);
+
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = msg;
+	dpp_tcp_send(conn);
+	return 0;
+}
+
+
+static void dpp_controller_free(struct dpp_controller *ctrl)
+{
+	struct dpp_connection *conn, *tmp;
+
+	if (!ctrl)
+		return;
+
+	dl_list_for_each_safe(conn, tmp, &ctrl->conn, struct dpp_connection,
+			      list)
+		dpp_connection_remove(conn);
+
+	if (ctrl->sock >= 0) {
+		close(ctrl->sock);
+		eloop_unregister_sock(ctrl->sock, EVENT_TYPE_READ);
+	}
+	os_free(ctrl->configurator_params);
+	os_free(ctrl);
+}
+
+
+static int dpp_controller_rx_auth_req(struct dpp_connection *conn,
+				      const u8 *hdr, const u8 *buf, size_t len)
+{
+	const u8 *r_bootstrap, *i_bootstrap;
+	u16 r_bootstrap_len, i_bootstrap_len;
+	struct dpp_bootstrap_info *own_bi = NULL, *peer_bi = NULL;
+
+	if (!conn->ctrl)
+		return 0;
+
+	wpa_printf(MSG_DEBUG, "DPP: Authentication Request");
+
+	r_bootstrap = dpp_get_attr(buf, len, DPP_ATTR_R_BOOTSTRAP_KEY_HASH,
+				   &r_bootstrap_len);
+	if (!r_bootstrap || r_bootstrap_len != SHA256_MAC_LEN) {
+		wpa_printf(MSG_INFO,
+			   "Missing or invalid required Responder Bootstrapping Key Hash attribute");
+		return -1;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: Responder Bootstrapping Key Hash",
+		    r_bootstrap, r_bootstrap_len);
+
+	i_bootstrap = dpp_get_attr(buf, len, DPP_ATTR_I_BOOTSTRAP_KEY_HASH,
+				   &i_bootstrap_len);
+	if (!i_bootstrap || i_bootstrap_len != SHA256_MAC_LEN) {
+		wpa_printf(MSG_INFO,
+			   "Missing or invalid required Initiator Bootstrapping Key Hash attribute");
+		return -1;
+	}
+	wpa_hexdump(MSG_MSGDUMP, "DPP: Initiator Bootstrapping Key Hash",
+		    i_bootstrap, i_bootstrap_len);
+
+	/* Try to find own and peer bootstrapping key matches based on the
+	 * received hash values */
+	dpp_bootstrap_find_pair(conn->ctrl->global, i_bootstrap, r_bootstrap,
+				&own_bi, &peer_bi);
+	if (!own_bi) {
+		wpa_printf(MSG_INFO,
+			"No matching own bootstrapping key found - ignore message");
+		return -1;
+	}
+
+	if (conn->auth) {
+		wpa_printf(MSG_INFO,
+			   "Already in DPP authentication exchange - ignore new one");
+		return 0;
+	}
+
+	conn->auth = dpp_auth_req_rx(conn->ctrl->global->msg_ctx,
+				     conn->ctrl->allowed_roles,
+				     conn->ctrl->qr_mutual,
+				     peer_bi, own_bi, -1, hdr, buf, len);
+	if (!conn->auth) {
+		wpa_printf(MSG_DEBUG, "DPP: No response generated");
+		return -1;
+	}
+
+	if (dpp_set_configurator(conn->ctrl->global, conn->ctrl->global->msg_ctx,
+				 conn->auth,
+				 conn->ctrl->configurator_params) < 0) {
+		dpp_connection_remove(conn);
+		return -1;
+	}
+
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = wpabuf_alloc(4 + wpabuf_len(conn->auth->resp_msg) - 1);
+	if (!conn->msg_out)
+		return -1;
+	wpabuf_put_be32(conn->msg_out, wpabuf_len(conn->auth->resp_msg) - 1);
+	wpabuf_put_data(conn->msg_out, wpabuf_head_u8(conn->auth->resp_msg) + 1,
+			wpabuf_len(conn->auth->resp_msg) - 1);
+
+	if (dpp_tcp_send(conn) == 1) {
+		if (!conn->write_eloop) {
+			if (eloop_register_sock(conn->sock, EVENT_TYPE_WRITE,
+						dpp_conn_tx_ready,
+						conn, NULL) < 0)
+				return -1;
+			conn->write_eloop = 1;
+		}
+	}
+
+	return 0;
+}
+
+
+static int dpp_controller_rx_auth_resp(struct dpp_connection *conn,
+				       const u8 *hdr, const u8 *buf, size_t len)
+{
+	struct dpp_authentication *auth = conn->auth;
+	struct wpabuf *msg;
+
+	if (!auth)
+		return -1;
+
+	wpa_printf(MSG_DEBUG, "DPP: Authentication Response");
+
+	msg = dpp_auth_resp_rx(auth, hdr, buf, len);
+	if (!msg) {
+		if (auth->auth_resp_status == DPP_STATUS_RESPONSE_PENDING) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: Start wait for full response");
+			return -1;
+		}
+		wpa_printf(MSG_DEBUG, "DPP: No confirm generated");
+		dpp_connection_remove(conn);
+		return -1;
+	}
+
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = wpabuf_alloc(4 + wpabuf_len(msg) - 1);
+	if (!conn->msg_out) {
+		wpabuf_free(msg);
+		return -1;
+	}
+	wpabuf_put_be32(conn->msg_out, wpabuf_len(msg) - 1);
+	wpabuf_put_data(conn->msg_out, wpabuf_head_u8(msg) + 1,
+			wpabuf_len(msg) - 1);
+	wpabuf_free(msg);
+
+	conn->on_tcp_tx_complete_auth_ok = 1;
+	if (dpp_tcp_send(conn) == 1) {
+		if (!conn->write_eloop) {
+			if (eloop_register_sock(conn->sock, EVENT_TYPE_WRITE,
+						dpp_conn_tx_ready,
+						conn, NULL) < 0)
+				return -1;
+			conn->write_eloop = 1;
+		}
+	}
+
+	return 0;
+}
+
+
+static int dpp_controller_rx_auth_conf(struct dpp_connection *conn,
+				       const u8 *hdr, const u8 *buf, size_t len)
+{
+	struct dpp_authentication *auth = conn->auth;
+
+	wpa_printf(MSG_DEBUG, "DPP: Authentication Confirmation");
+
+	if (!auth) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No DPP Authentication in progress - drop");
+		return -1;
+	}
+
+	if (dpp_auth_conf_rx(auth, hdr, buf, len) < 0) {
+		wpa_printf(MSG_DEBUG, "DPP: Authentication failed");
+		return -1;
+	}
+
+	dpp_controller_auth_success(conn, 0);
+	return 0;
+}
+
+
+static void dpp_controller_conn_status_result_wait_timeout(void *eloop_ctx,
+							   void *timeout_ctx)
+{
+	struct dpp_connection *conn = eloop_ctx;
+
+	if (!conn->auth->waiting_conf_result)
+		return;
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Timeout while waiting for Connection Status Result");
+	wpa_msg(conn->ctrl->global->msg_ctx, MSG_INFO,
+		DPP_EVENT_CONN_STATUS_RESULT "timeout");
+	dpp_connection_remove(conn);
+}
+
+
+static int dpp_controller_rx_conf_result(struct dpp_connection *conn,
+					 const u8 *hdr, const u8 *buf,
+					 size_t len)
+{
+	struct dpp_authentication *auth = conn->auth;
+	enum dpp_status_error status;
+
+	if (!conn->ctrl)
+		return 0;
+
+	wpa_printf(MSG_DEBUG, "DPP: Configuration Result");
+
+	if (!auth || !auth->waiting_conf_result) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No DPP Configuration waiting for result - drop");
+		return -1;
+	}
+
+	status = dpp_conf_result_rx(auth, hdr, buf, len);
+	if (status == DPP_STATUS_OK && auth->send_conn_status) {
+		wpa_msg(conn->ctrl->global->msg_ctx, MSG_INFO,
+			DPP_EVENT_CONF_SENT "wait_conn_status=1");
+		wpa_printf(MSG_DEBUG, "DPP: Wait for Connection Status Result");
+		eloop_cancel_timeout(
+			dpp_controller_conn_status_result_wait_timeout,
+			conn, NULL);
+		eloop_register_timeout(
+			16, 0, dpp_controller_conn_status_result_wait_timeout,
+			conn, NULL);
+		return 0;
+	}
+	if (status == DPP_STATUS_OK)
+		wpa_msg(conn->ctrl->global->msg_ctx, MSG_INFO,
+			DPP_EVENT_CONF_SENT);
+	else
+		wpa_msg(conn->ctrl->global->msg_ctx, MSG_INFO,
+			DPP_EVENT_CONF_FAILED);
+	return -1; /* to remove the completed connection */
+}
+
+
+static int dpp_controller_rx_conn_status_result(struct dpp_connection *conn,
+						const u8 *hdr, const u8 *buf,
+						size_t len)
+{
+	struct dpp_authentication *auth = conn->auth;
+	enum dpp_status_error status;
+	u8 ssid[SSID_MAX_LEN];
+	size_t ssid_len = 0;
+	char *channel_list = NULL;
+
+	if (!conn->ctrl)
+		return 0;
+
+	wpa_printf(MSG_DEBUG, "DPP: Connection Status Result");
+
+	if (!auth || !auth->waiting_conn_status_result) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No DPP Configuration waiting for connection status result - drop");
+		return -1;
+	}
+
+	status = dpp_conn_status_result_rx(auth, hdr, buf, len,
+					   ssid, &ssid_len, &channel_list);
+	wpa_msg(conn->ctrl->global->msg_ctx, MSG_INFO,
+		DPP_EVENT_CONN_STATUS_RESULT
+		"result=%d ssid=%s channel_list=%s",
+		status, wpa_ssid_txt(ssid, ssid_len),
+		channel_list ? channel_list : "N/A");
+	os_free(channel_list);
+	return -1; /* to remove the completed connection */
+}
+
+
+static int dpp_controller_rx_action(struct dpp_connection *conn, const u8 *msg,
+				    size_t len)
+{
+	const u8 *pos, *end;
+	u8 type;
+
+	wpa_printf(MSG_DEBUG, "DPP: Received DPP Action frame over TCP");
+	pos = msg;
+	end = msg + len;
+
+	if (end - pos < DPP_HDR_LEN ||
+	    WPA_GET_BE24(pos) != OUI_WFA ||
+	    pos[3] != DPP_OUI_TYPE) {
+		wpa_printf(MSG_DEBUG, "DPP: Unrecognized header");
+		return -1;
+	}
+
+	if (pos[4] != 1) {
+		wpa_printf(MSG_DEBUG, "DPP: Unsupported Crypto Suite %u",
+			   pos[4]);
+		return -1;
+	}
+	type = pos[5];
+	wpa_printf(MSG_DEBUG, "DPP: Received message type %u", type);
+	pos += DPP_HDR_LEN;
+
+	wpa_hexdump(MSG_MSGDUMP, "DPP: Received message attributes",
+		    pos, end - pos);
+	if (dpp_check_attrs(pos, end - pos) < 0)
+		return -1;
+
+	if (conn->relay) {
+		wpa_printf(MSG_DEBUG, "DPP: Relay - send over WLAN");
+		conn->relay->tx(conn->relay->cb_ctx, conn->mac_addr,
+				conn->freq, msg, len);
+		return 0;
+	}
+
+	switch (type) {
+	case DPP_PA_AUTHENTICATION_REQ:
+		return dpp_controller_rx_auth_req(conn, msg, pos, end - pos);
+	case DPP_PA_AUTHENTICATION_RESP:
+		return dpp_controller_rx_auth_resp(conn, msg, pos, end - pos);
+	case DPP_PA_AUTHENTICATION_CONF:
+		return dpp_controller_rx_auth_conf(conn, msg, pos, end - pos);
+	case DPP_PA_CONFIGURATION_RESULT:
+		return dpp_controller_rx_conf_result(conn, msg, pos, end - pos);
+	case DPP_PA_CONNECTION_STATUS_RESULT:
+		return dpp_controller_rx_conn_status_result(conn, msg, pos,
+							    end - pos);
+	default:
+		/* TODO: missing messages types */
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Unsupported frame subtype %d", type);
+		return -1;
+	}
+}
+
+
+static int dpp_controller_rx_gas_req(struct dpp_connection *conn, const u8 *msg,
+				     size_t len)
+{
+	const u8 *pos, *end, *next;
+	u8 dialog_token;
+	const u8 *adv_proto;
+	u16 slen;
+	struct wpabuf *resp, *buf;
+	struct dpp_authentication *auth = conn->auth;
+
+	if (len < 1 + 2)
+		return -1;
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Received DPP Configuration Request over TCP");
+
+	if (!conn->ctrl || !auth || !auth->auth_success) {
+		wpa_printf(MSG_DEBUG, "DPP: No matching exchange in progress");
+		return -1;
+	}
+
+	pos = msg;
+	end = msg + len;
+
+	dialog_token = *pos++;
+	adv_proto = pos++;
+	slen = *pos++;
+	if (*adv_proto != WLAN_EID_ADV_PROTO ||
+	    slen > end - pos || slen < 2)
+		return -1;
+
+	next = pos + slen;
+	pos++; /* skip QueryRespLenLimit and PAME-BI */
+
+	if (slen != 8 || *pos != WLAN_EID_VENDOR_SPECIFIC ||
+	    pos[1] != 5 || WPA_GET_BE24(&pos[2]) != OUI_WFA ||
+	    pos[5] != DPP_OUI_TYPE || pos[6] != 0x01)
+		return -1;
+
+	pos = next;
+	/* Query Request */
+	if (end - pos < 2)
+		return -1;
+	slen = WPA_GET_LE16(pos);
+	pos += 2;
+	if (slen > end - pos)
+		return -1;
+
+	resp = dpp_conf_req_rx(auth, pos, slen);
+	if (!resp)
+		return -1;
+
+	buf = wpabuf_alloc(4 + 18 + wpabuf_len(resp));
+	if (!buf) {
+		wpabuf_free(resp);
+		return -1;
+	}
+
+	wpabuf_put_be32(buf, 18 + wpabuf_len(resp));
+
+	wpabuf_put_u8(buf, WLAN_PA_GAS_INITIAL_RESP);
+	wpabuf_put_u8(buf, dialog_token);
+	wpabuf_put_le16(buf, WLAN_STATUS_SUCCESS);
+	wpabuf_put_le16(buf, 0); /* GAS Comeback Delay */
+
+	dpp_write_adv_proto(buf);
+	dpp_write_gas_query(buf, resp);
+	wpabuf_free(resp);
+
+	/* Send Config Response over TCP; GAS fragmentation is taken care of by
+	 * the Relay */
+	wpa_hexdump_buf(MSG_MSGDUMP, "DPP: Outgoing TCP message", buf);
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = buf;
+	conn->on_tcp_tx_complete_gas_done = 1;
+	dpp_tcp_send(conn);
+	return 0;
+}
+
+
+static int dpp_tcp_rx_gas_resp(struct dpp_connection *conn, struct wpabuf *resp)
+{
+	struct dpp_authentication *auth = conn->auth;
+	int res;
+	struct wpabuf *msg, *encaps;
+	enum dpp_status_error status;
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Configuration Response for local stack from TCP");
+
+	res = dpp_conf_resp_rx(auth, resp);
+	wpabuf_free(resp);
+	if (res < 0) {
+		wpa_printf(MSG_DEBUG, "DPP: Configuration attempt failed");
+		return -1;
+	}
+
+	if (conn->global->process_conf_obj)
+		res = conn->global->process_conf_obj(conn->global->cb_ctx,
+						     auth);
+	else
+		res = 0;
+
+	if (auth->peer_version < 2 || auth->conf_resp_status != DPP_STATUS_OK)
+		return -1;
+
+#ifdef CONFIG_DPP2
+	wpa_printf(MSG_DEBUG, "DPP: Send DPP Configuration Result");
+	status = res < 0 ? DPP_STATUS_CONFIG_REJECTED : DPP_STATUS_OK;
+	msg = dpp_build_conf_result(auth, status);
+	if (!msg)
+		return -1;
+
+	encaps = wpabuf_alloc(4 + wpabuf_len(msg) - 1);
+	if (!encaps) {
+		wpabuf_free(msg);
+		return -1;
+	}
+	wpabuf_put_be32(encaps, wpabuf_len(msg) - 1);
+	wpabuf_put_data(encaps, wpabuf_head_u8(msg) + 1, wpabuf_len(msg) - 1);
+	wpabuf_free(msg);
+	wpa_hexdump_buf(MSG_MSGDUMP, "DPP: Outgoing TCP message", encaps);
+
+	wpabuf_free(conn->msg_out);
+	conn->msg_out_pos = 0;
+	conn->msg_out = encaps;
+	conn->on_tcp_tx_complete_remove = 1;
+	dpp_tcp_send(conn);
+
+	/* This exchange will be terminated in the TX status handler */
+
+	return 0;
+#else /* CONFIG_DPP2 */
+	return -1;
+#endif /* CONFIG_DPP2 */
+}
+
+
+static int dpp_rx_gas_resp(struct dpp_connection *conn, const u8 *msg,
+			   size_t len)
+{
+	struct wpabuf *buf;
+	u8 dialog_token;
+	const u8 *pos, *end, *next, *adv_proto;
+	u16 status, slen;
+
+	if (len < 5 + 2)
+		return -1;
+
+	wpa_printf(MSG_DEBUG,
+		   "DPP: Received DPP Configuration Response over TCP");
+
+	pos = msg;
+	end = msg + len;
+
+	dialog_token = *pos++;
+	status = WPA_GET_LE16(pos);
+	if (status != WLAN_STATUS_SUCCESS) {
+		wpa_printf(MSG_DEBUG, "DPP: Unexpected Status Code %u", status);
+		return -1;
+	}
+	pos += 2;
+	pos += 2; /* ignore GAS Comeback Delay */
+
+	adv_proto = pos++;
+	slen = *pos++;
+	if (*adv_proto != WLAN_EID_ADV_PROTO ||
+	    slen > end - pos || slen < 2)
+		return -1;
+
+	next = pos + slen;
+	pos++; /* skip QueryRespLenLimit and PAME-BI */
+
+	if (slen != 8 || *pos != WLAN_EID_VENDOR_SPECIFIC ||
+	    pos[1] != 5 || WPA_GET_BE24(&pos[2]) != OUI_WFA ||
+	    pos[5] != DPP_OUI_TYPE || pos[6] != 0x01)
+		return -1;
+
+	pos = next;
+	/* Query Response */
+	if (end - pos < 2)
+		return -1;
+	slen = WPA_GET_LE16(pos);
+	pos += 2;
+	if (slen > end - pos)
+		return -1;
+
+	buf = wpabuf_alloc(slen);
+	if (!buf)
+		return -1;
+	wpabuf_put_data(buf, pos, slen);
+
+	if (!conn->relay && !conn->ctrl)
+		return dpp_tcp_rx_gas_resp(conn, buf);
+
+	if (!conn->relay) {
+		wpa_printf(MSG_DEBUG, "DPP: No matching exchange in progress");
+		wpabuf_free(buf);
+		return -1;
+	}
+	wpa_printf(MSG_DEBUG, "DPP: Relay - send over WLAN");
+	conn->relay->gas_resp_tx(conn->relay->cb_ctx, conn->mac_addr,
+				 dialog_token, 0, buf);
+
+	return 0;
+}
+
+
+static void dpp_controller_rx(int sd, void *eloop_ctx, void *sock_ctx)
+{
+	struct dpp_connection *conn = eloop_ctx;
+	int res;
+	const u8 *pos;
+
+	wpa_printf(MSG_DEBUG, "DPP: TCP data available for reading (sock %d)",
+		   sd);
+
+	if (conn->msg_len_octets < 4) {
+		u32 msglen;
+
+		res = recv(sd, &conn->msg_len[conn->msg_len_octets],
+			   4 - conn->msg_len_octets, 0);
+		if (res < 0) {
+			wpa_printf(MSG_DEBUG, "DPP: recv failed: %s",
+				   strerror(errno));
+			dpp_connection_remove(conn);
+			return;
+		}
+		if (res == 0) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: No more data available over TCP");
+			dpp_connection_remove(conn);
+			return;
+		}
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Received %d/%d octet(s) of message length field",
+			   res, (int) (4 - conn->msg_len_octets));
+		conn->msg_len_octets += res;
+
+		if (conn->msg_len_octets < 4) {
+			wpa_printf(MSG_DEBUG,
+				   "DPP: Need %d more octets of message length field",
+				   (int) (4 - conn->msg_len_octets));
+			return;
+		}
+
+		msglen = WPA_GET_BE32(conn->msg_len);
+		wpa_printf(MSG_DEBUG, "DPP: Message length: %u", msglen);
+		if (msglen > 65535) {
+			wpa_printf(MSG_INFO, "DPP: Unexpectedly long message");
+			dpp_connection_remove(conn);
+			return;
+		}
+
+		wpabuf_free(conn->msg);
+		conn->msg = wpabuf_alloc(msglen);
+	}
+
+	if (!conn->msg) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: No buffer available for receiving the message");
+		dpp_connection_remove(conn);
+		return;
+	}
+
+	wpa_printf(MSG_DEBUG, "DPP: Need %u more octets of message payload",
+		   (unsigned int) wpabuf_tailroom(conn->msg));
+
+	res = recv(sd, wpabuf_put(conn->msg, 0), wpabuf_tailroom(conn->msg), 0);
+	if (res < 0) {
+		wpa_printf(MSG_DEBUG, "DPP: recv failed: %s", strerror(errno));
+		dpp_connection_remove(conn);
+		return;
+	}
+	if (res == 0) {
+		wpa_printf(MSG_DEBUG, "DPP: No more data available over TCP");
+		dpp_connection_remove(conn);
+		return;
+	}
+	wpa_printf(MSG_DEBUG, "DPP: Received %d octets", res);
+	wpabuf_put(conn->msg, res);
+
+	if (wpabuf_tailroom(conn->msg) > 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Need %u more octets of message payload",
+			   (unsigned int) wpabuf_tailroom(conn->msg));
+		return;
+	}
+
+	conn->msg_len_octets = 0;
+	wpa_hexdump_buf(MSG_DEBUG, "DPP: Received TCP message", conn->msg);
+	if (wpabuf_len(conn->msg) < 1) {
+		dpp_connection_remove(conn);
+		return;
+	}
+
+	pos = wpabuf_head(conn->msg);
+	switch (*pos) {
+	case WLAN_PA_VENDOR_SPECIFIC:
+		if (dpp_controller_rx_action(conn, pos + 1,
+					     wpabuf_len(conn->msg) - 1) < 0)
+			dpp_connection_remove(conn);
+		break;
+	case WLAN_PA_GAS_INITIAL_REQ:
+		if (dpp_controller_rx_gas_req(conn, pos + 1,
+					      wpabuf_len(conn->msg) - 1) < 0)
+			dpp_connection_remove(conn);
+		break;
+	case WLAN_PA_GAS_INITIAL_RESP:
+		if (dpp_rx_gas_resp(conn, pos + 1,
+				    wpabuf_len(conn->msg) - 1) < 0)
+			dpp_connection_remove(conn);
+		break;
+	default:
+		wpa_printf(MSG_DEBUG, "DPP: Ignore unsupported message type %u",
+			   *pos);
+		break;
+	}
+}
+
+
+static void dpp_controller_tcp_cb(int sd, void *eloop_ctx, void *sock_ctx)
+{
+	struct dpp_controller *ctrl = eloop_ctx;
+	struct sockaddr_in addr;
+	socklen_t addr_len = sizeof(addr);
+	int fd;
+	struct dpp_connection *conn;
+
+	wpa_printf(MSG_DEBUG, "DPP: New TCP connection");
+
+	fd = accept(ctrl->sock, (struct sockaddr *) &addr, &addr_len);
+	if (fd < 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: Failed to accept new connection: %s",
+			   strerror(errno));
+		return;
+	}
+	wpa_printf(MSG_DEBUG, "DPP: Connection from %s:%d",
+		   inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+
+	conn = os_zalloc(sizeof(*conn));
+	if (!conn)
+		goto fail;
+
+	conn->global = ctrl->global;
+	conn->ctrl = ctrl;
+	conn->sock = fd;
+
+	if (fcntl(conn->sock, F_SETFL, O_NONBLOCK) != 0) {
+		wpa_printf(MSG_DEBUG, "DPP: fnctl(O_NONBLOCK) failed: %s",
+			   strerror(errno));
+		goto fail;
+	}
+
+	if (eloop_register_sock(conn->sock, EVENT_TYPE_READ,
+				dpp_controller_rx, conn, NULL) < 0)
+		goto fail;
+	conn->read_eloop = 1;
+
+	/* TODO: eloop timeout to expire connections that do not complete in
+	 * reasonable time */
+	dl_list_add(&ctrl->conn, &conn->list);
+	return;
+
+fail:
+	close(fd);
+	os_free(conn);
+}
+
+
+int dpp_tcp_init(struct dpp_global *dpp, struct dpp_authentication *auth,
+		 const struct hostapd_ip_addr *addr, int port)
+{
+	struct dpp_connection *conn;
+	struct sockaddr_storage saddr;
+	socklen_t addrlen;
+	const u8 *hdr, *pos, *end;
+	char txt[100];
+
+	wpa_printf(MSG_DEBUG, "DPP: Initialize TCP connection to %s port %d",
+		   hostapd_ip_txt(addr, txt, sizeof(txt)), port);
+	if (dpp_ipaddr_to_sockaddr((struct sockaddr *) &saddr, &addrlen,
+				   addr, port) < 0) {
+		dpp_auth_deinit(auth);
+		return -1;
+	}
+
+	conn = os_zalloc(sizeof(*conn));
+	if (!conn) {
+		dpp_auth_deinit(auth);
+		return -1;
+	}
+
+	conn->global = dpp;
+	conn->auth = auth;
+	conn->sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (conn->sock < 0)
+		goto fail;
+
+	if (fcntl(conn->sock, F_SETFL, O_NONBLOCK) != 0) {
+		wpa_printf(MSG_DEBUG, "DPP: fnctl(O_NONBLOCK) failed: %s",
+			   strerror(errno));
+		goto fail;
+	}
+
+	if (connect(conn->sock, (struct sockaddr *) &saddr, addrlen) < 0) {
+		if (errno != EINPROGRESS) {
+			wpa_printf(MSG_DEBUG, "DPP: Failed to connect: %s",
+				   strerror(errno));
+			goto fail;
+		}
+
+		/*
+		 * Continue connecting in the background; eloop will call us
+		 * once the connection is ready (or failed).
+		 */
+	}
+
+	if (eloop_register_sock(conn->sock, EVENT_TYPE_WRITE,
+				dpp_conn_tx_ready, conn, NULL) < 0)
+		goto fail;
+	conn->write_eloop = 1;
+
+	hdr = wpabuf_head(auth->req_msg);
+	end = hdr + wpabuf_len(auth->req_msg);
+	hdr += 2; /* skip Category and Actiom */
+	pos = hdr + DPP_HDR_LEN;
+	conn->msg_out = dpp_tcp_encaps(hdr, pos, end - pos);
+	if (!conn->msg_out)
+		goto fail;
+	/* Message will be sent in dpp_conn_tx_ready() */
+
+	/* TODO: eloop timeout to clear a connection if it does not complete
+	 * properly */
+	dl_list_add(&dpp->tcp_init, &conn->list);
+	return 0;
+fail:
+	dpp_connection_free(conn);
+	return -1;
+}
+
+
+int dpp_controller_start(struct dpp_global *dpp,
+			 struct dpp_controller_config *config)
+{
+	struct dpp_controller *ctrl;
+	int on = 1;
+	struct sockaddr_in sin;
+	int port;
+
+	if (!dpp || dpp->controller)
+		return -1;
+
+	ctrl = os_zalloc(sizeof(*ctrl));
+	if (!ctrl)
+		return -1;
+	ctrl->global = dpp;
+	if (config->configurator_params)
+		ctrl->configurator_params =
+			os_strdup(config->configurator_params);
+	dl_list_init(&ctrl->conn);
+	/* TODO: configure these somehow */
+	ctrl->allowed_roles = DPP_CAPAB_ENROLLEE | DPP_CAPAB_CONFIGURATOR;
+	ctrl->qr_mutual = 0;
+
+	ctrl->sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (ctrl->sock < 0)
+		goto fail;
+
+	if (setsockopt(ctrl->sock, SOL_SOCKET, SO_REUSEADDR,
+		       &on, sizeof(on)) < 0) {
+		wpa_printf(MSG_DEBUG,
+			   "DPP: setsockopt(SO_REUSEADDR) failed: %s",
+			   strerror(errno));
+		/* try to continue anyway */
+	}
+
+	if (fcntl(ctrl->sock, F_SETFL, O_NONBLOCK) < 0) {
+		wpa_printf(MSG_INFO, "DPP: fnctl(O_NONBLOCK) failed: %s",
+			   strerror(errno));
+		goto fail;
+	}
+
+	/* TODO: IPv6 */
+	os_memset(&sin, 0, sizeof(sin));
+	sin.sin_family = AF_INET;
+	sin.sin_addr.s_addr = INADDR_ANY;
+	port = config->tcp_port ? config->tcp_port : DPP_TCP_PORT;
+	sin.sin_port = htons(port);
+	if (bind(ctrl->sock, (struct sockaddr *) &sin, sizeof(sin)) < 0) {
+		wpa_printf(MSG_INFO,
+			   "DPP: Failed to bind Controller TCP port: %s",
+			   strerror(errno));
+		goto fail;
+	}
+	if (listen(ctrl->sock, 10 /* max backlog */) < 0 ||
+	    fcntl(ctrl->sock, F_SETFL, O_NONBLOCK) < 0 ||
+	    eloop_register_sock(ctrl->sock, EVENT_TYPE_READ,
+				dpp_controller_tcp_cb, ctrl, NULL))
+		goto fail;
+
+	dpp->controller = ctrl;
+	wpa_printf(MSG_DEBUG, "DPP: Controller started on TCP port %d", port);
+	return 0;
+fail:
+	dpp_controller_free(ctrl);
+	return -1;
+}
+
+
+void dpp_controller_stop(struct dpp_global *dpp)
+{
+	if (dpp) {
+		dpp_controller_free(dpp->controller);
+		dpp->controller = NULL;
+	}
+}
+
+#endif /* CONFIG_DPP2 */

@@ -12,7 +12,25 @@ ifneq ($(BOARD_WPA_SUPPLICANT_DRIVER),)
   CONFIG_DRIVER_$(BOARD_WPA_SUPPLICANT_DRIVER) := y
 endif
 
+ifeq ($(BOARD_WLAN_DEVICE), qcwcn)
+  CONFIG_DRIVER_NL80211_QCA=y
+endif
+
 include $(LOCAL_PATH)/android.config
+
+ifeq ($(call is-board-platform-in-list,msm8998),true)
+  $(warning "Disabling SAE, OWE and DPP support in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
+  CONFIG_OWE=n
+  CONFIG_DPP=n
+  CONFIG_SAE=n
+  # Enabling mesh support enables SAE, so make sure mesh supoort is disabled
+  CONFIG_MESH=n
+endif
+
+ifeq ($(call is-board-platform-in-list,msm8998 msm8953 msm8937 sdm710 sdm845),true)
+  $(warning "Disabling SuiteB-192 support in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
+  CONFIG_SUITEB192=n
+endif
 
 # To ignore possible wrong network configurations
 L_CFLAGS = -DWPA_IGNORE_CONFIG_ERRORS
@@ -121,6 +139,8 @@ OBJS += src/utils/common.c
 OBJS += src/utils/wpa_debug.c
 OBJS += src/utils/wpabuf.c
 OBJS += src/utils/bitfield.c
+OBJS += src/utils/ip_addr.c
+OBJS += src/utils/crc32.c
 OBJS += wmm_ac.c
 OBJS += op_classes.c
 OBJS += rrm.c
@@ -226,35 +246,25 @@ endif
 
 ifdef CONFIG_SUITEB
 L_CFLAGS += -DCONFIG_SUITEB
-NEED_SHA256=y
-NEED_AES_OMAC1=y
 endif
 
-ifdef CONFIG_SUITEB192
+ifeq ($(CONFIG_SUITEB192),y)
 L_CFLAGS += -DCONFIG_SUITEB192
 NEED_SHA384=y
 endif
 
-ifdef CONFIG_IEEE80211W
-L_CFLAGS += -DCONFIG_IEEE80211W
-NEED_SHA256=y
-NEED_AES_OMAC1=y
-endif
-
-ifdef CONFIG_IEEE80211R_AP
-CONFIG_IEEE80211R=y
+ifdef CONFIG_OCV
+L_CFLAGS += -DCONFIG_OCV
+OBJS += src/common/ocv.c
 endif
 
 ifdef CONFIG_IEEE80211R
 L_CFLAGS += -DCONFIG_IEEE80211R
 OBJS += src/rsn_supp/wpa_ft.c
-NEED_SHA256=y
-NEED_AES_OMAC1=y
 endif
 
-ifdef CONFIG_MESH
+ifeq ($(CONFIG_MESH),y)
 NEED_80211_COMMON=y
-NEED_SHA256=y
 NEED_AES_SIV=y
 CONFIG_SAE=y
 CONFIG_AP=y
@@ -264,14 +274,18 @@ OBJS += mesh_mpm.c
 OBJS += mesh_rsn.c
 endif
 
-ifdef CONFIG_SAE
+ifeq ($(CONFIG_SAE),y)
 L_CFLAGS += -DCONFIG_SAE
 OBJS += src/common/sae.c
 NEED_ECC=y
 NEED_DH_GROUPS=y
+NEED_DRAGONFLY=y
+ifdef CONFIG_TESTING_OPTIONS
+NEED_DH_GROUPS_ALL=y
+endif
 endif
 
-ifdef CONFIG_DPP
+ifeq ($(CONFIG_DPP),y)
 L_CFLAGS += -DCONFIG_DPP
 OBJS += src/common/dpp.c
 OBJS += dpp_supplicant.c
@@ -279,21 +293,24 @@ NEED_AES_SIV=y
 NEED_HMAC_SHA256_KDF=y
 NEED_HMAC_SHA384_KDF=y
 NEED_HMAC_SHA512_KDF=y
-NEED_SHA256=y
 NEED_SHA384=y
 NEED_SHA512=y
+NEED_ECC=y
 NEED_JSON=y
 NEED_GAS_SERVER=y
 NEED_BASE64=y
+NEED_ASN1=y
+ifdef CONFIG_DPP2
+L_CFLAGS += -DCONFIG_DPP2
+endif
 endif
 
-ifdef CONFIG_OWE
+ifeq ($(CONFIG_OWE),y)
 L_CFLAGS += -DCONFIG_OWE
 NEED_ECC=y
 NEED_HMAC_SHA256_KDF=y
 NEED_HMAC_SHA384_KDF=y
 NEED_HMAC_SHA512_KDF=y
-NEED_SHA256=y
 NEED_SHA384=y
 NEED_SHA512=y
 endif
@@ -320,8 +337,6 @@ endif
 ifdef CONFIG_TDLS
 L_CFLAGS += -DCONFIG_TDLS
 OBJS += src/rsn_supp/tdls.c
-NEED_SHA256=y
-NEED_AES_OMAC1=y
 endif
 
 ifdef CONFIG_TDLS_TESTING
@@ -386,7 +401,6 @@ ifdef CONFIG_HS20
 OBJS += hs20_supplicant.c
 L_CFLAGS += -DCONFIG_HS20
 CONFIG_INTERWORKING=y
-NEED_AES_OMAC1=y
 endif
 
 ifdef CONFIG_INTERWORKING
@@ -453,7 +467,6 @@ endif
 
 ifdef CONFIG_ERP
 L_CFLAGS += -DCONFIG_ERP
-NEED_SHA256=y
 NEED_HMAC_SHA256_KDF=y
 endif
 
@@ -608,7 +621,6 @@ OBJS += src/eap_peer/eap_psk.c src/eap_common/eap_psk_common.c
 endif
 CONFIG_IEEE8021X_EAPOL=y
 NEED_AES=y
-NEED_AES_OMAC1=y
 NEED_AES_ENCBLOCK=y
 NEED_AES_EAX=y
 endif
@@ -646,7 +658,6 @@ L_CFLAGS += -DEAP_AKA_PRIME_DYNAMIC
 else
 L_CFLAGS += -DEAP_AKA_PRIME
 endif
-NEED_SHA256=y
 endif
 
 ifdef CONFIG_EAP_SIM_COMMON
@@ -669,6 +680,25 @@ endif
 TLS_FUNCS=y
 CONFIG_IEEE8021X_EAPOL=y
 NEED_T_PRF=y
+endif
+
+ifdef CONFIG_EAP_TEAP
+# EAP-TEAP
+ifeq ($(CONFIG_EAP_TEAP), dyn)
+L_CFLAGS += -DEAP_YEAP_DYNAMIC
+EAPDYN += src/eap_peer/eap_teap.so
+EAPDYN += src/eap_common/eap_teap_common.c
+else
+L_CFLAGS += -DEAP_TEAP
+OBJS += src/eap_peer/eap_teap.c src/eap_peer/eap_teap_pac.c
+OBJS += src/eap_common/eap_teap_common.c
+endif
+TLS_FUNCS=y
+CONFIG_IEEE8021X_EAPOL=y
+NEED_T_PRF=y
+NEED_SHA384=y
+NEED_TLS_PRF_SHA256=y
+NEED_TLS_PRF_SHA384=y
 endif
 
 ifdef CONFIG_EAP_PAX
@@ -708,16 +738,14 @@ CONFIG_IEEE8021X_EAPOL=y
 ifdef CONFIG_EAP_GPSK_SHA256
 L_CFLAGS += -DEAP_GPSK_SHA256
 endif
-NEED_SHA256=y
-NEED_AES_OMAC1=y
 endif
 
 ifdef CONFIG_EAP_PWD
 L_CFLAGS += -DEAP_PWD
 OBJS += src/eap_peer/eap_pwd.c src/eap_common/eap_pwd_common.c
 CONFIG_IEEE8021X_EAPOL=y
-NEED_SHA256=y
 NEED_ECC=y
+NEED_DRAGONFLY=y
 endif
 
 ifdef CONFIG_EAP_EKE
@@ -732,7 +760,6 @@ endif
 CONFIG_IEEE8021X_EAPOL=y
 NEED_DH_GROUPS=y
 NEED_DH_GROUPS_ALL=y
-NEED_SHA256=y
 NEED_AES_CBC=y
 endif
 
@@ -752,7 +779,6 @@ OBJS += src/wps/wps_enrollee.c
 OBJS += src/wps/wps_registrar.c
 CONFIG_IEEE8021X_EAPOL=y
 NEED_DH_GROUPS=y
-NEED_SHA256=y
 NEED_BASE64=y
 NEED_AES_CBC=y
 NEED_MODEXP=y
@@ -869,7 +895,6 @@ OBJS += src/ap/wpa_auth_glue.c
 OBJS += src/ap/utils.c
 OBJS += src/ap/authsrv.c
 OBJS += src/ap/ap_config.c
-OBJS += src/utils/ip_addr.c
 OBJS += src/ap/sta_info.c
 OBJS += src/ap/tkip_countermeasures.c
 OBJS += src/ap/ap_mlme.c
@@ -935,11 +960,15 @@ L_CFLAGS += -DEAP_SERVER_WSC
 OBJS += src/ap/wps_hostapd.c
 OBJS += src/eap_server/eap_server_wsc.c
 endif
-ifdef CONFIG_DPP
+ifeq ($(CONFIG_DPP),y)
 OBJS += src/ap/dpp_hostapd.c
 OBJS += src/ap/gas_query_ap.c
+NEED_AP_GAS_SERV=y
 endif
 ifdef CONFIG_INTERWORKING
+NEED_AP_GAS_SERV=y
+endif
+ifdef NEED_AP_GAS_SERV
 OBJS += src/ap/gas_serv.c
 endif
 ifdef CONFIG_HS20
@@ -962,10 +991,6 @@ NEED_AES_WRAP=y
 OBJS += src/ap/wpa_auth.c
 OBJS += src/ap/wpa_auth_ie.c
 OBJS += src/ap/pmksa_cache_auth.c
-ifdef CONFIG_IEEE80211R_AP
-L_CFLAGS += -DCONFIG_IEEE80211R_AP
-OBJS += src/ap/wpa_auth_ft.c
-endif
 endif
 
 ifdef CONFIG_ACS
@@ -1011,6 +1036,10 @@ ifdef CONFIG_SMARTCARD
 L_CFLAGS += -DCONFIG_SMARTCARD
 endif
 
+ifdef NEED_DRAGONFLY
+OBJS += src/common/dragonfly.c
+endif
+
 ifdef MS_FUNCS
 OBJS += src/crypto/ms_funcs.c
 NEED_DES=y
@@ -1043,7 +1072,6 @@ endif
 
 ifdef CONFIG_TLSV12
 L_CFLAGS += -DCONFIG_TLSV12
-NEED_SHA256=y
 endif
 
 ifeq ($(CONFIG_TLS), openssl)
@@ -1058,7 +1086,6 @@ OBJS_p += src/crypto/crypto_openssl.c
 ifdef NEED_FIPS186_2_PRF
 OBJS += src/crypto/fips_prf_openssl.c
 endif
-NEED_SHA256=y
 NEED_TLS_PRF_SHA256=y
 LIBS += -lcrypto
 LIBS_p += -lcrypto
@@ -1115,13 +1142,12 @@ OBJS += src/tls/tlsv1_client.c
 OBJS += src/tls/tlsv1_client_write.c
 OBJS += src/tls/tlsv1_client_read.c
 OBJS += src/tls/tlsv1_client_ocsp.c
-OBJS += src/tls/asn1.c
+NEED_ASN1=y
 OBJS += src/tls/rsa.c
 OBJS += src/tls/x509v3.c
 OBJS += src/tls/pkcs1.c
 OBJS += src/tls/pkcs5.c
 OBJS += src/tls/pkcs8.c
-NEED_SHA256=y
 NEED_BASE64=y
 NEED_TLS_PRF=y
 ifdef CONFIG_TLSV12
@@ -1241,12 +1267,10 @@ endif
 ifdef NEED_AES_EAX
 AESOBJS += src/crypto/aes-eax.c
 NEED_AES_CTR=y
-NEED_AES_OMAC1=y
 endif
 ifdef NEED_AES_SIV
 AESOBJS += src/crypto/aes-siv.c
 NEED_AES_CTR=y
-NEED_AES_OMAC1=y
 endif
 ifdef NEED_AES_CTR
 AESOBJS += src/crypto/aes-ctr.c
@@ -1254,13 +1278,11 @@ endif
 ifdef NEED_AES_ENCBLOCK
 AESOBJS += src/crypto/aes-encblock.c
 endif
-ifdef NEED_AES_OMAC1
 NEED_AES_ENC=y
 ifdef CONFIG_OPENSSL_CMAC
 L_CFLAGS += -DCONFIG_OPENSSL_CMAC
 else
 AESOBJS += src/crypto/aes-omac1.c
-endif
 endif
 ifdef NEED_AES_WRAP
 NEED_AES_ENC=y
@@ -1354,7 +1376,6 @@ endif
 endif
 
 SHA256OBJS = # none by default
-ifdef NEED_SHA256
 L_CFLAGS += -DCONFIG_SHA256
 ifneq ($(CONFIG_TLS), openssl)
 ifneq ($(CONFIG_TLS), gnutls)
@@ -1376,6 +1397,9 @@ endif
 ifdef NEED_TLS_PRF_SHA256
 SHA256OBJS += src/crypto/sha256-tlsprf.c
 endif
+ifdef NEED_TLS_PRF_SHA384
+SHA256OBJS += src/crypto/sha384-tlsprf.c
+endif
 ifdef NEED_HMAC_SHA256_KDF
 L_CFLAGS += -DCONFIG_HMAC_SHA256_KDF
 SHA256OBJS += src/crypto/sha256-kdf.c
@@ -1389,7 +1413,6 @@ L_CFLAGS += -DCONFIG_HMAC_SHA512_KDF
 SHA256OBJS += src/crypto/sha512-kdf.c
 endif
 OBJS += $(SHA256OBJS)
-endif
 ifdef NEED_SHA384
 L_CFLAGS += -DCONFIG_SHA384
 ifneq ($(CONFIG_TLS), openssl)
@@ -1407,6 +1430,10 @@ OBJS += src/crypto/sha512.c
 endif
 endif
 OBJS += src/crypto/sha512-prf.c
+endif
+
+ifdef NEED_ASN1
+OBJS += src/tls/asn1.c
 endif
 
 ifdef NEED_DH_GROUPS
@@ -1458,43 +1485,24 @@ endif
 OBJS += ctrl_iface.c ctrl_iface_$(CONFIG_CTRL_IFACE).c
 endif
 
-ifdef CONFIG_CTRL_IFACE_DBUS
-DBUS=y
-DBUS_CFLAGS += -DCONFIG_CTRL_IFACE_DBUS -DDBUS_API_SUBJECT_TO_CHANGE
-DBUS_OBJS += dbus/dbus_old.c dbus/dbus_old_handlers.c
-ifdef CONFIG_WPS
-DBUS_OBJS += dbus/dbus_old_handlers_wps.c
-endif
-DBUS_OBJS += dbus/dbus_dict_helpers.c
-DBUS_CFLAGS += $(DBUS_INCLUDE)
-endif
-
 ifdef CONFIG_CTRL_IFACE_DBUS_NEW
-DBUS=y
-DBUS_CFLAGS += -DCONFIG_CTRL_IFACE_DBUS_NEW
-DBUS_OBJS ?= dbus/dbus_dict_helpers.c
-DBUS_OBJS += dbus/dbus_new_helpers.c
-DBUS_OBJS += dbus/dbus_new.c dbus/dbus_new_handlers.c
+L_CFLAGS += -DCONFIG_CTRL_IFACE_DBUS_NEW
+OBJS += dbus/dbus_dict_helpers.c
+OBJS += dbus/dbus_new_helpers.c
+OBJS += dbus/dbus_new.c dbus/dbus_new_handlers.c
+OBJS += dbus/dbus_common.c
 ifdef CONFIG_WPS
-DBUS_OBJS += dbus/dbus_new_handlers_wps.c
+OBJS += dbus/dbus_new_handlers_wps.c
 endif
 ifdef CONFIG_P2P
-DBUS_OBJS += dbus/dbus_new_handlers_p2p.c
+OBJS += dbus/dbus_new_handlers_p2p.c
 endif
 ifdef CONFIG_CTRL_IFACE_DBUS_INTRO
-DBUS_OBJS += dbus/dbus_new_introspect.c
-DBUS_CFLAGS += -DCONFIG_CTRL_IFACE_DBUS_INTRO
+OBJS += dbus/dbus_new_introspect.c
+L_CFLAGS += -DCONFIG_CTRL_IFACE_DBUS_INTRO
 endif
-DBUS_CFLAGS += $(DBUS_INCLUDE)
+L_CFLAGS += $(DBUS_INCLUDE)
 endif
-
-ifdef DBUS
-DBUS_CFLAGS += -DCONFIG_DBUS
-DBUS_OBJS += dbus/dbus_common.c
-endif
-
-OBJS += $(DBUS_OBJS)
-L_CFLAGS += $(DBUS_CFLAGS)
 
 ifdef CONFIG_CTRL_IFACE_HIDL
 WPA_SUPPLICANT_USE_HIDL=y
@@ -1503,7 +1511,7 @@ endif
 
 ifdef CONFIG_SUPPLICANT_VENDOR_HIDL
 SUPPLICANT_VENDOR_HIDL=y
-SUPPLICANT_VENDOR_HIDL_VERSION=2.0
+SUPPLICANT_VENDOR_HIDL_VERSION=2.2
 L_CFLAGS += -DSUPPLICANT_VENDOR_HIDL
 endif
 
@@ -1666,9 +1674,6 @@ OBJS += wpa_supplicant.c events.c blacklist.c wpas_glue.c scan.c
 OBJS_t := $(OBJS) $(OBJS_l2) eapol_test.c
 OBJS_t += src/radius/radius_client.c
 OBJS_t += src/radius/radius.c
-ifndef CONFIG_AP
-OBJS_t += src/utils/ip_addr.c
-endif
 OBJS_t2 := $(OBJS) $(OBJS_l2) preauth_test.c
 OBJS += $(CONFIG_MAIN).c
 
@@ -1712,7 +1717,6 @@ endif
 include $(CLEAR_VARS)
 LOCAL_MODULE := wpa_cli
 LOCAL_PROPRIETARY_MODULE := true
-LOCAL_MODULE_TAGS := debug
 LOCAL_SHARED_LIBRARIES := libc libcutils liblog
 LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_SRC_FILES := $(OBJS_c)
@@ -1773,8 +1777,11 @@ endif
 ifeq ($(WPA_SUPPLICANT_USE_HIDL), y)
 LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.0
 LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.1
+LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.2
 ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
 LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.0
+LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.1
+LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.2
 endif
 LOCAL_SHARED_LIBRARIES += libhidlbase libhidltransport libhwbinder libutils libbase
 LOCAL_STATIC_LIBRARIES += libwpa_hidl
@@ -1828,7 +1835,7 @@ LOCAL_VENDOR_MODULE := true
 LOCAL_CPPFLAGS := $(L_CPPFLAGS)
 LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_C_INCLUDES := $(INCLUDES)
-HIDL_INTERFACE_VERSION = 1.1
+HIDL_INTERFACE_VERSION = 1.2
 LOCAL_SRC_FILES := \
     hidl/$(HIDL_INTERFACE_VERSION)/hidl.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/hidl_manager.cpp \
@@ -1850,14 +1857,18 @@ endif
 LOCAL_SHARED_LIBRARIES := \
     android.hardware.wifi.supplicant@1.0 \
     android.hardware.wifi.supplicant@1.1 \
+    android.hardware.wifi.supplicant@1.2 \
     libbase \
     libhidlbase \
     libhidltransport \
     libutils \
-    liblog
+    liblog \
+    libssl
 ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
 LOCAL_SHARED_LIBRARIES += \
-    vendor.qti.hardware.wifi.supplicant@2.0
+    vendor.qti.hardware.wifi.supplicant@2.0 \
+    vendor.qti.hardware.wifi.supplicant@2.1 \
+    vendor.qti.hardware.wifi.supplicant@2.2
 endif
 LOCAL_EXPORT_C_INCLUDE_DIRS := \
     $(LOCAL_PATH)/hidl/$(HIDL_INTERFACE_VERSION)
