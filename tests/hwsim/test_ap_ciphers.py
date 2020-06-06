@@ -13,7 +13,7 @@ import subprocess
 
 import hwsim_utils
 import hostapd
-from utils import HwsimSkip, skip_with_fips, require_under_vm
+from utils import *
 from wlantest import Wlantest
 from wpasupplicant import WpaSupplicant
 
@@ -34,6 +34,7 @@ def check_cipher(dev, ap, cipher, group_cipher=None):
     hapd = hostapd.add_ap(ap, params)
     dev.connect("test-wpa2-psk", psk="12345678",
                 pairwise=cipher, group=group_cipher, scan_freq="2412")
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev, hapd)
 
 def check_group_mgmt_cipher(dev, ap, cipher, sta_req_cipher=None):
@@ -56,6 +57,7 @@ def check_group_mgmt_cipher(dev, ap, cipher, sta_req_cipher=None):
     dev.connect("test-wpa2-psk-pmf", psk="12345678", ieee80211w="2",
                 key_mgmt="WPA-PSK-SHA256", group_mgmt=sta_req_cipher,
                 pairwise="CCMP", group="CCMP", scan_freq="2412")
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev, hapd)
     hapd.request("DEAUTHENTICATE ff:ff:ff:ff:ff:ff")
     dev.wait_disconnected()
@@ -76,12 +78,14 @@ def check_group_mgmt_cipher(dev, ap, cipher, sta_req_cipher=None):
 def test_ap_cipher_tkip(dev, apdev):
     """WPA2-PSK/TKIP connection"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     check_cipher(dev[0], apdev[0], "TKIP")
 
 @remote_compatible
 def test_ap_cipher_tkip_countermeasures_ap(dev, apdev):
     """WPA-PSK/TKIP countermeasures (detected by AP)"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     testfile = "/sys/kernel/debug/ieee80211/%s/netdev:%s/tkip_mic_test" % (dev[0].get_driver_status_field("phyname"), dev[0].ifname)
     if dev[0].cmd_execute(["ls", testfile])[0] != 0:
         raise HwsimSkip("tkip_mic_test not supported in mac80211")
@@ -116,6 +120,7 @@ def test_ap_cipher_tkip_countermeasures_ap(dev, apdev):
 def test_ap_cipher_tkip_countermeasures_ap_mixed_mode(dev, apdev):
     """WPA+WPA2-PSK/TKIP countermeasures (detected by mixed mode AP)"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     testfile = "/sys/kernel/debug/ieee80211/%s/netdev:%s/tkip_mic_test" % (dev[0].get_driver_status_field("phyname"), dev[0].ifname)
     if dev[0].cmd_execute(["ls", testfile])[0] != 0:
         raise HwsimSkip("tkip_mic_test not supported in mac80211")
@@ -164,6 +169,7 @@ def test_ap_cipher_tkip_countermeasures_ap_mixed_mode(dev, apdev):
 def test_ap_cipher_tkip_countermeasures_sta(dev, apdev):
     """WPA-PSK/TKIP countermeasures (detected by STA)"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     params = {"ssid": "tkip-countermeasures",
               "wpa_passphrase": "12345678",
               "wpa": "1",
@@ -200,6 +206,7 @@ def test_ap_cipher_tkip_countermeasures_sta2(dev, apdev, params):
     if not params['long']:
         raise HwsimSkip("Skip test case with long duration due to --long not specified")
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     params = {"ssid": "tkip-countermeasures",
               "wpa_passphrase": "12345678",
               "wpa": "1",
@@ -363,6 +370,7 @@ def test_ap_cipher_gcmp_ccmp(dev, apdev, params):
 def test_ap_cipher_mixed_wpa_wpa2(dev, apdev):
     """WPA2-PSK/CCMP/ and WPA-PSK/TKIP mixed configuration"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     ssid = "test-wpa-wpa2-psk"
     passphrase = "12345678"
     params = {"ssid": ssid,
@@ -372,6 +380,7 @@ def test_ap_cipher_mixed_wpa_wpa2(dev, apdev):
               "rsn_pairwise": "CCMP",
               "wpa_pairwise": "TKIP"}
     hapd = hostapd.add_ap(apdev[0], params)
+    dev[0].flush_scan_cache()
     dev[0].connect(ssid, psk=passphrase, proto="WPA2",
                    pairwise="CCMP", group="TKIP", scan_freq="2412")
     status = dev[0].get_status()
@@ -388,6 +397,7 @@ def test_ap_cipher_mixed_wpa_wpa2(dev, apdev):
         raise Exception("Missing BSS flag WPA-PSK-TKIP")
     if "[WPA2-PSK-CCMP]" not in bss['flags']:
         raise Exception("Missing BSS flag WPA2-PSK-CCMP")
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev[0], hapd)
 
     dev[1].connect(ssid, psk=passphrase, proto="WPA",
@@ -399,6 +409,7 @@ def test_ap_cipher_mixed_wpa_wpa2(dev, apdev):
         raise Exception("Incorrect pairwise_cipher reported")
     if status['group_cipher'] != 'TKIP':
         raise Exception("Incorrect group_cipher reported")
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev[1], hapd)
     hwsim_utils.test_connectivity(dev[0], dev[1])
 
@@ -511,6 +522,7 @@ def test_ap_cipher_replay_protection_ap_ccmp(dev, apdev):
 
 def test_ap_cipher_replay_protection_ap_tkip(dev, apdev):
     """TKIP replay protection on AP"""
+    skip_without_tkip(dev[0])
     run_ap_cipher_replay_protection_ap(dev, apdev, "TKIP")
 
 def test_ap_cipher_replay_protection_ap_gcmp(dev, apdev):
@@ -535,6 +547,7 @@ def run_ap_cipher_replay_protection_ap(dev, apdev, cipher):
 
     dev[0].connect("test-wpa2-psk", psk="12345678",
                    pairwise=cipher, group=cipher, scan_freq="2412")
+    hapd.wait_sta()
 
     if cipher != "TKIP":
         replays = get_tk_replay_counter(phy)
@@ -566,6 +579,7 @@ def test_ap_cipher_replay_protection_sta_ccmp(dev, apdev):
 
 def test_ap_cipher_replay_protection_sta_tkip(dev, apdev):
     """TKIP replay protection on STA (TK)"""
+    skip_without_tkip(dev[0])
     run_ap_cipher_replay_protection_sta(dev, apdev, "TKIP")
 
 def test_ap_cipher_replay_protection_sta_gcmp(dev, apdev):
@@ -580,6 +594,7 @@ def test_ap_cipher_replay_protection_sta_gtk_ccmp(dev, apdev):
 
 def test_ap_cipher_replay_protection_sta_gtk_tkip(dev, apdev):
     """TKIP replay protection on STA (GTK)"""
+    skip_without_tkip(dev[0])
     run_ap_cipher_replay_protection_sta(dev, apdev, "TKIP", gtk=True)
 
 def test_ap_cipher_replay_protection_sta_gtk_gcmp(dev, apdev):
@@ -604,6 +619,7 @@ def run_ap_cipher_replay_protection_sta(dev, apdev, cipher, gtk=False):
     phy = dev[0].get_driver_status_field("phyname")
     dev[0].connect("test-wpa2-psk", psk="12345678",
                    pairwise=cipher, group=cipher, scan_freq="2412")
+    hapd.wait_sta()
 
     if cipher != "TKIP":
         replays = get_tk_replay_counter(phy, gtk)
@@ -658,6 +674,7 @@ def run_ap_wpa2_delayed_m3_retransmission(dev, apdev):
 
     phy = dev[0].get_driver_status_field("phyname")
     dev[0].connect("test-wpa2-psk", psk="12345678", scan_freq="2412")
+    hapd.wait_sta()
 
     for i in range(5):
         hwsim_utils.test_connectivity(dev[0], hapd)
@@ -738,6 +755,7 @@ def run_ap_wpa2_delayed_m1_m3_retransmission(dev, apdev,
 
     phy = dev[0].get_driver_status_field("phyname")
     dev[0].connect("test-wpa2-psk", psk="12345678", scan_freq="2412")
+    hapd.wait_sta()
 
     for i in range(5):
         hwsim_utils.test_connectivity(dev[0], hapd)
@@ -805,6 +823,7 @@ def run_ap_wpa2_delayed_group_m1_retransmission(dev, apdev):
 
     phy = dev[0].get_driver_status_field("phyname")
     dev[0].connect("test-wpa2-psk", psk="12345678", scan_freq="2412")
+    hapd.wait_sta()
 
     for i in range(5):
         hwsim_utils.test_connectivity(dev[0], hapd)
@@ -842,6 +861,7 @@ def test_ap_wpa2_delayed_m1_m3_zero_tk(dev, apdev):
     wt.add_passphrase("12345678")
 
     dev[0].connect("test-wpa2-psk", psk="12345678", scan_freq="2412")
+    hapd.wait_sta()
 
     hwsim_utils.test_connectivity(dev[0], hapd)
     addr = dev[0].own_addr()
@@ -852,7 +872,12 @@ def test_ap_wpa2_delayed_m1_m3_zero_tk(dev, apdev):
     if "OK" not in hapd.request("RESEND_M3 " + addr):
         raise Exception("RESEND_M3 failed")
 
-    if "OK" not in hapd.request("SET_KEY 3 %s %d %d %s %s" % (addr, 0, 1, 6*"00", 16*"00")):
+    KEY_FLAG_RX = 0x04
+    KEY_FLAG_TX = 0x08
+    KEY_FLAG_PAIRWISE = 0x20
+    KEY_FLAG_RX_TX = KEY_FLAG_RX | KEY_FLAG_TX
+    KEY_FLAG_PAIRWISE_RX_TX = KEY_FLAG_PAIRWISE | KEY_FLAG_RX_TX
+    if "OK" not in hapd.request("SET_KEY 3 %s %d %d %s %s %d" % (addr, 0, 1, 6*"00", 16*"00", KEY_FLAG_PAIRWISE_RX_TX)):
         raise Exception("SET_KEY failed")
     time.sleep(0.1)
     hwsim_utils.test_connectivity(dev[0], hapd, timeout=1, broadcast=False,
@@ -968,3 +993,105 @@ def test_ap_wpa2_plaintext_group_m1_pmf(dev, apdev):
     if "OK" not in hapd.request("RESEND_GROUP_M1 " + addr):
         raise Exception("RESEND_GROUP_M1 failed")
     time.sleep(0.1)
+
+def test_ap_wpa2_gtk_initial_rsc_tkip(dev, apdev):
+    """Initial group cipher RSC (TKIP)"""
+    skip_without_tkip(dev[0])
+    run_ap_wpa2_gtk_initial_rsc(dev, apdev, "TKIP")
+
+def test_ap_wpa2_gtk_initial_rsc_ccmp(dev, apdev):
+    """Initial group cipher RSC (CCMP)"""
+    run_ap_wpa2_gtk_initial_rsc(dev, apdev, "CCMP")
+
+def test_ap_wpa2_gtk_initial_rsc_ccmp_256(dev, apdev):
+    """Initial group cipher RSC (CCMP-256)"""
+    run_ap_wpa2_gtk_initial_rsc(dev, apdev, "CCMP-256")
+
+def test_ap_wpa2_gtk_initial_rsc_gcmp(dev, apdev):
+    """Initial group cipher RSC (GCMP)"""
+    run_ap_wpa2_gtk_initial_rsc(dev, apdev, "GCMP")
+
+def test_ap_wpa2_gtk_initial_rsc_gcmp_256(dev, apdev):
+    """Initial group cipher RSC (GCMP-256)"""
+    run_ap_wpa2_gtk_initial_rsc(dev, apdev, "GCMP-256")
+
+def run_ap_wpa2_gtk_initial_rsc(dev, apdev, cipher):
+    if cipher not in dev[0].get_capability("pairwise") or \
+       cipher not in dev[0].get_capability("group"):
+        raise HwsimSkip("Cipher %s not supported" % cipher)
+
+    params = hostapd.wpa2_params(ssid="test-wpa2-psk", passphrase="12345678")
+    params["rsn_pairwise"] = cipher
+    params["group_cipher"] = cipher
+    params["gtk_rsc_override"] = "341200000000"
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    Wlantest.setup(hapd)
+    wt = Wlantest()
+    wt.flush()
+    wt.add_passphrase("12345678")
+
+    dev[0].connect("test-wpa2-psk", psk="12345678", proto="WPA2",
+                   pairwise=cipher, group=cipher, scan_freq="2412")
+    hapd.wait_sta()
+    # Verify that unicast traffic works, but broadcast traffic does not.
+    hwsim_utils.test_connectivity(dev[0], hapd, broadcast=False)
+    hwsim_utils.test_connectivity(dev[0], hapd, success_expected=False)
+    hwsim_utils.test_connectivity(dev[0], hapd, success_expected=False)
+
+def test_ap_wpa2_igtk_initial_rsc_aes_128_cmac(dev, apdev):
+    """Initial management group cipher RSC (AES-128-CMAC)"""
+    run_ap_wpa2_igtk_initial_rsc(dev, apdev, "AES-128-CMAC")
+
+def test_ap_wpa2_igtk_initial_rsc_bip_gmac_128(dev, apdev):
+    """Initial management group cipher RSC (BIP-GMAC-128)"""
+    run_ap_wpa2_igtk_initial_rsc(dev, apdev, "BIP-GMAC-128")
+
+def test_ap_wpa2_igtk_initial_rsc_bip_gmac_256(dev, apdev):
+    """Initial management group cipher RSC (BIP-GMAC-256)"""
+    run_ap_wpa2_igtk_initial_rsc(dev, apdev, "BIP-GMAC-256")
+
+def test_ap_wpa2_igtk_initial_rsc_bip_cmac_256(dev, apdev):
+    """Initial management group cipher RSC (BIP-CMAC-256)"""
+    run_ap_wpa2_igtk_initial_rsc(dev, apdev, "BIP-CMAC-256")
+
+def run_ap_wpa2_igtk_initial_rsc(dev, apdev, cipher):
+    if cipher not in dev[0].get_capability("group_mgmt"):
+        raise HwsimSkip("Cipher %s not supported" % cipher)
+
+    params = hostapd.wpa2_params(ssid="test-wpa2-psk", passphrase="12345678")
+    params["ieee80211w"] = "2"
+    params["rsn_pairwise"] = "CCMP"
+    params["group_cipher"] = "CCMP"
+    params["group_mgmt_cipher"] = cipher
+    params["igtk_rsc_override"] = "341200000000"
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    Wlantest.setup(hapd)
+    wt = Wlantest()
+    wt.flush()
+    wt.add_passphrase("12345678")
+
+    dev[0].connect("test-wpa2-psk", psk="12345678", proto="WPA2",
+                   ieee80211w="2", pairwise="CCMP", group="CCMP",
+                   group_mgmt=cipher,
+                   scan_freq="2412")
+    hapd.wait_sta()
+    # Verify that broadcast robust management frames are dropped.
+    dev[0].note("Sending broadcast Deauthentication and Disassociation frames with too small IPN")
+    hapd.request("DEAUTHENTICATE ff:ff:ff:ff:ff:ff test=1")
+    hapd.request("DISASSOCIATE ff:ff:ff:ff:ff:ff test=1")
+    hapd.request("DEAUTHENTICATE ff:ff:ff:ff:ff:ff test=1")
+    hapd.request("DISASSOCIATE ff:ff:ff:ff:ff:ff test=1")
+    dev[0].note("Done sending broadcast Deauthentication and Disassociation frames with too small IPN")
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=1)
+    if ev is not None:
+        raise Exception("Unexpected disconnection")
+
+    # Verify thar unicast robust management frames go through.
+    hapd.request("DEAUTHENTICATE " + dev[0].own_addr() + " reason=123 test=1")
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=1)
+    if ev is None:
+        raise Exception("Disconnection not reported")
+    if "reason=123" not in ev:
+        raise Exception("Unexpected disconnection reason: " + ev)

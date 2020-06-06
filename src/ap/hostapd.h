@@ -9,6 +9,10 @@
 #ifndef HOSTAPD_H
 #define HOSTAPD_H
 
+#ifdef CONFIG_SQLITE
+#include <sqlite3.h>
+#endif /* CONFIG_SQLITE */
+
 #include "common/defs.h"
 #include "utils/list.h"
 #include "ap_config.h"
@@ -33,6 +37,10 @@ union wps_event_data;
 #ifdef CONFIG_MESH
 struct mesh_conf;
 #endif /* CONFIG_MESH */
+
+#ifdef CONFIG_CTRL_IFACE_UDP
+#define CTRL_IFACE_COOKIE_LEN 8
+#endif /* CONFIG_CTRL_IFACE_UDP */
 
 struct hostapd_iface;
 
@@ -68,6 +76,11 @@ struct hapd_interfaces {
 #ifdef CONFIG_DPP
 	struct dpp_global *dpp;
 #endif /* CONFIG_DPP */
+
+#ifdef CONFIG_CTRL_IFACE_UDP
+       unsigned char ctrl_iface_cookie[CTRL_IFACE_COOKIE_LEN];
+#endif /* CONFIG_CTRL_IFACE_UDP */
+
 };
 
 enum hostapd_chan_status {
@@ -175,13 +188,12 @@ struct hostapd_data {
 	u64 acct_session_id;
 	struct radius_das_data *radius_das;
 
-	struct iapp_data *iapp;
-
 	struct hostapd_cached_radius_acl *acl_cache;
 	struct hostapd_acl_query_data *acl_queries;
 
 	struct wpa_authenticator *wpa_auth;
 	struct eapol_authenticator *eapol_auth;
+	struct eap_config *eap_cfg;
 
 	struct rsn_preauth_interface *preauth_iface;
 	struct os_reltime michael_mic_failure;
@@ -333,12 +345,10 @@ struct hostapd_data {
 	u8 last_gtk[WPA_GTK_MAX_LEN];
 	size_t last_gtk_len;
 
-#ifdef CONFIG_IEEE80211W
 	enum wpa_alg last_igtk_alg;
 	int last_igtk_key_idx;
 	u8 last_igtk[WPA_IGTK_MAX_LEN];
 	size_t last_igtk_len;
-#endif /* CONFIG_IEEE80211W */
 #endif /* CONFIG_TESTING_OPTIONS */
 
 #ifdef CONFIG_MBO
@@ -390,6 +400,14 @@ struct hostapd_data {
 #endif /* CONFIG_AIRTIME_POLICY */
 
 	u8 last_1x_eapol_key_replay_counter[8];
+
+#ifdef CONFIG_SQLITE
+	sqlite3 *rad_attr_db;
+#endif /* CONFIG_SQLITE */
+
+#ifdef CONFIG_CTRL_IFACE_UDP
+       unsigned char ctrl_iface_cookie[CTRL_IFACE_COOKIE_LEN];
+#endif /* CONFIG_CTRL_IFACE_UDP */
 };
 
 
@@ -457,9 +475,6 @@ struct hostapd_iface {
 	struct ap_info *ap_hash[STA_HASH_SIZE];
 
 	u64 drv_flags;
-
-	/* SMPS modes supported by the driver (WPA_DRIVER_SMPS_MODE_*) */
-	unsigned int smps_modes;
 
 	/*
 	 * A bitmap of supported protocols for probe response offload. See
