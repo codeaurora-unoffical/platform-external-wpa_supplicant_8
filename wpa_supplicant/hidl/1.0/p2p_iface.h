@@ -15,12 +15,13 @@
 
 #include <android-base/macros.h>
 
-#include <android/hardware/wifi/supplicant/1.2/ISupplicantP2pIface.h>
+#include <android/hardware/wifi/supplicant/1.0/ISupplicantP2pIface.h>
 #include <android/hardware/wifi/supplicant/1.0/ISupplicantP2pIfaceCallback.h>
 #include <android/hardware/wifi/supplicant/1.0/ISupplicantP2pNetwork.h>
 
-extern "C"
-{
+#include <vendor/qti/hardware/wifi/supplicant/1.1/ISupplicantVendorP2PIface.h>
+#include <vendor/qti/hardware/wifi/supplicant/1.1/ISupplicantVendorP2PIfaceCallback.h>
+extern "C" {
 #include "utils/common.h"
 #include "utils/includes.h"
 #include "p2p/p2p.h"
@@ -34,10 +35,8 @@ namespace android {
 namespace hardware {
 namespace wifi {
 namespace supplicant {
-namespace V1_2 {
+namespace V1_0 {
 namespace implementation {
-using namespace android::hardware::wifi::supplicant::V1_0;
-using namespace android::hardware::wifi::supplicant::V1_1;
 
 using vendor::qti::hardware::wifi::supplicant::V1_1::ISupplicantVendorP2PIfaceCallback;
 
@@ -46,7 +45,8 @@ using vendor::qti::hardware::wifi::supplicant::V1_1::ISupplicantVendorP2PIfaceCa
  * object is used for control operations on a specific interface
  * controlled by wpa_supplicant.
  */
-class P2pIface : public V1_2::ISupplicantP2pIface
+class P2pIface :
+	public vendor::qti::hardware::wifi::supplicant::V1_1::ISupplicantVendorP2PIface
 {
 public:
 	P2pIface(struct wpa_global* wpa_global, const char ifname[]);
@@ -192,12 +192,6 @@ public:
 	    const hidl_vec<uint8_t>& select,
 	    reportNfcHandoverInitiation_cb _hidl_cb) override;
 	Return<void> saveConfig(saveConfig_cb _hidl_cb) override;
-	Return<void> addGroup_1_2(
-	    const hidl_vec<uint8_t>& ssid, const hidl_string& passphrase,
-	    bool persistent, uint32_t freq, const hidl_array<uint8_t, 6>& peer_address,
-	    bool joinExistingGroup, addGroup_1_2_cb _hidl_cb) override;
-	Return<void> setMacRandomization(
-	    bool enable, setMacRandomization_cb _hidl_cb) override;
 
 private:
 	// Corresponding worker functions for the HIDL methods.
@@ -304,11 +298,6 @@ private:
 	SupplicantStatus reportNfcHandoverInitiationInternal(
 	    const std::vector<uint8_t>& select);
 	SupplicantStatus saveConfigInternal();
-	SupplicantStatus addGroup_1_2Internal(
-	    const std::vector<uint8_t>& ssid, const std::string& passphrase,
-	    bool persistent, uint32_t freq, const std::array<uint8_t, 6>& peer_address,
-	    bool joinExistingGroup);
-	SupplicantStatus setMacRandomizationInternal(bool enable);
 
 	struct wpa_supplicant* retrieveIfacePtr();
 	struct wpa_supplicant* retrieveGroupIfacePtr(
@@ -325,9 +314,9 @@ private:
 };
 
 }  // namespace implementation
-}  // namespace V1_2
-}  // namespace supplicant
+}  // namespace V1_0
 }  // namespace wifi
+}  // namespace supplicant
 }  // namespace hardware
 }  // namespace android
 

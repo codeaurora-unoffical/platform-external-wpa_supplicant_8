@@ -287,7 +287,7 @@ endif
 endif
 
 ifeq ($(CONFIG_DPP),y)
-#L_CFLAGS += -DCONFIG_DPP
+L_CFLAGS += -DCONFIG_DPP
 OBJS += src/common/dpp.c
 OBJS += dpp_supplicant.c
 NEED_AES_SIV=y
@@ -314,27 +314,6 @@ NEED_HMAC_SHA384_KDF=y
 NEED_HMAC_SHA512_KDF=y
 NEED_SHA384=y
 NEED_SHA512=y
-endif
-
-ifdef CONFIG_DPP
-#L_CFLAGS += -DCONFIG_DPP
-OBJS += src/common/dpp.c
-OBJS += dpp_supplicant.c
-NEED_AES_SIV=y
-NEED_HMAC_SHA256_KDF=y
-NEED_HMAC_SHA384_KDF=y
-NEED_HMAC_SHA512_KDF=y
-NEED_SHA256=y
-NEED_SHA384=y
-NEED_SHA512=y
-NEED_JSON=y
-NEED_GAS_SERVER=y
-endif
-
-ifdef CONFIG_OWE
-L_CFLAGS += -DCONFIG_OWE
-NEED_ECC=y
-NEED_HMAC_SHA256_KDF=y
 endif
 
 ifdef CONFIG_FILS
@@ -1289,12 +1268,6 @@ endif
 ifdef NEED_AES_EAX
 AESOBJS += src/crypto/aes-eax.c
 NEED_AES_CTR=y
-NEED_AES_OMAC1=y
-endif
-ifdef NEED_AES_SIV
-AESOBJS += src/crypto/aes-siv.c
-NEED_AES_CTR=y
-NEED_AES_OMAC1=y
 endif
 ifdef NEED_AES_SIV
 AESOBJS += src/crypto/aes-siv.c
@@ -1812,13 +1785,8 @@ LOCAL_SHARED_LIBRARIES += libdbus
 endif
 ifeq ($(WPA_SUPPLICANT_USE_HIDL), y)
 LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.0
-LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.1
-LOCAL_SHARED_LIBRARIES += android.hardware.wifi.supplicant@1.2
-ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
-LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.0
-LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.1
-LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@2.2
-endif
+LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@1.0_vendor
+LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.supplicant@1.1_vendor
 LOCAL_SHARED_LIBRARIES += libhidlbase libhidltransport libhwbinder libutils libbase
 LOCAL_STATIC_LIBRARIES += libwpa_hidl
 endif
@@ -1862,6 +1830,8 @@ LOCAL_COPY_HEADERS_TO := libwpa_client
 LOCAL_COPY_HEADERS := src/common/wpa_ctrl.h
 include $(BUILD_SHARED_LIBRARY)
 
+
+
 ifeq ($(WPA_SUPPLICANT_USE_HIDL), y)
 ### Hidl service library ###
 ########################
@@ -1871,7 +1841,7 @@ LOCAL_VENDOR_MODULE := true
 LOCAL_CPPFLAGS := $(L_CPPFLAGS)
 LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_C_INCLUDES := $(INCLUDES)
-HIDL_INTERFACE_VERSION = 1.2
+HIDL_INTERFACE_VERSION = 1.0
 LOCAL_SRC_FILES := \
     hidl/$(HIDL_INTERFACE_VERSION)/hidl.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/hidl_manager.cpp \
@@ -1881,32 +1851,64 @@ LOCAL_SRC_FILES := \
     hidl/$(HIDL_INTERFACE_VERSION)/sta_iface.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/sta_network.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/supplicant.cpp
+LOCAL_SHARED_LIBRARIES := \
+    android.hardware.wifi.supplicant@$(HIDL_INTERFACE_VERSION) \
+    vendor.qti.hardware.wifi.supplicant@$(HIDL_INTERFACE_VERSION)_vendor \
+    vendor.qti.hardware.wifi.supplicant@1.1_vendor \
+    libhidlbase \
+    libhidltransport \
+    libhwbinder \
+    libutils \
+    liblog
+LOCAL_EXPORT_C_INCLUDE_DIRS := \
+    $(LOCAL_PATH)/hidl/$(HIDL_INTERFACE_VERSION)
+include $(BUILD_STATIC_LIBRARY)
+endif # WPA_SUPPLICANT_USE_HIDL == y
 
-ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
-LOCAL_SRC_FILES += \
+
+#ifeq ($(WPA_SUPPLICANT_USE_HIDL), y)
+### Hidl service library ###
+########################
+#include $(CLEAR_VARS)
+#LOCAL_MODULE := libwpa_hidl
+#LOCAL_VENDOR_MODULE := true
+#LOCAL_CPPFLAGS := $(L_CPPFLAGS)
+#LOCAL_CFLAGS := $(L_CFLAGS)
+#LOCAL_C_INCLUDES := $(INCLUDES)
+#HIDL_INTERFACE_VERSION = 1.0
+#LOCAL_SRC_FILES := \
+    hidl/$(HIDL_INTERFACE_VERSION)/hidl.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/hidl_manager.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/iface_config_utils.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/p2p_iface.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/p2p_network.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/sta_iface.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/sta_network.cpp \
+    hidl/$(HIDL_INTERFACE_VERSION)/supplicant.cpp
+
+#ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
+#LOCAL_SRC_FILES += \
     hidl/$(HIDL_INTERFACE_VERSION)/vendorsta_iface.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/vendorsta_network.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/vendorp2p_iface.cpp \
     hidl/$(HIDL_INTERFACE_VERSION)/supplicantvendor.cpp
-endif
+#endif
 
-LOCAL_SHARED_LIBRARIES := \
+#LOCAL_SHARED_LIBRARIES := \
     android.hardware.wifi.supplicant@1.0 \
-    android.hardware.wifi.supplicant@1.1 \
-    android.hardware.wifi.supplicant@1.2 \
     libbase \
     libhidlbase \
     libhidltransport \
     libutils \
     liblog \
     libssl
-ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
-LOCAL_SHARED_LIBRARIES += \
+#ifeq ($(SUPPLICANT_VENDOR_HIDL), y)
+#LOCAL_SHARED_LIBRARIES += \
     vendor.qti.hardware.wifi.supplicant@2.0 \
     vendor.qti.hardware.wifi.supplicant@2.1 \
     vendor.qti.hardware.wifi.supplicant@2.2
-endif
-LOCAL_EXPORT_C_INCLUDE_DIRS := \
+#endif
+#LOCAL_EXPORT_C_INCLUDE_DIRS := \
     $(LOCAL_PATH)/hidl/$(HIDL_INTERFACE_VERSION)
-include $(BUILD_STATIC_LIBRARY)
-endif # WPA_SUPPLICANT_USE_HIDL == y
+#include $(BUILD_STATIC_LIBRARY)
+#endif # WPA_SUPPLICANT_USE_HIDL == y

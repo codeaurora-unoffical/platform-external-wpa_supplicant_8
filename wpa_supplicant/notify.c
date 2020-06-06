@@ -688,7 +688,7 @@ void wpas_notify_p2p_device_found(struct wpa_supplicant *wpa_s,
 					  peer_wfd_device_info,
                                           peer_wfd_device_info_len,
 					  peer_wfd_r2_device_info,
-                                          peer_wfd_r2_device_info_len);
+					  peer_wfd_r2_device_info_len);
 #endif
 }
 
