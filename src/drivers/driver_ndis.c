@@ -35,6 +35,7 @@ int close(int fd);
 #include "driver.h"
 #include "eloop.h"
 #include "common/ieee802_11_defs.h"
+#include "common/ieee802_11_common.h"
 #include "driver_ndis.h"
 
 int wpa_driver_register_event_cb(struct wpa_driver_ndis_data *drv);
@@ -718,7 +719,7 @@ static int wpa_driver_ndis_disconnect(struct wpa_driver_ndis_data *drv)
 
 
 static int wpa_driver_ndis_deauthenticate(void *priv, const u8 *addr,
-					  int reason_code)
+					  u16 reason_code)
 {
 	struct wpa_driver_ndis_data *drv = priv;
 	return wpa_driver_ndis_disconnect(drv);
@@ -780,20 +781,7 @@ static int wpa_driver_ndis_scan(void *priv,
 
 static const u8 * wpa_scan_get_ie(const struct wpa_scan_res *res, u8 ie)
 {
-	const u8 *end, *pos;
-
-	pos = (const u8 *) (res + 1);
-	end = pos + res->ie_len;
-
-	while (pos + 1 < end) {
-		if (pos + 2 + pos[1] > end)
-			break;
-		if (pos[0] == ie)
-			return pos;
-		pos += 2 + pos[1];
-	}
-
-	return NULL;
+	return get_ie((const u8 *) (res + 1), res->ie_len, ie);
 }
 
 
@@ -1046,6 +1034,18 @@ static int wpa_driver_ndis_set_key(const char *ifname, void *priv,
 
 
 static int
+wpa_driver_ndis_set_key_wrapper(void *priv,
+				struct wpa_driver_set_key_params *params)
+{
+	return wpa_driver_ndis_set_key(params->ifname, priv,
+				       params->alg, params->addr,
+				       params->key_idx, params->set_tx,
+				       params->seq, params->seq_len,
+				       params->key, params->key_len);
+}
+
+
+static int
 wpa_driver_ndis_associate(void *priv,
 			  struct wpa_driver_associate_params *params)
 {
@@ -1232,12 +1232,16 @@ static int wpa_driver_ndis_set_pmkid(struct wpa_driver_ndis_data *drv)
 }
 
 
-static int wpa_driver_ndis_add_pmkid(void *priv, const u8 *bssid,
-				     const u8 *pmkid)
+static int wpa_driver_ndis_add_pmkid(void *priv,
+				     struct wpa_pmkid_params *params)
 {
 	struct wpa_driver_ndis_data *drv = priv;
 	struct ndis_pmkid_entry *entry, *prev;
+	const u8 *bssid = params->bssid;
+	const u8 *pmkid = params->pmkid;
 
+	if (!bssid || !pmkid)
+		return -1;
 	if (drv->no_of_pmkid == 0)
 		return 0;
 
@@ -1273,12 +1277,16 @@ static int wpa_driver_ndis_add_pmkid(void *priv, const u8 *bssid,
 }
 
 
-static int wpa_driver_ndis_remove_pmkid(void *priv, const u8 *bssid,
-		 			const u8 *pmkid)
+static int wpa_driver_ndis_remove_pmkid(void *priv,
+					struct wpa_pmkid_params *params)
 {
 	struct wpa_driver_ndis_data *drv = priv;
 	struct ndis_pmkid_entry *entry, *prev;
+	const u8 *bssid = params->bssid;
+	const u8 *pmkid = params->pmkid;
 
+	if (!bssid || !pmkid)
+		return -1;
 	if (drv->no_of_pmkid == 0)
 		return 0;
 
@@ -2801,6 +2809,7 @@ static void * wpa_driver_ndis_init(void *ctx, const char *ifname)
 {
 	struct wpa_driver_ndis_data *drv;
 	u32 mode;
+	int i;
 
 	drv = os_zalloc(sizeof(*drv));
 	if (drv == NULL)
@@ -2846,6 +2855,11 @@ static void * wpa_driver_ndis_init(void *ctx, const char *ifname)
 		return NULL;
 	}
 	wpa_driver_ndis_get_capability(drv);
+
+	/* Update per interface supported AKMs */
+	for (i = 0; i < WPA_IF_MAX; i++)
+		drv->capa.key_mgmt_iftype[i] = drv->capa.key_mgmt;
+
 
 	/* Make sure that the driver does not have any obsolete PMKID entries.
 	 */
@@ -3199,7 +3213,7 @@ void driver_ndis_init_ops(void)
 	wpa_driver_ndis_ops.desc = ndis_drv_desc;
 	wpa_driver_ndis_ops.get_bssid = wpa_driver_ndis_get_bssid;
 	wpa_driver_ndis_ops.get_ssid = wpa_driver_ndis_get_ssid;
-	wpa_driver_ndis_ops.set_key = wpa_driver_ndis_set_key;
+	wpa_driver_ndis_ops.set_key = wpa_driver_ndis_set_key_wrapper;
 	wpa_driver_ndis_ops.init = wpa_driver_ndis_init;
 	wpa_driver_ndis_ops.deinit = wpa_driver_ndis_deinit;
 	wpa_driver_ndis_ops.deauthenticate = wpa_driver_ndis_deauthenticate;

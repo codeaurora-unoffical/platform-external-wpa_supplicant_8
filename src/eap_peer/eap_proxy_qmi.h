@@ -30,6 +30,9 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef EAP_PROXY_QMI_H
 #define EAP_PROXY_QMI_H
 
+#define Boolean bool
+#define FALSE 0
+#define TRUE 1
 
 #include "eap_i.h"
 #include "eap_config.h"

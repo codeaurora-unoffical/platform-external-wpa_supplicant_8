@@ -2,6 +2,8 @@
 Description=WPA supplicant daemon (interface- and wired driver-specific version)
 Requires=sys-subsystem-net-devices-%i.device
 After=sys-subsystem-net-devices-%i.device
+Before=network.target
+Wants=network.target
 
 # NetworkManager users will probably want the dbus version instead.
 
@@ -10,4 +12,4 @@ Type=simple
 ExecStart=@BINDIR@/wpa_supplicant -c/etc/wpa_supplicant/wpa_supplicant-wired-%I.conf -Dwired -i%I
 
 [Install]
-Alias=multi-user.target.wants/wpa_supplicant-wired@%i.service
+WantedBy=multi-user.target

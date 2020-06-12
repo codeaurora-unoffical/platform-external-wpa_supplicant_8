@@ -15,11 +15,12 @@
 #include "fst/fst_defs.h"
 #include "fst/fst_ctrl_iface.h"
 
+static int fst_global_initialized = 0;
 struct dl_list fst_global_ctrls_list;
 
 
 static void fst_ctrl_iface_notify_peer_state_change(struct fst_iface *iface,
-						    Boolean connected,
+						    bool connected,
 						    const u8 *peer_addr)
 {
 	union fst_event_extra extra;
@@ -41,7 +42,7 @@ struct fst_iface * fst_attach(const char *ifname, const u8 *own_addr,
 	struct fst_group *g;
 	struct fst_group *group = NULL;
 	struct fst_iface *iface = NULL;
-	Boolean new_group = FALSE;
+	bool new_group = false;
 
 	WPA_ASSERT(ifname != NULL);
 	WPA_ASSERT(iface_obj != NULL);
@@ -61,7 +62,7 @@ struct fst_iface * fst_attach(const char *ifname, const u8 *own_addr,
 				   cfg->group_id);
 			return NULL;
 		}
-		new_group = TRUE;
+		new_group = true;
 	}
 
 	iface = fst_iface_create(group, ifname, own_addr, iface_obj, cfg);
@@ -106,6 +107,7 @@ int fst_global_init(void)
 	dl_list_init(&fst_global_groups_list);
 	dl_list_init(&fst_global_ctrls_list);
 	fst_session_global_init();
+	fst_global_initialized = 1;
 	return 0;
 }
 
@@ -115,6 +117,9 @@ void fst_global_deinit(void)
 	struct fst_group *group;
 	struct fst_ctrl_handle *h;
 
+	if (!fst_global_initialized)
+		return;
+
 	fst_session_global_deinit();
 	while ((group = fst_first_group()) != NULL)
 		fst_group_delete(group);
@@ -122,6 +127,7 @@ void fst_global_deinit(void)
 				  struct fst_ctrl_handle,
 				  global_ctrls_lentry)))
 		fst_global_del_ctrl(h);
+	fst_global_initialized = 0;
 }
 
 
@@ -160,7 +166,7 @@ void fst_global_del_ctrl(struct fst_ctrl_handle *h)
 void fst_rx_action(struct fst_iface *iface, const struct ieee80211_mgmt *mgmt,
 		   size_t len)
 {
-	if (fst_iface_is_connected(iface, mgmt->sa, FALSE))
+	if (fst_iface_is_connected(iface, mgmt->sa, false))
 		fst_session_on_action_rx(iface, mgmt, len);
 	else
 		wpa_printf(MSG_DEBUG,
@@ -181,7 +187,7 @@ void fst_notify_peer_connected(struct fst_iface *iface, const u8 *addr)
 	fst_printf_iface(iface, MSG_DEBUG, MACSTR " became connected",
 			 MAC2STR(addr));
 
-	fst_ctrl_iface_notify_peer_state_change(iface, TRUE, addr);
+	fst_ctrl_iface_notify_peer_state_change(iface, true, addr);
 }
 
 
@@ -197,14 +203,23 @@ void fst_notify_peer_disconnected(struct fst_iface *iface, const u8 *addr)
 	fst_printf_iface(iface, MSG_DEBUG, MACSTR " became disconnected",
 			 MAC2STR(addr));
 
-	fst_ctrl_iface_notify_peer_state_change(iface, FALSE, addr);
+	fst_ctrl_iface_notify_peer_state_change(iface, false, addr);
 }
 
 
-Boolean fst_are_ifaces_aggregated(struct fst_iface *iface1,
-				  struct fst_iface *iface2)
+bool fst_are_ifaces_aggregated(struct fst_iface *iface1,
+			       struct fst_iface *iface2)
 {
 	return fst_iface_get_group(iface1) == fst_iface_get_group(iface2);
+}
+
+
+void fst_update_mac_addr(struct fst_iface *iface, const u8 *addr)
+{
+	fst_printf_iface(iface, MSG_DEBUG, "new MAC address " MACSTR,
+			 MAC2STR(addr));
+	os_memcpy(iface->own_addr, addr, sizeof(iface->own_addr));
+	fst_group_update_ie(fst_iface_get_group(iface));
 }
 
 

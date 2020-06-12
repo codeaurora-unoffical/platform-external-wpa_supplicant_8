@@ -228,7 +228,6 @@ void ap_list_process_beacon(struct hostapd_iface *iface,
 		set_beacon++;
 	}
 
-#ifdef CONFIG_IEEE80211N
 	if (!iface->olbc_ht && !ap->ht_support &&
 	    (ap->channel == 0 ||
 	     ap->channel == iface->conf->channel ||
@@ -241,21 +240,17 @@ void ap_list_process_beacon(struct hostapd_iface *iface,
 			   MAC2STR(ap->addr), ap->channel);
 		set_beacon++;
 	}
-#endif /* CONFIG_IEEE80211N */
 
 	if (set_beacon)
 		ieee802_11_update_beacons(iface);
 }
 
 
-static void ap_list_timer(void *eloop_ctx, void *timeout_ctx)
+void ap_list_timer(struct hostapd_iface *iface)
 {
-	struct hostapd_iface *iface = eloop_ctx;
 	struct os_reltime now;
 	struct ap_info *ap;
 	int set_beacon = 0;
-
-	eloop_register_timeout(10, 0, ap_list_timer, iface, NULL);
 
 	if (!iface->ap_list)
 		return;
@@ -288,14 +283,12 @@ static void ap_list_timer(void *eloop_ctx, void *timeout_ctx)
 			iface->olbc = 0;
 			set_beacon++;
 		}
-#ifdef CONFIG_IEEE80211N
 		if (!olbc_ht && iface->olbc_ht) {
 			wpa_printf(MSG_DEBUG, "OLBC HT not detected anymore");
 			iface->olbc_ht = 0;
 			hostapd_ht_operation_update(iface);
 			set_beacon++;
 		}
-#endif /* CONFIG_IEEE80211N */
 	}
 
 	if (set_beacon)
@@ -305,13 +298,11 @@ static void ap_list_timer(void *eloop_ctx, void *timeout_ctx)
 
 int ap_list_init(struct hostapd_iface *iface)
 {
-	eloop_register_timeout(10, 0, ap_list_timer, iface, NULL);
 	return 0;
 }
 
 
 void ap_list_deinit(struct hostapd_iface *iface)
 {
-	eloop_cancel_timeout(ap_list_timer, iface, NULL);
 	hostapd_free_aps(iface);
 }

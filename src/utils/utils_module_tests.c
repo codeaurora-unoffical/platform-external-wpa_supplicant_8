@@ -9,11 +9,16 @@
 #include "utils/includes.h"
 
 #include "utils/common.h"
+#include "utils/const_time.h"
 #include "common/ieee802_11_defs.h"
 #include "utils/bitfield.h"
 #include "utils/ext_password.h"
 #include "utils/trace.h"
 #include "utils/base64.h"
+#include "utils/ip_addr.h"
+#include "utils/eloop.h"
+#include "utils/json.h"
+#include "utils/module_tests.h"
 
 
 struct printf_test_data {
@@ -44,6 +49,7 @@ static int printf_encode_decode_tests(void)
 	char buf[100];
 	u8 bin[100];
 	int errors = 0;
+	int array[10];
 
 	wpa_printf(MSG_INFO, "printf encode/decode tests");
 
@@ -92,7 +98,22 @@ static int printf_encode_decode_tests(void)
 	if (printf_decode(bin, 3, "\\xa") != 1 || bin[0] != 10)
 		errors++;
 
+	if (printf_decode(bin, 3, "\\xq") != 1 || bin[0] != 'q')
+		errors++;
+
 	if (printf_decode(bin, 3, "\\a") != 1 || bin[0] != 'a')
+		errors++;
+
+	array[0] = 10;
+	array[1] = 10;
+	array[2] = 5;
+	array[3] = 10;
+	array[4] = 5;
+	array[5] = 0;
+	if (int_array_len(array) != 5)
+		errors++;
+	int_array_sort_unique(array);
+	if (int_array_len(array) != 2)
 		errors++;
 
 	if (errors) {
@@ -205,7 +226,7 @@ static int int_array_tests(void)
 	int test3[] = { 1, 1, 1, -1, 2, 3, 4, 1, 2, 0 };
 	int test3_res[] = { -1, 1, 2, 3, 4, 0 };
 	int errors = 0;
-	int len;
+	size_t len;
 
 	wpa_printf(MSG_INFO, "int_array tests");
 
@@ -275,52 +296,53 @@ static int base64_tests(void)
 {
 	int errors = 0;
 	unsigned char *res;
+	char *res2;
 	size_t res_len;
 
 	wpa_printf(MSG_INFO, "base64 tests");
 
-	res = base64_encode((const unsigned char *) "", ~0, &res_len);
+	res2 = base64_encode("", ~0, &res_len);
+	if (res2) {
+		errors++;
+		os_free(res2);
+	}
+
+	res2 = base64_encode("=", 1, &res_len);
+	if (!res2 || res_len != 5 || res2[0] != 'P' || res2[1] != 'Q' ||
+	    res2[2] != '=' || res2[3] != '=' || res2[4] != '\n')
+		errors++;
+	os_free(res2);
+
+	res2 = base64_encode("=", 1, NULL);
+	if (!res2 || res2[0] != 'P' || res2[1] != 'Q' ||
+	    res2[2] != '=' || res2[3] != '=' || res2[4] != '\n')
+		errors++;
+	os_free(res2);
+
+	res = base64_decode("", 0, &res_len);
 	if (res) {
 		errors++;
 		os_free(res);
 	}
 
-	res = base64_encode((const unsigned char *) "=", 1, &res_len);
-	if (!res || res_len != 5 || res[0] != 'P' || res[1] != 'Q' ||
-	    res[2] != '=' || res[3] != '=' || res[4] != '\n')
-		errors++;
-	os_free(res);
-
-	res = base64_encode((const unsigned char *) "=", 1, NULL);
-	if (!res || res[0] != 'P' || res[1] != 'Q' ||
-	    res[2] != '=' || res[3] != '=' || res[4] != '\n')
-		errors++;
-	os_free(res);
-
-	res = base64_decode((const unsigned char *) "", 0, &res_len);
+	res = base64_decode("a", 1, &res_len);
 	if (res) {
 		errors++;
 		os_free(res);
 	}
 
-	res = base64_decode((const unsigned char *) "a", 1, &res_len);
+	res = base64_decode("====", 4, &res_len);
 	if (res) {
 		errors++;
 		os_free(res);
 	}
 
-	res = base64_decode((const unsigned char *) "====", 4, &res_len);
-	if (res) {
-		errors++;
-		os_free(res);
-	}
-
-	res = base64_decode((const unsigned char *) "PQ==", 4, &res_len);
+	res = base64_decode("PQ==", 4, &res_len);
 	if (!res || res_len != 1 || res[0] != '=')
 		errors++;
 	os_free(res);
 
-	res = base64_decode((const unsigned char *) "P.Q-=!=*", 8, &res_len);
+	res = base64_decode("P.Q-=!=*", 8, &res_len);
 	if (!res || res_len != 1 || res[0] != '=')
 		errors++;
 	os_free(res);
@@ -336,7 +358,7 @@ static int base64_tests(void)
 
 static int common_tests(void)
 {
-	char buf[3];
+	char buf[3], longbuf[100];
 	u8 addr[ETH_ALEN] = { 1, 2, 3, 4, 5, 6 };
 	u8 bin[3];
 	int errors = 0;
@@ -409,12 +431,781 @@ static int common_tests(void)
 		errors++;
 	}
 
+	if (wpa_snprintf_hex_sep(longbuf, 0, addr, ETH_ALEN, '-') != 0 ||
+	    wpa_snprintf_hex_sep(longbuf, 5, addr, ETH_ALEN, '-') != 3 ||
+	    os_strcmp(longbuf, "01-0") != 0)
+		errors++;
+
 	if (errors) {
 		wpa_printf(MSG_ERROR, "%d common test(s) failed", errors);
 		return -1;
 	}
 
 	return 0;
+}
+
+
+static int os_tests(void)
+{
+	int errors = 0;
+	void *ptr;
+	os_time_t t;
+
+	wpa_printf(MSG_INFO, "os tests");
+
+	ptr = os_calloc((size_t) -1, (size_t) -1);
+	if (ptr) {
+		errors++;
+		os_free(ptr);
+	}
+	ptr = os_calloc((size_t) 2, (size_t) -1);
+	if (ptr) {
+		errors++;
+		os_free(ptr);
+	}
+	ptr = os_calloc((size_t) -1, (size_t) 2);
+	if (ptr) {
+		errors++;
+		os_free(ptr);
+	}
+
+	ptr = os_realloc_array(NULL, (size_t) -1, (size_t) -1);
+	if (ptr) {
+		errors++;
+		os_free(ptr);
+	}
+
+	os_sleep(1, 1);
+
+	if (os_mktime(1969, 1, 1, 1, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 0, 1, 1, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 13, 1, 1, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 0, 1, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 32, 1, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 1, -1, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 1, 24, 1, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 1, 1, -1, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 1, 1, 60, 1, &t) == 0 ||
+	    os_mktime(1971, 1, 1, 1, 1, -1, &t) == 0 ||
+	    os_mktime(1971, 1, 1, 1, 1, 61, &t) == 0 ||
+	    os_mktime(1971, 1, 1, 1, 1, 1, &t) != 0 ||
+	    os_mktime(2020, 1, 2, 3, 4, 5, &t) != 0 ||
+	    os_mktime(2015, 12, 31, 23, 59, 59, &t) != 0)
+		errors++;
+
+	if (os_setenv("hwsim_test_env", "test value", 0) != 0 ||
+	    os_setenv("hwsim_test_env", "test value 2", 1) != 0 ||
+	    os_unsetenv("hwsim_test_env") != 0)
+		errors++;
+
+	if (os_file_exists("/this-file-does-not-exists-hwsim") != 0)
+		errors++;
+
+	if (errors) {
+		wpa_printf(MSG_ERROR, "%d os test(s) failed", errors);
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static int wpabuf_tests(void)
+{
+	int errors = 0;
+	void *ptr;
+	struct wpabuf *buf;
+
+	wpa_printf(MSG_INFO, "wpabuf tests");
+
+	ptr = os_malloc(100);
+	if (ptr) {
+		buf = wpabuf_alloc_ext_data(ptr, 100);
+		if (buf) {
+			if (wpabuf_resize(&buf, 100) < 0)
+				errors++;
+			else
+				wpabuf_put(buf, 100);
+			wpabuf_free(buf);
+		} else {
+			errors++;
+			os_free(ptr);
+		}
+	} else {
+		errors++;
+	}
+
+	buf = wpabuf_alloc(100);
+	if (buf) {
+		struct wpabuf *buf2;
+
+		wpabuf_put(buf, 100);
+		if (wpabuf_resize(&buf, 100) < 0)
+			errors++;
+		else
+			wpabuf_put(buf, 100);
+		buf2 = wpabuf_concat(buf, NULL);
+		if (buf2 != buf)
+			errors++;
+		wpabuf_free(buf2);
+	} else {
+		errors++;
+	}
+
+	buf = NULL;
+	buf = wpabuf_zeropad(buf, 10);
+	if (buf != NULL)
+		errors++;
+
+	if (errors) {
+		wpa_printf(MSG_ERROR, "%d wpabuf test(s) failed", errors);
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static int ip_addr_tests(void)
+{
+	int errors = 0;
+	struct hostapd_ip_addr addr;
+	char buf[100];
+
+	wpa_printf(MSG_INFO, "ip_addr tests");
+
+	if (hostapd_parse_ip_addr("1.2.3.4", &addr) != 0 ||
+	    addr.af != AF_INET ||
+	    hostapd_ip_txt(NULL, buf, sizeof(buf)) != NULL ||
+	    hostapd_ip_txt(&addr, buf, 1) != buf || buf[0] != '\0' ||
+	    hostapd_ip_txt(&addr, buf, 0) != NULL ||
+	    hostapd_ip_txt(&addr, buf, sizeof(buf)) != buf)
+		errors++;
+
+	if (hostapd_parse_ip_addr("::", &addr) != 0 ||
+	    addr.af != AF_INET6 ||
+	    hostapd_ip_txt(&addr, buf, 1) != buf || buf[0] != '\0' ||
+	    hostapd_ip_txt(&addr, buf, sizeof(buf)) != buf)
+		errors++;
+
+	if (errors) {
+		wpa_printf(MSG_ERROR, "%d ip_addr test(s) failed", errors);
+		return -1;
+	}
+
+	return 0;
+}
+
+
+struct test_eloop {
+	unsigned int magic;
+	int close_in_timeout;
+	int pipefd1[2];
+	int pipefd2[2];
+};
+
+
+static void eloop_tests_start(int close_in_timeout);
+
+
+static void eloop_test_read_2(int sock, void *eloop_ctx, void *sock_ctx)
+{
+	struct test_eloop *t = eloop_ctx;
+	ssize_t res;
+	char buf[10];
+
+	wpa_printf(MSG_INFO, "%s: sock=%d", __func__, sock);
+
+	if (t->magic != 0x12345678) {
+		wpa_printf(MSG_INFO, "%s: unexpected magic 0x%x",
+			   __func__, t->magic);
+	}
+
+	if (t->pipefd2[0] != sock) {
+		wpa_printf(MSG_INFO, "%s: unexpected sock %d != %d",
+			   __func__, sock, t->pipefd2[0]);
+	}
+
+	res = read(sock, buf, sizeof(buf));
+	wpa_printf(MSG_INFO, "%s: sock=%d --> res=%d",
+		   __func__, sock, (int) res);
+}
+
+
+static void eloop_test_read_2_wrong(int sock, void *eloop_ctx, void *sock_ctx)
+{
+	struct test_eloop *t = eloop_ctx;
+
+	wpa_printf(MSG_INFO, "%s: sock=%d", __func__, sock);
+
+	if (t->magic != 0x12345678) {
+		wpa_printf(MSG_INFO, "%s: unexpected magic 0x%x",
+			   __func__, t->magic);
+	}
+
+	if (t->pipefd2[0] != sock) {
+		wpa_printf(MSG_INFO, "%s: unexpected sock %d != %d",
+			   __func__, sock, t->pipefd2[0]);
+	}
+
+	/*
+	 * This is expected to block due to the original socket with data having
+	 * been closed and no new data having been written to the new socket
+	 * with the same fd. To avoid blocking the process during test, skip the
+	 * read here.
+	 */
+	wpa_printf(MSG_ERROR, "%s: FAIL - should not have called this function",
+		   __func__);
+}
+
+
+static void reopen_pipefd2(struct test_eloop *t)
+{
+	if (t->pipefd2[0] < 0) {
+		wpa_printf(MSG_INFO, "pipefd2 had been closed");
+	} else {
+		int res;
+
+		wpa_printf(MSG_INFO, "close pipefd2");
+		eloop_unregister_read_sock(t->pipefd2[0]);
+		close(t->pipefd2[0]);
+		t->pipefd2[0] = -1;
+		close(t->pipefd2[1]);
+		t->pipefd2[1] = -1;
+
+		res = pipe(t->pipefd2);
+		if (res < 0) {
+			wpa_printf(MSG_INFO, "pipe: %s", strerror(errno));
+			t->pipefd2[0] = -1;
+			t->pipefd2[1] = -1;
+			return;
+		}
+
+		wpa_printf(MSG_INFO,
+			   "re-register pipefd2 with new sockets %d,%d",
+			   t->pipefd2[0], t->pipefd2[1]);
+		eloop_register_read_sock(t->pipefd2[0], eloop_test_read_2_wrong,
+					 t, NULL);
+	}
+}
+
+
+static void eloop_test_read_1(int sock, void *eloop_ctx, void *sock_ctx)
+{
+	struct test_eloop *t = eloop_ctx;
+	ssize_t res;
+	char buf[10];
+
+	wpa_printf(MSG_INFO, "%s: sock=%d", __func__, sock);
+
+	if (t->magic != 0x12345678) {
+		wpa_printf(MSG_INFO, "%s: unexpected magic 0x%x",
+			   __func__, t->magic);
+	}
+
+	if (t->pipefd1[0] != sock) {
+		wpa_printf(MSG_INFO, "%s: unexpected sock %d != %d",
+			   __func__, sock, t->pipefd1[0]);
+	}
+
+	res = read(sock, buf, sizeof(buf));
+	wpa_printf(MSG_INFO, "%s: sock=%d --> res=%d",
+		   __func__, sock, (int) res);
+
+	if (!t->close_in_timeout)
+		reopen_pipefd2(t);
+}
+
+
+static void eloop_test_cb(void *eloop_data, void *user_ctx)
+{
+	struct test_eloop *t = eloop_data;
+
+	wpa_printf(MSG_INFO, "%s", __func__);
+
+	if (t->magic != 0x12345678) {
+		wpa_printf(MSG_INFO, "%s: unexpected magic 0x%x",
+			   __func__, t->magic);
+	}
+
+	if (t->close_in_timeout)
+		reopen_pipefd2(t);
+}
+
+
+static void eloop_test_timeout(void *eloop_data, void *user_ctx)
+{
+	struct test_eloop *t = eloop_data;
+	int next_run = 0;
+
+	wpa_printf(MSG_INFO, "%s", __func__);
+
+	if (t->magic != 0x12345678) {
+		wpa_printf(MSG_INFO, "%s: unexpected magic 0x%x",
+			   __func__, t->magic);
+	}
+
+	if (t->pipefd1[0] >= 0) {
+		wpa_printf(MSG_INFO, "pipefd1 had not been closed");
+		eloop_unregister_read_sock(t->pipefd1[0]);
+		close(t->pipefd1[0]);
+		t->pipefd1[0] = -1;
+		close(t->pipefd1[1]);
+		t->pipefd1[1] = -1;
+	}
+
+	if (t->pipefd2[0] >= 0) {
+		wpa_printf(MSG_INFO, "pipefd2 had not been closed");
+		eloop_unregister_read_sock(t->pipefd2[0]);
+		close(t->pipefd2[0]);
+		t->pipefd2[0] = -1;
+		close(t->pipefd2[1]);
+		t->pipefd2[1] = -1;
+	}
+
+	next_run = t->close_in_timeout;
+	t->magic = 0;
+	wpa_printf(MSG_INFO, "%s - free(%p)", __func__, t);
+	os_free(t);
+
+	if (next_run)
+		eloop_tests_start(0);
+}
+
+
+static void eloop_tests_start(int close_in_timeout)
+{
+	struct test_eloop *t;
+	int res;
+
+	t = os_zalloc(sizeof(*t));
+	if (!t)
+		return;
+	t->magic = 0x12345678;
+	t->close_in_timeout = close_in_timeout;
+
+	wpa_printf(MSG_INFO, "starting eloop tests (%p) (close_in_timeout=%d)",
+		   t, close_in_timeout);
+
+	res = pipe(t->pipefd1);
+	if (res < 0) {
+		wpa_printf(MSG_INFO, "pipe: %s", strerror(errno));
+		os_free(t);
+		return;
+	}
+
+	res = pipe(t->pipefd2);
+	if (res < 0) {
+		wpa_printf(MSG_INFO, "pipe: %s", strerror(errno));
+		close(t->pipefd1[0]);
+		close(t->pipefd1[1]);
+		os_free(t);
+		return;
+	}
+
+	wpa_printf(MSG_INFO, "pipe fds: %d,%d %d,%d",
+		   t->pipefd1[0], t->pipefd1[1],
+		   t->pipefd2[0], t->pipefd2[1]);
+
+	eloop_register_read_sock(t->pipefd1[0], eloop_test_read_1, t, NULL);
+	eloop_register_read_sock(t->pipefd2[0], eloop_test_read_2, t, NULL);
+	eloop_register_timeout(0, 0, eloop_test_cb, t, NULL);
+	eloop_register_timeout(0, 200000, eloop_test_timeout, t, NULL);
+
+	if (write(t->pipefd1[1], "HELLO", 5) < 0)
+		wpa_printf(MSG_INFO, "write: %s", strerror(errno));
+	if (write(t->pipefd2[1], "TEST", 4) < 0)
+		wpa_printf(MSG_INFO, "write: %s", strerror(errno));
+	os_sleep(0, 50000);
+	wpa_printf(MSG_INFO, "waiting for eloop callbacks");
+}
+
+
+static void eloop_tests_run(void *eloop_data, void *user_ctx)
+{
+	eloop_tests_start(1);
+}
+
+
+static int eloop_tests(void)
+{
+	wpa_printf(MSG_INFO, "schedule eloop tests to be run");
+
+	/*
+	 * Cannot return error from these without a significant design change,
+	 * so for now, run the tests from a scheduled timeout and require
+	 * separate verification of the results from the debug log.
+	 */
+	eloop_register_timeout(0, 0, eloop_tests_run, NULL, NULL);
+
+	return 0;
+}
+
+
+#ifdef CONFIG_JSON
+struct json_test_data {
+	const char *json;
+	const char *tree;
+};
+
+static const struct json_test_data json_test_cases[] = {
+	{ "{}", "[1:OBJECT:]" },
+	{ "[]", "[1:ARRAY:]" },
+	{ "{", NULL },
+	{ "[", NULL },
+	{ "}", NULL },
+	{ "]", NULL },
+	{ "[[]]", "[1:ARRAY:][2:ARRAY:]" },
+	{ "{\"t\":\"test\"}", "[1:OBJECT:][2:STRING:t]" },
+	{ "{\"t\":123}", "[1:OBJECT:][2:NUMBER:t]" },
+	{ "{\"t\":true}", "[1:OBJECT:][2:BOOLEAN:t]" },
+	{ "{\"t\":false}", "[1:OBJECT:][2:BOOLEAN:t]" },
+	{ "{\"t\":null}", "[1:OBJECT:][2:NULL:t]" },
+	{ "{\"t\":truetrue}", NULL },
+	{ "\"test\"", "[1:STRING:]" },
+	{ "123", "[1:NUMBER:]" },
+	{ "true", "[1:BOOLEAN:]" },
+	{ "false", "[1:BOOLEAN:]" },
+	{ "null", "[1:NULL:]" },
+	{ "truetrue", NULL },
+	{ " {\t\n\r\"a\"\n:\r1\n,\n\"b\":3\n}\n",
+	  "[1:OBJECT:][2:NUMBER:a][2:NUMBER:b]" },
+	{ ",", NULL },
+	{ "{,}", NULL },
+	{ "[,]", NULL },
+	{ ":", NULL },
+	{ "{:}", NULL },
+	{ "[:]", NULL },
+	{ "{ \"\\u005c\" : \"\\u005c\" }", "[1:OBJECT:][2:STRING:\\]" },
+	{ "[{},{}]", "[1:ARRAY:][2:OBJECT:][2:OBJECT:]" },
+	{ "[1,2]", "[1:ARRAY:][2:NUMBER:][2:NUMBER:]" },
+	{ "[\"1\",\"2\"]", "[1:ARRAY:][2:STRING:][2:STRING:]" },
+	{ "[true,false]", "[1:ARRAY:][2:BOOLEAN:][2:BOOLEAN:]" },
+};
+#endif /* CONFIG_JSON */
+
+
+static int json_tests(void)
+{
+#ifdef CONFIG_JSON
+	unsigned int i;
+	struct json_token *root;
+	char buf[1000];
+
+	wpa_printf(MSG_INFO, "JSON tests");
+
+	for (i = 0; i < ARRAY_SIZE(json_test_cases); i++) {
+		const struct json_test_data *test = &json_test_cases[i];
+		int res = 0;
+
+		root = json_parse(test->json, os_strlen(test->json));
+		if ((root && !test->tree) || (!root && test->tree)) {
+			wpa_printf(MSG_INFO, "JSON test %u failed", i);
+			res = -1;
+		} else if (root) {
+			json_print_tree(root, buf, sizeof(buf));
+			if (os_strcmp(buf, test->tree) != 0) {
+				wpa_printf(MSG_INFO,
+					   "JSON test %u tree mismatch: %s %s",
+					   i, buf, test->tree);
+				res = -1;
+			}
+		}
+		json_free(root);
+		if (res < 0)
+			return -1;
+
+	}
+#endif /* CONFIG_JSON */
+	return 0;
+}
+
+
+static int const_time_tests(void)
+{
+	struct const_time_fill_msb_test {
+		unsigned int val;
+		unsigned int expected;
+	} const_time_fill_msb_tests[] = {
+		{ 0, 0 },
+		{ 1, 0 },
+		{ 2, 0 },
+		{ 1U << (sizeof(unsigned int) * 8 - 1), ~0 },
+		{ ~0 - 1, ~0 },
+		{ ~0, ~0 }
+	};
+	struct const_time_is_zero_test {
+		unsigned int val;
+		unsigned int expected;
+	} const_time_is_zero_tests[] = {
+		{ 0, ~0 },
+		{ 1, 0 },
+		{ 2, 0 },
+		{ 1U << (sizeof(unsigned int) * 8 - 1), 0 },
+		{ ~0 - 1, 0 },
+		{ ~0, 0 }
+	};
+	struct const_time_eq_test {
+		unsigned int a;
+		unsigned int b;
+		unsigned int expected;
+		unsigned int expected_u8;
+	} const_time_eq_tests[] = {
+		{ 0, 1, 0, 0 },
+		{ 1, 2, 0, 0 },
+		{ 1, 1, ~0, 0xff },
+		{ ~0, ~0, ~0, 0xff },
+		{ ~0, ~0 - 1, 0, 0 },
+		{ 0, 0, ~0, 0xff }
+	};
+	struct const_time_eq_bin_test {
+		u8 *a;
+		u8 *b;
+		size_t len;
+		unsigned int expected;
+	} const_time_eq_bin_tests[] = {
+		{ (u8 *) "", (u8 *) "", 0, ~0 },
+		{ (u8 *) "abcde", (u8 *) "abcde", 5, ~0 },
+		{ (u8 *) "abcde", (u8 *) "Abcde", 5, 0 },
+		{ (u8 *) "abcde", (u8 *) "aBcde", 5, 0 },
+		{ (u8 *) "abcde", (u8 *) "abCde", 5, 0 },
+		{ (u8 *) "abcde", (u8 *) "abcDe", 5, 0 },
+		{ (u8 *) "abcde", (u8 *) "abcdE", 5, 0 },
+		{ (u8 *) "\x00", (u8 *) "\x01", 1, 0 },
+		{ (u8 *) "\x00", (u8 *) "\x80", 1, 0 },
+		{ (u8 *) "\x00", (u8 *) "\x00", 1, ~0 }
+	};
+	struct const_time_select_test {
+		unsigned int mask;
+		unsigned int true_val;
+		unsigned int false_val;
+		unsigned int expected;
+	} const_time_select_tests[] = {
+		{ ~0, ~0, ~0, ~0 },
+		{ 0, ~0, ~0, ~0 },
+		{ ~0, ~0, 0, ~0 },
+		{ 0, ~0, 0, 0 },
+		{ ~0, 0xaaaaaaaa, 0x55555555, 0xaaaaaaaa },
+		{ 0, 0xaaaaaaaa, 0x55555555, 0x55555555 },
+		{ ~0, 3, 3, 3 },
+		{ 0, 3, 3, 3 },
+		{ ~0, 1, 2, 1 },
+		{ 0, 1, 2, 2 }
+	};
+	struct const_time_select_int_test {
+		unsigned int mask;
+		int true_val;
+		int false_val;
+		int expected;
+	} const_time_select_int_tests[] = {
+		{ ~0, -128, 127, -128 },
+		{ 0, -128, 127, 127 },
+		{ ~0, -2147483648, 2147483647, -2147483648 },
+		{ 0, -2147483648, 2147483647, 2147483647 },
+		{ ~0, 0, 0, 0 },
+		{ 0, 0, 0, 0 },
+		{ ~0, -1, 1, -1 },
+		{ 0, -1, 1, 1 }
+	};
+	struct const_time_select_u8_test {
+		u8 mask;
+		u8 true_val;
+		u8 false_val;
+		u8 expected;
+	} const_time_select_u8_tests[] = {
+		{ ~0, ~0, ~0, ~0 },
+		{ 0, ~0, ~0, ~0 },
+		{ ~0, ~0, 0, ~0 },
+		{ 0, ~0, 0, 0 },
+		{ ~0, 0xaa, 0x55, 0xaa },
+		{ 0, 0xaa, 0x55, 0x55 },
+		{ ~0, 1, 2, 1 },
+		{ 0, 1, 2, 2 }
+	};
+	struct const_time_select_s8_test {
+		u8 mask;
+		s8 true_val;
+		s8 false_val;
+		s8 expected;
+	} const_time_select_s8_tests[] = {
+		{ ~0, -128, 127, -128 },
+		{ 0, -128, 127, 127 },
+		{ ~0, 0, 0, 0 },
+		{ 0, 0, 0, 0 },
+		{ ~0, -1, 1, -1 },
+		{ 0, -1, 1, 1 }
+	};
+	struct const_time_select_bin_test {
+		u8 mask;
+		u8 *true_val;
+		u8 *false_val;
+		size_t len;
+		u8 *expected;
+	} const_time_select_bin_tests[] = {
+		{ ~0, (u8 *) "abcde", (u8 *) "ABCDE", 5, (u8 *) "abcde" },
+		{ 0, (u8 *) "abcde", (u8 *) "ABCDE", 5, (u8 *) "ABCDE" },
+		{ ~0, (u8 *) "", (u8 *) "", 0, (u8 *) "" },
+		{ 0, (u8 *) "", (u8 *) "", 0, (u8 *) "" }
+	};
+	struct const_time_memcmp_test {
+		char *a;
+		char *b;
+		size_t len;
+		int expected;
+	} const_time_memcmp_tests[] = {
+		{ "abcde", "abcde", 5, 0 },
+		{ "abcde", "bbcde", 5, -1 },
+		{ "bbcde", "abcde", 5, 1 },
+		{ "accde", "abcde", 5, 1 },
+		{ "abcee", "abcde", 5, 1 },
+		{ "abcdf", "abcde", 5, 1 },
+		{ "cbcde", "aXXXX", 5, 2 },
+		{ "a", "d", 1, -3 },
+		{ "", "", 0, 0 }
+	};
+	unsigned int i;
+	int ret = 0;
+
+	wpa_printf(MSG_INFO, "constant time tests");
+
+	for (i = 0; i < ARRAY_SIZE(const_time_fill_msb_tests); i++) {
+		struct const_time_fill_msb_test *test;
+
+		test = &const_time_fill_msb_tests[i];
+		if (const_time_fill_msb(test->val) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_fill_msb(0x%x) test failed",
+				   test->val);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_is_zero_tests); i++) {
+		struct const_time_is_zero_test *test;
+
+		test = &const_time_is_zero_tests[i];
+		if (const_time_is_zero(test->val) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_is_zero(0x%x) test failed",
+				   test->val);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_eq_tests); i++) {
+		struct const_time_eq_test *test;
+
+		test = &const_time_eq_tests[i];
+		if (const_time_eq(test->a, test->b) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_eq(0x%x,0x%x) test failed",
+				   test->a, test->b);
+			ret = -1;
+		}
+		if (const_time_eq_u8(test->a, test->b) != test->expected_u8) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_eq_u8(0x%x,0x%x) test failed",
+				   test->a, test->b);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_eq_bin_tests); i++) {
+		struct const_time_eq_bin_test *test;
+
+		test = &const_time_eq_bin_tests[i];
+		if (const_time_eq_bin(test->a, test->b, test->len) !=
+		    test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_eq_bin(len=%u) test failed",
+				   (unsigned int) test->len);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_select_tests); i++) {
+		struct const_time_select_test *test;
+
+		test = &const_time_select_tests[i];
+		if (const_time_select(test->mask, test->true_val,
+				      test->false_val) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_select(0x%x,0x%x,0x%x) test failed",
+				   test->mask, test->true_val, test->false_val);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_select_int_tests); i++) {
+		struct const_time_select_int_test *test;
+
+		test = &const_time_select_int_tests[i];
+		if (const_time_select_int(test->mask, test->true_val,
+					  test->false_val) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_select_int(0x%x,%d,%d) test failed",
+				   test->mask, test->true_val, test->false_val);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_select_u8_tests); i++) {
+		struct const_time_select_u8_test *test;
+
+		test = &const_time_select_u8_tests[i];
+		if (const_time_select_u8(test->mask, test->true_val,
+					 test->false_val) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_select_u8(0x%x,0x%x,0x%x) test failed",
+				   test->mask, test->true_val, test->false_val);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_select_s8_tests); i++) {
+		struct const_time_select_s8_test *test;
+
+		test = &const_time_select_s8_tests[i];
+		if (const_time_select_s8(test->mask, test->true_val,
+					 test->false_val) != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_select_s8(0x%x,0x%x,0x%x) test failed",
+				   test->mask, test->true_val, test->false_val);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_select_bin_tests); i++) {
+		struct const_time_select_bin_test *test;
+		u8 dst[100];
+
+		test = &const_time_select_bin_tests[i];
+		const_time_select_bin(test->mask, test->true_val,
+				      test->false_val, test->len, dst);
+		if (os_memcmp(dst, test->expected, test->len) != 0) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_select_bin(0x%x,%u) test failed",
+				   test->mask, (unsigned int) test->len);
+			ret = -1;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(const_time_memcmp_tests); i++) {
+		struct const_time_memcmp_test *test;
+		int res;
+
+		test = &const_time_memcmp_tests[i];
+		res = const_time_memcmp(test->a, test->b, test->len);
+		if (res != test->expected) {
+			wpa_printf(MSG_ERROR,
+				   "const_time_memcmp(%s,%s,%d) test failed (%d != %d)",
+				   test->a, test->b, (int) test->len,
+				   res, test->expected);
+			ret = -1;
+		}
+	}
+
+	return ret;
 }
 
 
@@ -430,6 +1221,12 @@ int utils_module_tests(void)
 	    bitfield_tests() < 0 ||
 	    base64_tests() < 0 ||
 	    common_tests() < 0 ||
+	    os_tests() < 0 ||
+	    wpabuf_tests() < 0 ||
+	    ip_addr_tests() < 0 ||
+	    eloop_tests() < 0 ||
+	    json_tests() < 0 ||
+	    const_time_tests() < 0 ||
 	    int_array_tests() < 0)
 		ret = -1;
 

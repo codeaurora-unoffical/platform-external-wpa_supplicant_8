@@ -127,7 +127,7 @@ static void l2_packet_receive(int sock, void *eloop_ctx, void *sock_ctx)
 
 	packet = pcap_next(pcap, &hdr);
 
-	if (packet == NULL || hdr.caplen < sizeof(*ethhdr))
+	if (!l2->rx_callback || !packet || hdr.caplen < sizeof(*ethhdr))
 		return;
 
 	ethhdr = (struct l2_ethhdr *) packet;
@@ -152,7 +152,7 @@ static void l2_packet_receive_cb(u_char *user, const struct pcap_pkthdr *hdr,
 	unsigned char *buf;
 	size_t len;
 
-	if (pkt_data == NULL || hdr->caplen < sizeof(*ethhdr))
+	if (!l2->rx_callback || !pkt_data || hdr->caplen < sizeof(*ethhdr))
 		return;
 
 	ethhdr = (struct l2_ethhdr *) pkt_data;
@@ -309,6 +309,18 @@ struct l2_packet_data * l2_packet_init(
 	}
 
 	return l2;
+}
+
+
+struct l2_packet_data * l2_packet_init_bridge(
+	const char *br_ifname, const char *ifname, const u8 *own_addr,
+	unsigned short protocol,
+	void (*rx_callback)(void *ctx, const u8 *src_addr,
+			    const u8 *buf, size_t len),
+	void *rx_callback_ctx, int l2_hdr)
+{
+	return l2_packet_init(br_ifname, own_addr, protocol, rx_callback,
+			      rx_callback_ctx, l2_hdr);
 }
 
 

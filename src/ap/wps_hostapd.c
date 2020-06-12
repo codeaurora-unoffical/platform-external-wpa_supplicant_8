@@ -1,6 +1,6 @@
 /*
  * hostapd / WPS integration
- * Copyright (c) 2008-2012, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2008-2016, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -125,6 +125,7 @@ static int hostapd_wps_new_psk_cb(void *ctx, const u8 *mac_addr,
 	os_memcpy(p->addr, mac_addr, ETH_ALEN);
 	os_memcpy(p->p2p_dev_addr, p2p_dev_addr, ETH_ALEN);
 	os_memcpy(p->psk, psk, PMK_LEN);
+	p->wps = 1;
 
 	if (hapd->new_psk_cb) {
 		hapd->new_psk_cb(hapd->new_psk_cb_ctx, mac_addr, p2p_dev_addr,
@@ -137,16 +138,17 @@ static int hostapd_wps_new_psk_cb(void *ctx, const u8 *mac_addr,
 	if (ssid->wpa_psk_file) {
 		FILE *f;
 		char hex[PMK_LEN * 2 + 1];
+
 		/* Add the new PSK to PSK list file */
 		f = fopen(ssid->wpa_psk_file, "a");
-		if (f == NULL) {
-			wpa_printf(MSG_DEBUG, "Failed to add the PSK to "
-				   "'%s'", ssid->wpa_psk_file);
+		if (!f) {
+			wpa_printf(MSG_DEBUG, "Failed to add the PSK to '%s'",
+				   ssid->wpa_psk_file);
 			return -1;
 		}
 
 		wpa_snprintf_hex(hex, sizeof(hex), psk, psk_len);
-		fprintf(f, MACSTR " %s\n", MAC2STR(mac_addr), hex);
+		fprintf(f, "wps=1 " MACSTR " %s\n", MAC2STR(mac_addr), hex);
 		fclose(f);
 	}
 
@@ -269,9 +271,41 @@ static void hostapd_wps_enrollee_seen_cb(void *ctx, const u8 *addr,
 }
 
 
-static int str_starts(const char *str, const char *start)
+static int hostapd_wps_lookup_pskfile_cb(void *ctx, const u8 *mac_addr,
+					 const u8 **psk)
 {
-	return os_strncmp(str, start, os_strlen(start)) == 0;
+	const struct hostapd_data *hapd = ctx;
+	const struct hostapd_wpa_psk *wpa_psk;
+	const u8 *any_psk = NULL;
+	const u8 *dev_psk = NULL;
+
+	for (wpa_psk = hapd->conf->ssid.wpa_psk; wpa_psk;
+	     wpa_psk = wpa_psk->next) {
+		if (!wpa_psk->wps)
+			continue;
+
+		if (!any_psk && is_zero_ether_addr(wpa_psk->addr))
+			any_psk = wpa_psk->psk;
+
+		if (mac_addr && !dev_psk &&
+		    os_memcmp(mac_addr, wpa_psk->addr, ETH_ALEN) == 0) {
+			dev_psk = wpa_psk->psk;
+			break;
+		}
+	}
+
+	if (dev_psk) {
+		*psk = dev_psk;
+	} else if (any_psk) {
+		*psk = any_psk;
+	} else {
+		*psk = NULL;
+		wpa_printf(MSG_DEBUG,
+			   "WPS: No appropriate PSK in wpa_psk_file");
+		return 0;
+	}
+
+	return 1;
 }
 
 
@@ -330,6 +364,13 @@ static int hapd_wps_reconfig_in_memory(struct hostapd_data *hapd,
 		bss->ssid.ssid_set = 1;
 	}
 
+#ifdef CONFIG_NO_TKIP
+	if (cred->auth_type & (WPS_AUTH_WPA2 | WPS_AUTH_WPA2PSK |
+			       WPS_AUTH_WPA | WPS_AUTH_WPAPSK))
+		bss->wpa = 2;
+	else
+		bss->wpa = 0;
+#else /* CONFIG_NO_TKIP */
 	if ((cred->auth_type & (WPS_AUTH_WPA2 | WPS_AUTH_WPA2PSK)) &&
 	    (cred->auth_type & (WPS_AUTH_WPA | WPS_AUTH_WPAPSK)))
 		bss->wpa = 3;
@@ -339,6 +380,7 @@ static int hapd_wps_reconfig_in_memory(struct hostapd_data *hapd,
 		bss->wpa = 1;
 	else
 		bss->wpa = 0;
+#endif /* CONFIG_NO_TKIP */
 
 	if (bss->wpa) {
 		if (cred->auth_type & (WPS_AUTH_WPA2 | WPS_AUTH_WPA))
@@ -353,12 +395,24 @@ static int hapd_wps_reconfig_in_memory(struct hostapd_data *hapd,
 			else
 				bss->wpa_pairwise |= WPA_CIPHER_CCMP;
 		}
+#ifndef CONFIG_NO_TKIP
 		if (cred->encr_type & WPS_ENCR_TKIP)
 			bss->wpa_pairwise |= WPA_CIPHER_TKIP;
+#endif /* CONFIG_NO_TKIP */
 		bss->rsn_pairwise = bss->wpa_pairwise;
 		bss->wpa_group = wpa_select_ap_group_cipher(bss->wpa,
 							    bss->wpa_pairwise,
 							    bss->rsn_pairwise);
+
+		if (hapd->conf->wps_cred_add_sae &&
+		    (cred->auth_type & WPS_AUTH_WPA2PSK) &&
+		    cred->key_len != 2 * PMK_LEN) {
+			bss->wpa_key_mgmt |= WPA_KEY_MGMT_SAE;
+			if (bss->ieee80211w == NO_MGMT_FRAME_PROTECTION)
+				bss->ieee80211w =
+					MGMT_FRAME_PROTECTION_OPTIONAL;
+			bss->sae_require_mfp = 1;
+		}
 
 		if (cred->key_len >= 8 && cred->key_len < 64) {
 			os_free(bss->ssid.wpa_passphrase);
@@ -407,6 +461,7 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 	char buf[1024];
 	int multi_bss;
 	int wpa;
+	int pmf_changed = 0;
 
 	if (hapd->wps == NULL)
 		return 0;
@@ -445,6 +500,8 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 	os_memcpy(hapd->wps->ssid, cred->ssid, cred->ssid_len);
 	hapd->wps->ssid_len = cred->ssid_len;
 	hapd->wps->encr_types = cred->encr_type;
+	hapd->wps->encr_types_rsn = cred->encr_type;
+	hapd->wps->encr_types_wpa = cred->encr_type;
 	hapd->wps->auth_types = cred->auth_type;
 	hapd->wps->ap_encr_type = cred->encr_type;
 	hapd->wps->ap_auth_type = cred->auth_type;
@@ -452,6 +509,11 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 		os_free(hapd->wps->network_key);
 		hapd->wps->network_key = NULL;
 		hapd->wps->network_key_len = 0;
+	} else if ((cred->auth_type & (WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK)) &&
+		   (cred->key_len < 8 || cred->key_len > 2 * PMK_LEN)) {
+		wpa_printf(MSG_INFO, "WPS: Invalid key length %lu for WPA/WPA2",
+			   (unsigned long) cred->key_len);
+		return -1;
 	} else {
 		if (hapd->wps->network_key == NULL ||
 		    hapd->wps->network_key_len < cred->key_len) {
@@ -507,6 +569,13 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 		fprintf(nconf, "\n");
 	}
 
+#ifdef CONFIG_NO_TKIP
+	if (cred->auth_type & (WPS_AUTH_WPA2 | WPS_AUTH_WPA2PSK |
+			       WPS_AUTH_WPA | WPS_AUTH_WPAPSK))
+		wpa = 2;
+	else
+		wpa = 0;
+#else /* CONFIG_NO_TKIP */
 	if ((cred->auth_type & (WPS_AUTH_WPA2 | WPS_AUTH_WPA2PSK)) &&
 	    (cred->auth_type & (WPS_AUTH_WPA | WPS_AUTH_WPAPSK)))
 		wpa = 3;
@@ -516,9 +585,12 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 		wpa = 1;
 	else
 		wpa = 0;
+#endif /* CONFIG_NO_TKIP */
 
 	if (wpa) {
 		char *prefix;
+		int sae = 0;
+
 		fprintf(nconf, "wpa=%d\n", wpa);
 
 		fprintf(nconf, "wpa_key_mgmt=");
@@ -527,9 +599,25 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 			fprintf(nconf, "WPA-EAP");
 			prefix = " ";
 		}
-		if (cred->auth_type & (WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK))
+		if (cred->auth_type & (WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK)) {
 			fprintf(nconf, "%sWPA-PSK", prefix);
+			prefix = " ";
+		}
+		if (hapd->conf->wps_cred_add_sae &&
+		    (cred->auth_type & WPS_AUTH_WPA2PSK) &&
+		    cred->key_len != 2 * PMK_LEN) {
+			fprintf(nconf, "%sSAE", prefix);
+			sae = 1;
+		}
 		fprintf(nconf, "\n");
+
+		if (sae && hapd->conf->ieee80211w == NO_MGMT_FRAME_PROTECTION) {
+			fprintf(nconf, "ieee80211w=%d\n",
+				MGMT_FRAME_PROTECTION_OPTIONAL);
+			pmf_changed = 1;
+		}
+		if (sae)
+			fprintf(nconf, "sae_require_mfp=1\n");
 
 		fprintf(nconf, "wpa_pairwise=");
 		prefix = "";
@@ -541,9 +629,11 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 
 			prefix = " ";
 		}
+#ifndef CONFIG_NO_TKIP
 		if (cred->encr_type & WPS_ENCR_TKIP) {
 			fprintf(nconf, "%sTKIP", prefix);
 		}
+#endif /* CONFIG_NO_TKIP */
 		fprintf(nconf, "\n");
 
 		if (cred->key_len >= 8 && cred->key_len < 64) {
@@ -581,9 +671,12 @@ static int hapd_wps_cred_cb(struct hostapd_data *hapd, void *ctx)
 		    (str_starts(buf, "ssid=") ||
 		     str_starts(buf, "ssid2=") ||
 		     str_starts(buf, "auth_algs=") ||
+#ifdef CONFIG_WEP
 		     str_starts(buf, "wep_default_key=") ||
 		     str_starts(buf, "wep_key") ||
+#endif /* CONFIG_WEP */
 		     str_starts(buf, "wps_state=") ||
+		     (pmf_changed && str_starts(buf, "ieee80211w=")) ||
 		     str_starts(buf, "wpa=") ||
 		     str_starts(buf, "wpa_psk=") ||
 		     str_starts(buf, "wpa_pairwise=") ||
@@ -867,7 +960,8 @@ static void hostapd_wps_clear_ies(struct hostapd_data *hapd, int deinit_only)
 	hapd->wps_probe_resp_ie = NULL;
 
 	if (deinit_only) {
-		hostapd_reset_ap_wps_ie(hapd);
+		if (hapd->drv_priv)
+			hostapd_reset_ap_wps_ie(hapd);
 		return;
 	}
 
@@ -953,6 +1047,21 @@ static int hostapd_wps_set_vendor_ext(struct hostapd_data *hapd,
 }
 
 
+static int hostapd_wps_set_application_ext(struct hostapd_data *hapd,
+					   struct wps_context *wps)
+{
+	wpabuf_free(wps->dev.application_ext);
+
+	if (!hapd->conf->wps_application_ext) {
+		wps->dev.application_ext = NULL;
+		return 0;
+	}
+
+	wps->dev.application_ext = wpabuf_dup(hapd->conf->wps_application_ext);
+	return wps->dev.application_ext ? 0 : -1;
+}
+
+
 static void hostapd_free_wps(struct wps_context *wps)
 {
 	int i;
@@ -973,6 +1082,7 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 {
 	struct wps_context *wps;
 	struct wps_registrar_config cfg;
+	u8 *multi_ap_netw_key = NULL;
 
 	if (conf->wps_state == 0) {
 		hostapd_wps_clear_ies(hapd, 0);
@@ -1041,7 +1151,8 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 	os_memcpy(wps->dev.pri_dev_type, hapd->conf->device_type,
 		  WPS_DEV_TYPE_LEN);
 
-	if (hostapd_wps_set_vendor_ext(hapd, wps) < 0)
+	if (hostapd_wps_set_vendor_ext(hapd, wps) < 0 ||
+	    hostapd_wps_set_application_ext(hapd, wps) < 0)
 		goto fail;
 
 	wps->dev.os_version = WPA_GET_BE32(hapd->conf->os_version);
@@ -1062,22 +1173,45 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 		if (conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X)
 			wps->auth_types |= WPS_AUTH_WPA2;
 
-		if (conf->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP))
+		if (conf->rsn_pairwise & (WPA_CIPHER_CCMP | WPA_CIPHER_GCMP |
+					  WPA_CIPHER_CCMP_256 |
+					  WPA_CIPHER_GCMP_256)) {
 			wps->encr_types |= WPS_ENCR_AES;
-		if (conf->rsn_pairwise & WPA_CIPHER_TKIP)
+			wps->encr_types_rsn |= WPS_ENCR_AES;
+		}
+		if (conf->rsn_pairwise & WPA_CIPHER_TKIP) {
+#ifdef CONFIG_NO_TKIP
+			wpa_printf(MSG_INFO, "WPS: TKIP not supported");
+			goto fail;
+#else /* CONFIG_NO_TKIP */
 			wps->encr_types |= WPS_ENCR_TKIP;
+			wps->encr_types_rsn |= WPS_ENCR_TKIP;
+#endif /* CONFIG_NO_TKIP */
+		}
 	}
 
 	if (conf->wpa & WPA_PROTO_WPA) {
+#ifdef CONFIG_NO_TKIP
+		if (!(conf->wpa & WPA_PROTO_RSN)) {
+			wpa_printf(MSG_INFO, "WPS: WPA(v1) not supported");
+			goto fail;
+		}
+		conf->wpa &= ~WPA_PROTO_WPA;
+#else /* CONFIG_NO_TKIP */
 		if (conf->wpa_key_mgmt & WPA_KEY_MGMT_PSK)
 			wps->auth_types |= WPS_AUTH_WPAPSK;
 		if (conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X)
 			wps->auth_types |= WPS_AUTH_WPA;
 
-		if (conf->wpa_pairwise & WPA_CIPHER_CCMP)
+		if (conf->wpa_pairwise & WPA_CIPHER_CCMP) {
 			wps->encr_types |= WPS_ENCR_AES;
-		if (conf->wpa_pairwise & WPA_CIPHER_TKIP)
+			wps->encr_types_wpa |= WPS_ENCR_AES;
+		}
+		if (conf->wpa_pairwise & WPA_CIPHER_TKIP) {
 			wps->encr_types |= WPS_ENCR_TKIP;
+			wps->encr_types_wpa |= WPS_ENCR_TKIP;
+		}
+#endif /* CONFIG_NO_TKIP */
 	}
 
 	if (conf->ssid.security_policy == SECURITY_PLAINTEXT) {
@@ -1097,6 +1231,7 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 		wpa_snprintf_hex((char *) wps->network_key, 2 * PMK_LEN + 1,
 				 conf->ssid.wpa_psk->psk, PMK_LEN);
 		wps->network_key_len = 2 * PMK_LEN;
+#ifdef CONFIG_WEP
 	} else if (conf->ssid.wep.keys_set && conf->ssid.wep.key[0]) {
 		wps->network_key = os_malloc(conf->ssid.wep.len[0]);
 		if (wps->network_key == NULL)
@@ -1104,6 +1239,7 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 		os_memcpy(wps->network_key, conf->ssid.wep.key[0],
 			  conf->ssid.wep.len[0]);
 		wps->network_key_len = conf->ssid.wep.len[0];
+#endif /* CONFIG_WEP */
 	}
 
 	if (conf->ssid.wpa_psk) {
@@ -1115,8 +1251,42 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 	wps->ap_encr_type = wps->encr_types;
 	if (conf->wps_state == WPS_STATE_NOT_CONFIGURED) {
 		/* Override parameters to enable security by default */
+#ifdef CONFIG_NO_TKIP
+		wps->auth_types = WPS_AUTH_WPA2PSK;
+		wps->encr_types = WPS_ENCR_AES;
+		wps->encr_types_rsn = WPS_ENCR_AES;
+		wps->encr_types_wpa = WPS_ENCR_AES;
+#else /* CONFIG_NO_TKIP */
 		wps->auth_types = WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK;
 		wps->encr_types = WPS_ENCR_AES | WPS_ENCR_TKIP;
+		wps->encr_types_rsn = WPS_ENCR_AES | WPS_ENCR_TKIP;
+		wps->encr_types_wpa = WPS_ENCR_AES | WPS_ENCR_TKIP;
+#endif /* CONFIG_NO_TKIP */
+	}
+
+	if ((hapd->conf->multi_ap & FRONTHAUL_BSS) &&
+	    hapd->conf->multi_ap_backhaul_ssid.ssid_len) {
+		cfg.multi_ap_backhaul_ssid_len =
+			hapd->conf->multi_ap_backhaul_ssid.ssid_len;
+		cfg.multi_ap_backhaul_ssid =
+			hapd->conf->multi_ap_backhaul_ssid.ssid;
+
+		if (conf->multi_ap_backhaul_ssid.wpa_passphrase) {
+			cfg.multi_ap_backhaul_network_key = (const u8 *)
+				conf->multi_ap_backhaul_ssid.wpa_passphrase;
+			cfg.multi_ap_backhaul_network_key_len =
+				os_strlen(conf->multi_ap_backhaul_ssid.wpa_passphrase);
+		} else if (conf->multi_ap_backhaul_ssid.wpa_psk) {
+			multi_ap_netw_key = os_malloc(2 * PMK_LEN + 1);
+			if (!multi_ap_netw_key)
+				goto fail;
+			wpa_snprintf_hex((char *) multi_ap_netw_key,
+					 2 * PMK_LEN + 1,
+					 conf->multi_ap_backhaul_ssid.wpa_psk->psk,
+					 PMK_LEN);
+			cfg.multi_ap_backhaul_network_key = multi_ap_netw_key;
+			cfg.multi_ap_backhaul_network_key_len = 2 * PMK_LEN;
+		}
 	}
 
 	wps->ap_settings = conf->ap_settings;
@@ -1127,14 +1297,13 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 	cfg.pin_needed_cb = hostapd_wps_pin_needed_cb;
 	cfg.reg_success_cb = hostapd_wps_reg_success_cb;
 	cfg.enrollee_seen_cb = hostapd_wps_enrollee_seen_cb;
+	cfg.lookup_pskfile_cb = hostapd_wps_lookup_pskfile_cb;
 	cfg.cb_ctx = hapd;
 	cfg.skip_cred_build = conf->skip_cred_build;
 	cfg.extra_cred = conf->extra_cred;
 	cfg.extra_cred_len = conf->extra_cred_len;
 	cfg.disable_auto_conf = (hapd->conf->wps_cred_processing == 1) &&
 		conf->skip_cred_build;
-	if (conf->ssid.security_policy == SECURITY_STATIC_WEP)
-		cfg.static_wep_only = 1;
 	cfg.dualband = interface_count(hapd->iface) > 1;
 	if ((wps->dev.rf_bands & (WPS_RF_50GHZ | WPS_RF_24GHZ)) ==
 	    (WPS_RF_50GHZ | WPS_RF_24GHZ))
@@ -1160,10 +1329,12 @@ int hostapd_init_wps(struct hostapd_data *hapd,
 	hostapd_register_probereq_cb(hapd, hostapd_wps_probe_req_rx, hapd);
 
 	hapd->wps = wps;
+	bin_clear_free(multi_ap_netw_key, 2 * PMK_LEN);
 
 	return 0;
 
 fail:
+	bin_clear_free(multi_ap_netw_key, 2 * PMK_LEN);
 	hostapd_free_wps(wps);
 	return -1;
 }
@@ -1239,6 +1410,7 @@ void hostapd_update_wps(struct hostapd_data *hapd)
 #endif /* CONFIG_WPS_UPNP */
 
 	hostapd_wps_set_vendor_ext(hapd, hapd->wps);
+	hostapd_wps_set_application_ext(hapd, hapd->wps);
 
 	if (hapd->conf->wps_state)
 		wps_registrar_update_ie(hapd->wps->registrar);
@@ -1299,30 +1471,54 @@ int hostapd_wps_add_pin(struct hostapd_data *hapd, const u8 *addr,
 }
 
 
+struct wps_button_pushed_ctx {
+	const u8 *p2p_dev_addr;
+	unsigned int count;
+};
+
 static int wps_button_pushed(struct hostapd_data *hapd, void *ctx)
 {
-	const u8 *p2p_dev_addr = ctx;
-	if (hapd->wps == NULL)
-		return -1;
-	return wps_registrar_button_pushed(hapd->wps->registrar, p2p_dev_addr);
+	struct wps_button_pushed_ctx *data = ctx;
+
+	if (hapd->wps) {
+		data->count++;
+		return wps_registrar_button_pushed(hapd->wps->registrar,
+						   data->p2p_dev_addr);
+	}
+
+	return 0;
 }
 
 
 int hostapd_wps_button_pushed(struct hostapd_data *hapd,
 			      const u8 *p2p_dev_addr)
 {
-	return hostapd_wps_for_each(hapd, wps_button_pushed,
-				    (void *) p2p_dev_addr);
+	struct wps_button_pushed_ctx ctx;
+	int ret;
+
+	os_memset(&ctx, 0, sizeof(ctx));
+	ctx.p2p_dev_addr = p2p_dev_addr;
+	ret = hostapd_wps_for_each(hapd, wps_button_pushed, &ctx);
+	if (ret == 0 && !ctx.count)
+		ret = -1;
+	return ret;
 }
 
 
+struct wps_cancel_ctx {
+	unsigned int count;
+};
+
 static int wps_cancel(struct hostapd_data *hapd, void *ctx)
 {
-	if (hapd->wps == NULL)
-		return -1;
+	struct wps_cancel_ctx *data = ctx;
 
-	wps_registrar_wps_cancel(hapd->wps->registrar);
-	ap_for_each_sta(hapd, ap_sta_wps_cancel, NULL);
+	if (hapd->wps) {
+		data->count++;
+		wps_registrar_wps_cancel(hapd->wps->registrar);
+		ap_for_each_sta(hapd, ap_sta_wps_cancel, NULL);
+		wpa_msg(hapd->msg_ctx, MSG_INFO, WPS_EVENT_CANCEL);
+	}
 
 	return 0;
 }
@@ -1330,7 +1526,14 @@ static int wps_cancel(struct hostapd_data *hapd, void *ctx)
 
 int hostapd_wps_cancel(struct hostapd_data *hapd)
 {
-	return hostapd_wps_for_each(hapd, wps_cancel, NULL);
+	struct wps_cancel_ctx ctx;
+	int ret;
+
+	os_memset(&ctx, 0, sizeof(ctx));
+	ret = hostapd_wps_for_each(hapd, wps_cancel, &ctx);
+	if (ret == 0 && !ctx.count)
+		ret = -1;
+	return ret;
 }
 
 
@@ -1560,6 +1763,10 @@ struct wps_ap_pin_data {
 static int wps_ap_pin_set(struct hostapd_data *hapd, void *ctx)
 {
 	struct wps_ap_pin_data *data = ctx;
+
+	if (!hapd->wps)
+		return 0;
+
 	os_free(hapd->conf->ap_pin);
 	hapd->conf->ap_pin = os_strdup(data->pin_txt);
 #ifdef CONFIG_WPS_UPNP
@@ -1575,7 +1782,8 @@ const char * hostapd_wps_ap_pin_random(struct hostapd_data *hapd, int timeout)
 	unsigned int pin;
 	struct wps_ap_pin_data data;
 
-	pin = wps_generate_pin();
+	if (wps_generate_pin(&pin) < 0)
+		return NULL;
 	os_snprintf(data.pin_txt, sizeof(data.pin_txt), "%08u", pin);
 	data.timeout = timeout;
 	hostapd_wps_for_each(hapd, wps_ap_pin_set, &data);
@@ -1633,8 +1841,10 @@ int hostapd_wps_config_ap(struct hostapd_data *hapd, const char *ssid,
 
 	if (os_strncmp(auth, "OPEN", 4) == 0)
 		cred.auth_type = WPS_AUTH_OPEN;
+#ifndef CONFIG_NO_TKIP
 	else if (os_strncmp(auth, "WPAPSK", 6) == 0)
 		cred.auth_type = WPS_AUTH_WPAPSK;
+#endif /* CONFIG_NO_TKIP */
 	else if (os_strncmp(auth, "WPA2PSK", 7) == 0)
 		cred.auth_type = WPS_AUTH_WPA2PSK;
 	else
@@ -1643,8 +1853,10 @@ int hostapd_wps_config_ap(struct hostapd_data *hapd, const char *ssid,
 	if (encr) {
 		if (os_strncmp(encr, "NONE", 4) == 0)
 			cred.encr_type = WPS_ENCR_NONE;
+#ifndef CONFIG_NO_TKIP
 		else if (os_strncmp(encr, "TKIP", 4) == 0)
 			cred.encr_type = WPS_ENCR_TKIP;
+#endif /* CONFIG_NO_TKIP */
 		else if (os_strncmp(encr, "CCMP", 4) == 0)
 			cred.encr_type = WPS_ENCR_AES;
 		else

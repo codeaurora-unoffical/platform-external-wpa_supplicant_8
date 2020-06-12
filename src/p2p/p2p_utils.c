@@ -9,6 +9,7 @@
 #include "includes.h"
 
 #include "common.h"
+#include "common/defs.h"
 #include "common/ieee802_11_common.h"
 #include "p2p_i.h"
 
@@ -67,59 +68,11 @@ int p2p_channel_to_freq(int op_class, int channel)
  */
 int p2p_freq_to_channel(unsigned int freq, u8 *op_class, u8 *channel)
 {
-	/* TODO: more operating classes */
-	if (freq >= 2412 && freq <= 2472) {
-		if ((freq - 2407) % 5)
-			return -1;
+	if (ieee80211_freq_to_channel_ext(freq, 0, 0, op_class, channel) ==
+	    NUM_HOSTAPD_MODES)
+		return -1;
 
-		*op_class = 81; /* 2.407 GHz, channels 1..13 */
-		*channel = (freq - 2407) / 5;
-		return 0;
-	}
-
-	if (freq == 2484) {
-		*op_class = 82; /* channel 14 */
-		*channel = 14;
-		return 0;
-	}
-
-	if (freq >= 5180 && freq <= 5240) {
-		if ((freq - 5000) % 5)
-			return -1;
-
-		*op_class = 115; /* 5 GHz, channels 36..48 */
-		*channel = (freq - 5000) / 5;
-		return 0;
-	}
-
-	if (freq >= 5745 && freq <= 5805) {
-		if ((freq - 5000) % 5)
-			return -1;
-
-		*op_class = 124; /* 5 GHz, channels 149..161 */
-		*channel = (freq - 5000) / 5;
-		return 0;
-	}
-
-	if (freq >= 5745 && freq <= 5845) {
-		if ((freq - 5000) % 5)
-			return -1;
-
-		*op_class = 125; /* 5 GHz, channels 149..169 */
-		*channel = (freq - 5000) / 5;
-		return 0;
-	}
-
-	if (freq >= 58320 && freq <= 64800) {
-		if ((freq - 58320) % 2160)
-			return -1;
-
-		*op_class = 180; /* 60 GHz, channels 1..4 */
-		*channel = (freq - 56160) / 2160;
-		return 0;
-	}
-
-	return -1;
+	return 0;
 }
 
 
@@ -460,17 +413,30 @@ int p2p_channel_select(struct p2p_channels *chans, const int *classes,
 
 
 int p2p_channel_random_social(struct p2p_channels *chans, u8 *op_class,
-			      u8 *op_channel)
+			      u8 *op_channel,
+			      struct wpa_freq_range_list *avoid_list,
+			      struct wpa_freq_range_list *disallow_list)
 {
 	u8 chan[4];
 	unsigned int num_channels = 0;
 
-	/* Try to find available social channels from 2.4 GHz */
-	if (p2p_channels_includes(chans, 81, 1))
+	/* Try to find available social channels from 2.4 GHz.
+	 * If the avoid_list includes any of the 2.4 GHz social channels, that
+	 * channel is not allowed by p2p_channels_includes() rules. However, it
+	 * is assumed to allow minimal traffic for P2P negotiation, so allow it
+	 * here for social channel selection unless explicitly disallowed in the
+	 * disallow_list. */
+	if (p2p_channels_includes(chans, 81, 1) ||
+	    (freq_range_list_includes(avoid_list, 2412) &&
+	     !freq_range_list_includes(disallow_list, 2412)))
 		chan[num_channels++] = 1;
-	if (p2p_channels_includes(chans, 81, 6))
+	if (p2p_channels_includes(chans, 81, 6) ||
+	    (freq_range_list_includes(avoid_list, 2437) &&
+	     !freq_range_list_includes(disallow_list, 2437)))
 		chan[num_channels++] = 6;
-	if (p2p_channels_includes(chans, 81, 11))
+	if (p2p_channels_includes(chans, 81, 11) ||
+	    (freq_range_list_includes(avoid_list, 2462) &&
+	     !freq_range_list_includes(disallow_list, 2462)))
 		chan[num_channels++] = 11;
 
 	/* Try to find available social channels from 60 GHz */
@@ -506,11 +472,21 @@ int p2p_channels_to_freqs(const struct p2p_channels *channels, int *freq_list,
 			break;
 		for (j = 0; j < c->channels; j++) {
 			int freq;
+			unsigned int k;
+
 			if (idx + 1 == max_len)
 				break;
 			freq = p2p_channel_to_freq(c->reg_class,
 						   c->channel[j]);
 			if (freq < 0)
+				continue;
+
+			for (k = 0; k < idx; k++) {
+				if (freq_list[k] == freq)
+					break;
+			}
+
+			if (k < idx)
 				continue;
 			freq_list[idx++] = freq;
 		}

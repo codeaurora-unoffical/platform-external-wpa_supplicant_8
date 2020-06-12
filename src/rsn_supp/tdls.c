@@ -12,6 +12,7 @@
 #include "utils/eloop.h"
 #include "utils/os.h"
 #include "common/ieee802_11_defs.h"
+#include "common/ieee802_11_common.h"
 #include "crypto/sha256.h"
 #include "crypto/crypto.h"
 #include "crypto/aes_wrap.h"
@@ -34,6 +35,7 @@
 #define TDLS_TESTING_DECLINE_RESP BIT(9)
 #define TDLS_TESTING_IGNORE_AP_PROHIBIT BIT(10)
 #define TDLS_TESTING_WRONG_MIC BIT(11)
+#define TDLS_TESTING_DOUBLE_TPK_M2 BIT(12)
 unsigned int tdls_testing = 0;
 #endif /* CONFIG_TDLS_TESTING */
 
@@ -176,7 +178,7 @@ static u8 * wpa_add_ie(u8 *pos, const u8 *ie, size_t ie_len)
 static int wpa_tdls_del_key(struct wpa_sm *sm, struct wpa_tdls_peer *peer)
 {
 	if (wpa_sm_set_key(sm, WPA_ALG_NONE, peer->addr,
-			   0, 0, NULL, 0, NULL, 0) < 0) {
+			   0, 0, NULL, 0, NULL, 0, KEY_FLAG_PAIRWISE) < 0) {
 		wpa_printf(MSG_WARNING, "TDLS: Failed to delete TPK-TK from "
 			   "the driver");
 		return -1;
@@ -225,8 +227,9 @@ static int wpa_tdls_set_key(struct wpa_sm *sm, struct wpa_tdls_peer *peer)
 
 	wpa_printf(MSG_DEBUG, "TDLS: Configure pairwise key for peer " MACSTR,
 		   MAC2STR(peer->addr));
-	if (wpa_sm_set_key(sm, alg, peer->addr, -1, 1,
-			   rsc, sizeof(rsc), peer->tpk.tk, key_len) < 0) {
+	if (wpa_sm_set_key(sm, alg, peer->addr, 0, 1, rsc, sizeof(rsc),
+			   peer->tpk.tk, key_len,
+			   KEY_FLAG_PAIRWISE_RX_TX) < 0) {
 		wpa_printf(MSG_WARNING, "TDLS: Failed to set TPK to the "
 			   "driver");
 		return -1;
@@ -302,10 +305,9 @@ static int wpa_tdls_tpk_send(struct wpa_sm *sm, const u8 *dest, u8 action_code,
 	peer->sm_tmr.peer_capab = peer_capab;
 	peer->sm_tmr.buf_len = msg_len;
 	os_free(peer->sm_tmr.buf);
-	peer->sm_tmr.buf = os_malloc(msg_len);
+	peer->sm_tmr.buf = os_memdup(msg, msg_len);
 	if (peer->sm_tmr.buf == NULL)
 		return -1;
-	os_memcpy(peer->sm_tmr.buf, msg, msg_len);
 
 	wpa_printf(MSG_DEBUG, "TDLS: Retry timeout registered "
 		   "(action_code=%u)", action_code);
@@ -412,8 +414,9 @@ static void wpa_tdls_generate_tpk(struct wpa_tdls_peer *peer,
 	size_t len[2];
 	u8 data[3 * ETH_ALEN];
 
-	/* IEEE Std 802.11z-2010 8.5.9.1:
-	 * TPK-Key-Input = SHA-256(min(SNonce, ANonce) || max(SNonce, ANonce))
+	/* IEEE Std 802.11-2016 12.7.9.2:
+	 * TPK-Key-Input = Hash(min(SNonce, ANonce) || max(SNonce, ANonce))
+	 * Hash = SHA-256 for TDLS
 	 */
 	len[0] = WPA_NONCE_LEN;
 	len[1] = WPA_NONCE_LEN;
@@ -431,11 +434,8 @@ static void wpa_tdls_generate_tpk(struct wpa_tdls_peer *peer,
 			key_input, SHA256_MAC_LEN);
 
 	/*
-	 * TPK-Key-Data = KDF-N_KEY(TPK-Key-Input, "TDLS PMK",
-	 *	min(MAC_I, MAC_R) || max(MAC_I, MAC_R) || BSSID || N_KEY)
-	 * TODO: is N_KEY really included in KDF Context and if so, in which
-	 * presentation format (little endian 16-bit?) is it used? It gets
-	 * added by the KDF anyway..
+	 * TPK = KDF-Hash-Length(TPK-Key-Input, "TDLS PMK",
+	 *	min(MAC_I, MAC_R) || max(MAC_I, MAC_R) || BSSID)
 	 */
 
 	if (os_memcmp(own_addr, peer->addr, ETH_ALEN) < 0) {
@@ -1219,9 +1219,10 @@ skip_ies:
 
 #ifdef CONFIG_TDLS_TESTING
 	if (tdls_testing & TDLS_TESTING_DIFF_BSSID) {
+		struct wpa_tdls_lnkid *l = (struct wpa_tdls_lnkid *) pos;
+
 		wpa_printf(MSG_DEBUG, "TDLS: Testing - use incorrect BSSID in "
 			   "Link Identifier");
-		struct wpa_tdls_lnkid *l = (struct wpa_tdls_lnkid *) pos;
 		wpa_tdls_linkid(sm, peer, l);
 		l->bssid[5] ^= 0x01;
 		pos += sizeof(*l);
@@ -1594,7 +1595,7 @@ static int copy_supp_rates(const struct wpa_eapol_ie_parse *kde,
 		peer->supp_rates, sizeof(peer->supp_rates),
 		kde->supp_rates + 2, kde->supp_rates_len - 2,
 		kde->ext_supp_rates ? kde->ext_supp_rates + 2 : NULL,
-		kde->ext_supp_rates_len - 2);
+		kde->ext_supp_rates ? kde->ext_supp_rates_len - 2 : 0);
 	return 0;
 }
 
@@ -2125,6 +2126,13 @@ skip_add_peer:
 		goto error;
 	}
 
+#ifdef CONFIG_TDLS_TESTING
+	if (tdls_testing & TDLS_TESTING_DOUBLE_TPK_M2) {
+		wpa_printf(MSG_INFO, "TDLS: Testing - Send another TPK M2");
+		wpa_tdls_send_tpk_m2(sm, src_addr, dtoken, lnkid, peer);
+	}
+#endif /* CONFIG_TDLS_TESTING */
+
 	return 0;
 
 error:
@@ -2152,11 +2160,11 @@ static int wpa_tdls_enable_link(struct wpa_sm *sm, struct wpa_tdls_peer *peer)
 		eloop_register_timeout(lifetime, 0, wpa_tdls_tpk_timeout,
 				       sm, peer);
 #ifdef CONFIG_TDLS_TESTING
-	if (tdls_testing & TDLS_TESTING_NO_TPK_EXPIRATION) {
-		wpa_printf(MSG_DEBUG, "TDLS: Testing - disable TPK "
-			   "expiration");
-		eloop_cancel_timeout(wpa_tdls_tpk_timeout, sm, peer);
-	}
+		if (tdls_testing & TDLS_TESTING_NO_TPK_EXPIRATION) {
+			wpa_printf(MSG_DEBUG,
+				   "TDLS: Testing - disable TPK expiration");
+			eloop_cancel_timeout(wpa_tdls_tpk_timeout, sm, peer);
+		}
 #endif /* CONFIG_TDLS_TESTING */
 	}
 
@@ -2209,6 +2217,14 @@ static int wpa_tdls_process_tpk_m2(struct wpa_sm *sm, const u8 *src_addr,
 			   "ignore TPK M2 from " MACSTR, MAC2STR(src_addr));
 		return -1;
 	}
+
+	if (peer->tpk_success) {
+		wpa_printf(MSG_INFO, "TDLS: Ignore incoming TPK M2 retry, from "
+			   MACSTR " as TPK M3 was already sent",
+			   MAC2STR(src_addr));
+		return 0;
+	}
+
 	wpa_tdls_tpk_retry_timeout_cancel(sm, peer, WLAN_TDLS_SETUP_REQUEST);
 
 	if (len < 3 + 2 + 1) {
@@ -2364,7 +2380,7 @@ static int wpa_tdls_process_tpk_m2(struct wpa_sm *sm, const u8 *src_addr,
 		    kde.ftie, sizeof(*ftie));
 	ftie = (struct wpa_tdls_ftie *) kde.ftie;
 
-	if (!os_memcmp(peer->inonce, ftie->Snonce, WPA_NONCE_LEN) == 0) {
+	if (os_memcmp(peer->inonce, ftie->Snonce, WPA_NONCE_LEN) != 0) {
 		wpa_printf(MSG_INFO, "TDLS: FTIE SNonce in TPK M2 does "
 			   "not match with FTIE SNonce used in TPK M1");
 		/* Silently discard the frame */
@@ -2543,13 +2559,13 @@ static int wpa_tdls_process_tpk_m3(struct wpa_sm *sm, const u8 *src_addr,
 		goto error;
 	}
 
-	if (!os_memcmp(peer->rnonce, ftie->Anonce, WPA_NONCE_LEN) == 0) {
+	if (os_memcmp(peer->rnonce, ftie->Anonce, WPA_NONCE_LEN) != 0) {
 		wpa_printf(MSG_INFO, "TDLS: FTIE ANonce in TPK M3 does "
 			   "not match with FTIE ANonce used in TPK M2");
 		goto error;
 	}
 
-	if (!os_memcmp(peer->inonce, ftie->Snonce, WPA_NONCE_LEN) == 0) {
+	if (os_memcmp(peer->inonce, ftie->Snonce, WPA_NONCE_LEN) != 0) {
 		wpa_printf(MSG_INFO, "TDLS: FTIE SNonce in TPK M3 does not "
 			   "match with FTIE SNonce used in TPK M1");
 		goto error;
@@ -2900,29 +2916,30 @@ void wpa_tdls_disassoc(struct wpa_sm *sm)
 }
 
 
-static int wpa_tdls_prohibited(struct wpa_eapol_ie_parse *elems)
+static int wpa_tdls_prohibited(struct ieee802_11_elems *elems)
 {
 	/* bit 38 - TDLS Prohibited */
-	return !!(elems->ext_capab[2 + 4] & 0x40);
+	return !!(elems->ext_capab[4] & 0x40);
 }
 
 
-static int wpa_tdls_chan_switch_prohibited(struct wpa_eapol_ie_parse *elems)
+static int wpa_tdls_chan_switch_prohibited(struct ieee802_11_elems *elems)
 {
 	/* bit 39 - TDLS Channel Switch Prohibited */
-	return !!(elems->ext_capab[2 + 4] & 0x80);
+	return !!(elems->ext_capab[4] & 0x80);
 }
 
 
 void wpa_tdls_ap_ies(struct wpa_sm *sm, const u8 *ies, size_t len)
 {
-	struct wpa_eapol_ie_parse elems;
+	struct ieee802_11_elems elems;
 
 	sm->tdls_prohibited = 0;
 	sm->tdls_chan_switch_prohibited = 0;
 
-	if (ies == NULL || wpa_supplicant_parse_ies(ies, len, &elems) < 0 ||
-	    elems.ext_capab == NULL || elems.ext_capab_len < 2 + 5)
+	if (ies == NULL ||
+	    ieee802_11_parse_elems(ies, len, &elems, 0) == ParseFailed ||
+	    elems.ext_capab == NULL || elems.ext_capab_len < 5)
 		return;
 
 	sm->tdls_prohibited = wpa_tdls_prohibited(&elems);
@@ -2937,10 +2954,11 @@ void wpa_tdls_ap_ies(struct wpa_sm *sm, const u8 *ies, size_t len)
 
 void wpa_tdls_assoc_resp_ies(struct wpa_sm *sm, const u8 *ies, size_t len)
 {
-	struct wpa_eapol_ie_parse elems;
+	struct ieee802_11_elems elems;
 
-	if (ies == NULL || wpa_supplicant_parse_ies(ies, len, &elems) < 0 ||
-	    elems.ext_capab == NULL || elems.ext_capab_len < 2 + 5)
+	if (ies == NULL ||
+	    ieee802_11_parse_elems(ies, len, &elems, 0) == ParseFailed ||
+	    elems.ext_capab == NULL || elems.ext_capab_len < 5)
 		return;
 
 	if (!sm->tdls_prohibited && wpa_tdls_prohibited(&elems)) {

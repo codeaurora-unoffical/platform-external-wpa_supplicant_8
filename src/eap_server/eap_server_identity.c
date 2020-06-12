@@ -79,8 +79,8 @@ static struct wpabuf * eap_identity_buildReq(struct eap_sm *sm, void *priv,
 }
 
 
-static Boolean eap_identity_check(struct eap_sm *sm, void *priv,
-				  struct wpabuf *respData)
+static bool eap_identity_check(struct eap_sm *sm, void *priv,
+			       struct wpabuf *respData)
 {
 	const u8 *pos;
 	size_t len;
@@ -89,10 +89,10 @@ static Boolean eap_identity_check(struct eap_sm *sm, void *priv,
 			       respData, &len);
 	if (pos == NULL) {
 		wpa_printf(MSG_INFO, "EAP-Identity: Invalid frame");
-		return TRUE;
+		return true;
 	}
 
-	return FALSE;
+	return false;
 }
 
 
@@ -127,7 +127,7 @@ static void eap_identity_process(struct eap_sm *sm, void *priv,
 		os_free(buf);
 	}
 	if (sm->identity)
-		sm->update_user = TRUE;
+		sm->update_user = true;
 	os_free(sm->identity);
 	sm->identity = os_malloc(len ? len : 1);
 	if (sm->identity == NULL) {
@@ -140,14 +140,14 @@ static void eap_identity_process(struct eap_sm *sm, void *priv,
 }
 
 
-static Boolean eap_identity_isDone(struct eap_sm *sm, void *priv)
+static bool eap_identity_isDone(struct eap_sm *sm, void *priv)
 {
 	struct eap_identity_data *data = priv;
 	return data->state != CONTINUE;
 }
 
 
-static Boolean eap_identity_isSuccess(struct eap_sm *sm, void *priv)
+static bool eap_identity_isSuccess(struct eap_sm *sm, void *priv)
 {
 	struct eap_identity_data *data = priv;
 	return data->state == SUCCESS;
@@ -157,7 +157,6 @@ static Boolean eap_identity_isSuccess(struct eap_sm *sm, void *priv)
 int eap_server_identity_register(void)
 {
 	struct eap_method *eap;
-	int ret;
 
 	eap = eap_server_method_alloc(EAP_SERVER_METHOD_INTERFACE_VERSION,
 				      EAP_VENDOR_IETF, EAP_TYPE_IDENTITY,
@@ -174,8 +173,5 @@ int eap_server_identity_register(void)
 	eap->isDone = eap_identity_isDone;
 	eap->isSuccess = eap_identity_isSuccess;
 
-	ret = eap_server_method_register(eap);
-	if (ret)
-		eap_server_method_free(eap);
-	return ret;
+	return eap_server_method_register(eap);
 }

@@ -212,6 +212,8 @@ char * xml_node_to_str(struct xml_node_ctx *ctx, xml_node_t *node)
 	xmlDocSetRootElement(doc, n);
 	xmlDocDumpFormatMemory(doc, &buf, &bufsiz, 0);
 	xmlFreeDoc(doc);
+	if (!buf)
+		return NULL;
 	pos = (char *) buf;
 	if (strncmp(pos, "<?xml", 5) == 0) {
 		pos = strchr(pos, '>');
@@ -407,7 +409,7 @@ char * xml_node_get_base64_text(struct xml_node_ctx *ctx, xml_node_t *node,
 	if (txt == NULL)
 		return NULL;
 
-	ret = base64_decode((unsigned char *) txt, strlen(txt), &len);
+	ret = base64_decode(txt, strlen(txt), &len);
 	if (ret_len)
 		*ret_len = len;
 	xml_node_get_text_free(ctx, txt);
