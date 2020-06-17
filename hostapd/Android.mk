@@ -687,8 +687,6 @@ CONFIG_INTERNAL_RC4=y
 CONFIG_INTERNAL_DH_GROUP5=y
 endif
 ifeq ($(CONFIG_CRYPTO), nettle)
-LIBS += -lnettle -lgmp
-LIBS_p += -lnettle -lgmp
 CONFIG_INTERNAL_RC4=y
 CONFIG_INTERNAL_DH_GROUP5=y
 endif
@@ -1118,7 +1116,6 @@ endif
 include $(CLEAR_VARS)
 LOCAL_MODULE := hostapd_cli
 LOCAL_MODULE_TAGS := debug
-LOCAL_PROPRIETARY_MODULE := true
 LOCAL_SHARED_LIBRARIES := libc libcutils liblog
 LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_SRC_FILES := $(OBJS_c)
@@ -1129,7 +1126,6 @@ include $(BUILD_EXECUTABLE)
 include $(CLEAR_VARS)
 LOCAL_MODULE := hostapd
 LOCAL_MODULE_TAGS := optional
-LOCAL_PROPRIETARY_MODULE := true
 ifdef CONFIG_DRIVER_CUSTOM
 LOCAL_STATIC_LIBRARIES := libCustomWifi
 endif
