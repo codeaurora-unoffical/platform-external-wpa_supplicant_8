@@ -108,8 +108,8 @@ static void eap_fast_state(struct eap_fast_data *data, int state)
 }
 
 
-static EapType eap_fast_req_failure(struct eap_sm *sm,
-				    struct eap_fast_data *data)
+static enum eap_type eap_fast_req_failure(struct eap_sm *sm,
+					  struct eap_fast_data *data)
 {
 	/* TODO: send Result TLV(FAILURE) */
 	eap_fast_state(data, FAILURE);
@@ -161,8 +161,8 @@ static int eap_fast_session_ticket_cb(void *ctx, const u8 *ticket, size_t len,
 		return 0;
 	}
 
-	if (aes_unwrap(data->pac_opaque_encr, (pac_opaque_len - 8) / 8,
-		       pac_opaque, buf) < 0) {
+	if (aes_unwrap(data->pac_opaque_encr, sizeof(data->pac_opaque_encr),
+		       (pac_opaque_len - 8) / 8, pac_opaque, buf) < 0) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Failed to decrypt "
 			   "PAC-Opaque");
 		os_free(buf);
@@ -180,43 +180,47 @@ static int eap_fast_session_ticket_cb(void *ctx, const u8 *ticket, size_t len,
 			buf, end - buf);
 
 	pos = buf;
-	while (pos + 1 < end) {
-		if (pos + 2 + pos[1] > end)
+	while (end - pos > 1) {
+		u8 id, elen;
+
+		id = *pos++;
+		elen = *pos++;
+		if (elen > end - pos)
 			break;
 
-		switch (*pos) {
+		switch (id) {
 		case PAC_OPAQUE_TYPE_PAD:
-			pos = end;
 			goto done;
 		case PAC_OPAQUE_TYPE_KEY:
-			if (pos[1] != EAP_FAST_PAC_KEY_LEN) {
-				wpa_printf(MSG_DEBUG, "EAP-FAST: Invalid "
-					   "PAC-Key length %d", pos[1]);
+			if (elen != EAP_FAST_PAC_KEY_LEN) {
+				wpa_printf(MSG_DEBUG,
+					   "EAP-FAST: Invalid PAC-Key length %d",
+					   elen);
 				os_free(buf);
 				return -1;
 			}
-			pac_key = pos + 2;
+			pac_key = pos;
 			wpa_hexdump_key(MSG_DEBUG, "EAP-FAST: PAC-Key from "
 					"decrypted PAC-Opaque",
 					pac_key, EAP_FAST_PAC_KEY_LEN);
 			break;
 		case PAC_OPAQUE_TYPE_LIFETIME:
-			if (pos[1] != 4) {
+			if (elen != 4) {
 				wpa_printf(MSG_DEBUG, "EAP-FAST: Invalid "
 					   "PAC-Key lifetime length %d",
-					   pos[1]);
+					   elen);
 				os_free(buf);
 				return -1;
 			}
-			lifetime = WPA_GET_BE32(pos + 2);
+			lifetime = WPA_GET_BE32(pos);
 			break;
 		case PAC_OPAQUE_TYPE_IDENTITY:
-			identity = pos + 2;
-			identity_len = pos[1];
+			identity = pos;
+			identity_len = elen;
 			break;
 		}
 
-		pos += 2 + pos[1];
+		pos += elen;
 	}
 done:
 
@@ -274,7 +278,7 @@ static void eap_fast_derive_key_auth(struct eap_sm *sm,
 	 * Extra key material after TLS key_block: session_key_seed[40]
 	 */
 
-	sks = eap_fast_derive_key(sm->ssl_ctx, data->ssl.conn, "key expansion",
+	sks = eap_fast_derive_key(sm->cfg->ssl_ctx, data->ssl.conn,
 				  EAP_FAST_SKS_LEN);
 	if (sks == NULL) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Failed to derive "
@@ -300,8 +304,7 @@ static void eap_fast_derive_key_provisioning(struct eap_sm *sm,
 {
 	os_free(data->key_block_p);
 	data->key_block_p = (struct eap_fast_key_block_provisioning *)
-		eap_fast_derive_key(sm->ssl_ctx, data->ssl.conn,
-				    "key expansion",
+		eap_fast_derive_key(sm->cfg->ssl_ctx, data->ssl.conn,
 				    sizeof(*data->key_block_p));
 	if (data->key_block_p == NULL) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Failed to derive key block");
@@ -408,11 +411,13 @@ static int eap_fast_update_icmk(struct eap_sm *sm, struct eap_fast_data *data)
 static void * eap_fast_init(struct eap_sm *sm)
 {
 	struct eap_fast_data *data;
-	u8 ciphers[5] = {
+	u8 ciphers[7] = {
 		TLS_CIPHER_ANON_DH_AES128_SHA,
 		TLS_CIPHER_AES128_SHA,
 		TLS_CIPHER_RSA_DHE_AES128_SHA,
 		TLS_CIPHER_RC4_SHA,
+		TLS_CIPHER_RSA_DHE_AES256_SHA,
+		TLS_CIPHER_AES256_SHA,
 		TLS_CIPHER_NONE
 	};
 
@@ -429,13 +434,13 @@ static void * eap_fast_init(struct eap_sm *sm)
 	}
 	data->state = START;
 
-	if (eap_server_tls_ssl_init(sm, &data->ssl, 0)) {
+	if (eap_server_tls_ssl_init(sm, &data->ssl, 0, EAP_TYPE_FAST)) {
 		wpa_printf(MSG_INFO, "EAP-FAST: Failed to initialize SSL.");
 		eap_fast_reset(sm, data);
 		return NULL;
 	}
 
-	if (tls_connection_set_cipher_list(sm->ssl_ctx, data->ssl.conn,
+	if (tls_connection_set_cipher_list(sm->cfg->ssl_ctx, data->ssl.conn,
 					   ciphers) < 0) {
 		wpa_printf(MSG_INFO, "EAP-FAST: Failed to set TLS cipher "
 			   "suites");
@@ -443,7 +448,8 @@ static void * eap_fast_init(struct eap_sm *sm)
 		return NULL;
 	}
 
-	if (tls_connection_set_session_ticket_cb(sm->ssl_ctx, data->ssl.conn,
+	if (tls_connection_set_session_ticket_cb(sm->cfg->ssl_ctx,
+						 data->ssl.conn,
 						 eap_fast_session_ticket_cb,
 						 data) < 0) {
 		wpa_printf(MSG_INFO, "EAP-FAST: Failed to set SessionTicket "
@@ -452,48 +458,48 @@ static void * eap_fast_init(struct eap_sm *sm)
 		return NULL;
 	}
 
-	if (sm->pac_opaque_encr_key == NULL) {
+	if (sm->cfg->pac_opaque_encr_key == NULL) {
 		wpa_printf(MSG_INFO, "EAP-FAST: No PAC-Opaque encryption key "
 			   "configured");
 		eap_fast_reset(sm, data);
 		return NULL;
 	}
-	os_memcpy(data->pac_opaque_encr, sm->pac_opaque_encr_key,
+	os_memcpy(data->pac_opaque_encr, sm->cfg->pac_opaque_encr_key,
 		  sizeof(data->pac_opaque_encr));
 
-	if (sm->eap_fast_a_id == NULL) {
+	if (sm->cfg->eap_fast_a_id == NULL) {
 		wpa_printf(MSG_INFO, "EAP-FAST: No A-ID configured");
 		eap_fast_reset(sm, data);
 		return NULL;
 	}
-	data->srv_id = os_malloc(sm->eap_fast_a_id_len);
+	data->srv_id = os_memdup(sm->cfg->eap_fast_a_id,
+				 sm->cfg->eap_fast_a_id_len);
 	if (data->srv_id == NULL) {
 		eap_fast_reset(sm, data);
 		return NULL;
 	}
-	os_memcpy(data->srv_id, sm->eap_fast_a_id, sm->eap_fast_a_id_len);
-	data->srv_id_len = sm->eap_fast_a_id_len;
+	data->srv_id_len = sm->cfg->eap_fast_a_id_len;
 
-	if (sm->eap_fast_a_id_info == NULL) {
+	if (sm->cfg->eap_fast_a_id_info == NULL) {
 		wpa_printf(MSG_INFO, "EAP-FAST: No A-ID-Info configured");
 		eap_fast_reset(sm, data);
 		return NULL;
 	}
-	data->srv_id_info = os_strdup(sm->eap_fast_a_id_info);
+	data->srv_id_info = os_strdup(sm->cfg->eap_fast_a_id_info);
 	if (data->srv_id_info == NULL) {
 		eap_fast_reset(sm, data);
 		return NULL;
 	}
 
 	/* PAC-Key lifetime in seconds (hard limit) */
-	data->pac_key_lifetime = sm->pac_key_lifetime;
+	data->pac_key_lifetime = sm->cfg->pac_key_lifetime;
 
 	/*
 	 * PAC-Key refresh time in seconds (soft limit on remaining hard
 	 * limit). The server will generate a new PAC-Key when this number of
 	 * seconds (or fewer) of the lifetime remains.
 	 */
-	data->pac_key_refresh_time = sm->pac_key_refresh_time;
+	data->pac_key_refresh_time = sm->cfg->pac_key_refresh_time;
 
 	return data;
 }
@@ -548,15 +554,15 @@ static int eap_fast_phase1_done(struct eap_sm *sm, struct eap_fast_data *data)
 
 	wpa_printf(MSG_DEBUG, "EAP-FAST: Phase1 done, starting Phase2");
 
-	if (tls_get_cipher(sm->ssl_ctx, data->ssl.conn, cipher, sizeof(cipher))
-	    < 0) {
+	if (tls_get_cipher(sm->cfg->ssl_ctx, data->ssl.conn,
+			   cipher, sizeof(cipher)) < 0) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Failed to get cipher "
 			   "information");
 		eap_fast_state(data, FAILURE);
 		return -1;
 	}
 	data->anon_provisioning = os_strstr(cipher, "ADH") != NULL;
-		    
+
 	if (data->anon_provisioning) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Anonymous provisioning");
 		eap_fast_derive_key_provisioning(sm, data);
@@ -731,8 +737,8 @@ static struct wpabuf * eap_fast_build_pac(struct eap_sm *sm,
 		os_free(pac_buf);
 		return NULL;
 	}
-	if (aes_wrap(data->pac_opaque_encr, pac_len / 8, pac_buf,
-		     pac_opaque) < 0) {
+	if (aes_wrap(data->pac_opaque_encr, sizeof(data->pac_opaque_encr),
+		     pac_len / 8, pac_buf, pac_opaque) < 0) {
 		os_free(pac_buf);
 		os_free(pac_opaque);
 		return NULL;
@@ -784,7 +790,7 @@ static struct wpabuf * eap_fast_build_pac(struct eap_sm *sm,
 
 	/* A-ID (inside PAC-Info) */
 	eap_fast_put_tlv(buf, PAC_TYPE_A_ID, data->srv_id, data->srv_id_len);
-	
+
 	/* Note: headers may be misaligned after A-ID */
 
 	if (sm->identity) {
@@ -819,6 +825,9 @@ static int eap_fast_encrypt_phase2(struct eap_sm *sm,
 			    plain);
 	encr = eap_server_tls_encrypt(sm, &data->ssl, plain);
 	wpabuf_free(plain);
+
+	if (!encr)
+		return -1;
 
 	if (data->ssl.tls_out && piggyback) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Piggyback Phase 2 data "
@@ -865,7 +874,8 @@ static struct wpabuf * eap_fast_buildReq(struct eap_sm *sm, void *priv, u8 id)
 	case START:
 		return eap_fast_build_start(sm, data, id);
 	case PHASE1:
-		if (tls_connection_established(sm->ssl_ctx, data->ssl.conn)) {
+		if (tls_connection_established(sm->cfg->ssl_ctx,
+					       data->ssl.conn)) {
 			if (eap_fast_phase1_done(sm, data) < 0)
 				return NULL;
 			if (data->state == PHASE2_START) {
@@ -936,15 +946,14 @@ static Boolean eap_fast_check(struct eap_sm *sm, void *priv,
 
 
 static int eap_fast_phase2_init(struct eap_sm *sm, struct eap_fast_data *data,
-				EapType eap_type)
+				int vendor, enum eap_type eap_type)
 {
 	if (data->phase2_priv && data->phase2_method) {
 		data->phase2_method->reset(sm, data->phase2_priv);
 		data->phase2_method = NULL;
 		data->phase2_priv = NULL;
 	}
-	data->phase2_method = eap_server_get_eap_method(EAP_VENDOR_IETF,
-							eap_type);
+	data->phase2_method = eap_server_get_eap_method(vendor, eap_type);
 	if (!data->phase2_method)
 		return -1;
 
@@ -966,7 +975,8 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 					     struct eap_fast_data *data,
 					     u8 *in_data, size_t in_len)
 {
-	u8 next_type = EAP_TYPE_NONE;
+	int next_vendor = EAP_VENDOR_IETF;
+	enum eap_type next_type = EAP_TYPE_NONE;
 	struct eap_hdr *hdr;
 	u8 *pos;
 	size_t left;
@@ -992,8 +1002,9 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 		    m->method == EAP_TYPE_TNC) {
 			wpa_printf(MSG_DEBUG, "EAP-FAST: Peer Nak'ed required "
 				   "TNC negotiation");
+			next_vendor = EAP_VENDOR_IETF;
 			next_type = eap_fast_req_failure(sm, data);
-			eap_fast_phase2_init(sm, data, next_type);
+			eap_fast_phase2_init(sm, data, next_vendor, next_type);
 			return;
 		}
 #endif /* EAP_SERVER_TNC */
@@ -1001,14 +1012,17 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 		if (sm->user && sm->user_eap_method_index < EAP_MAX_METHODS &&
 		    sm->user->methods[sm->user_eap_method_index].method !=
 		    EAP_TYPE_NONE) {
+			next_vendor = sm->user->methods[
+				sm->user_eap_method_index].vendor;
 			next_type = sm->user->methods[
 				sm->user_eap_method_index++].method;
-			wpa_printf(MSG_DEBUG, "EAP-FAST: try EAP type %d",
-				   next_type);
+			wpa_printf(MSG_DEBUG, "EAP-FAST: try EAP type %u:%u",
+				   next_vendor, next_type);
 		} else {
+			next_vendor = EAP_VENDOR_IETF;
 			next_type = eap_fast_req_failure(sm, data);
 		}
-		eap_fast_phase2_init(sm, data, next_type);
+		eap_fast_phase2_init(sm, data, next_vendor, next_type);
 		return;
 	}
 
@@ -1017,7 +1031,7 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 	if (m->check(sm, priv, &buf)) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Phase2 check() asked to "
 			   "ignore the packet");
-		next_type = eap_fast_req_failure(sm, data);
+		eap_fast_req_failure(sm, data);
 		return;
 	}
 
@@ -1028,8 +1042,9 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 
 	if (!m->isSuccess(sm, priv)) {
 		wpa_printf(MSG_DEBUG, "EAP-FAST: Phase2 method failed");
+		next_vendor = EAP_VENDOR_IETF;
 		next_type = eap_fast_req_failure(sm, data);
-		eap_fast_phase2_init(sm, data, next_type);
+		eap_fast_phase2_init(sm, data, next_vendor, next_type);
 		return;
 	}
 
@@ -1040,6 +1055,7 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 					  "Identity not found in the user "
 					  "database",
 					  sm->identity, sm->identity_len);
+			next_vendor = EAP_VENDOR_IETF;
 			next_type = eap_fast_req_failure(sm, data);
 			break;
 		}
@@ -1050,23 +1066,28 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 			 * Only EAP-MSCHAPv2 is allowed for anonymous
 			 * provisioning.
 			 */
+			next_vendor = EAP_VENDOR_IETF;
 			next_type = EAP_TYPE_MSCHAPV2;
 			sm->user_eap_method_index = 0;
 		} else {
+			next_vendor = sm->user->methods[0].vendor;
 			next_type = sm->user->methods[0].method;
 			sm->user_eap_method_index = 1;
 		}
-		wpa_printf(MSG_DEBUG, "EAP-FAST: try EAP type %d", next_type);
+		wpa_printf(MSG_DEBUG, "EAP-FAST: try EAP type %u:%u",
+			   next_vendor, next_type);
 		break;
 	case PHASE2_METHOD:
 	case CRYPTO_BINDING:
 		eap_fast_update_icmk(sm, data);
 		eap_fast_state(data, CRYPTO_BINDING);
 		data->eap_seq++;
+		next_vendor = EAP_VENDOR_IETF;
 		next_type = EAP_TYPE_NONE;
 #ifdef EAP_SERVER_TNC
-		if (sm->tnc && !data->tnc_started) {
+		if (sm->cfg->tnc && !data->tnc_started) {
 			wpa_printf(MSG_DEBUG, "EAP-FAST: Initialize TNC");
+			next_vendor = EAP_VENDOR_IETF;
 			next_type = EAP_TYPE_TNC;
 			data->tnc_started = 1;
 		}
@@ -1080,7 +1101,7 @@ static void eap_fast_process_phase2_response(struct eap_sm *sm,
 		break;
 	}
 
-	eap_fast_phase2_init(sm, data, next_type);
+	eap_fast_phase2_init(sm, data, next_vendor, next_type);
 }
 
 
@@ -1132,7 +1153,7 @@ static int eap_fast_parse_tlvs(struct wpabuf *data,
 
 	pos = wpabuf_mhead(data);
 	end = pos + wpabuf_len(data);
-	while (pos + 4 < end) {
+	while (end - pos > 4) {
 		mandatory = pos[0] & 0x80;
 		tlv_type = WPA_GET_BE16(pos) & 0x3fff;
 		pos += 2;
@@ -1328,8 +1349,8 @@ static void eap_fast_process_phase2_tlvs(struct eap_sm *sm,
 		}
 
 		if (data->anon_provisioning &&
-		    sm->eap_fast_prov != ANON_PROV &&
-		    sm->eap_fast_prov != BOTH_PROV) {
+		    sm->cfg->eap_fast_prov != ANON_PROV &&
+		    sm->cfg->eap_fast_prov != BOTH_PROV) {
 			wpa_printf(MSG_DEBUG, "EAP-FAST: Client is trying to "
 				   "use unauthenticated provisioning which is "
 				   "disabled");
@@ -1337,8 +1358,8 @@ static void eap_fast_process_phase2_tlvs(struct eap_sm *sm,
 			return;
 		}
 
-		if (sm->eap_fast_prov != AUTH_PROV &&
-		    sm->eap_fast_prov != BOTH_PROV &&
+		if (sm->cfg->eap_fast_prov != AUTH_PROV &&
+		    sm->cfg->eap_fast_prov != BOTH_PROV &&
 		    tlv.request_action == EAP_TLV_ACTION_PROCESS_TLV &&
 		    eap_fast_pac_type(tlv.pac, tlv.pac_len,
 				      PAC_TYPE_TUNNEL_PAC)) {
@@ -1390,7 +1411,7 @@ static void eap_fast_process_phase2(struct eap_sm *sm,
 		return;
 	}
 
-	in_decrypted = tls_connection_decrypt(sm->ssl_ctx, data->ssl.conn,
+	in_decrypted = tls_connection_decrypt(sm->cfg->ssl_ctx, data->ssl.conn,
 					      in_buf);
 	if (in_decrypted == NULL) {
 		wpa_printf(MSG_INFO, "EAP-FAST: Failed to decrypt Phase 2 "
@@ -1450,7 +1471,7 @@ static int eap_fast_process_phase1(struct eap_sm *sm,
 		return -1;
 	}
 
-	if (!tls_connection_established(sm->ssl_ctx, data->ssl.conn) ||
+	if (!tls_connection_established(sm->cfg->ssl_ctx, data->ssl.conn) ||
 	    wpabuf_len(data->ssl.tls_out) > 0)
 		return 1;
 
@@ -1467,7 +1488,8 @@ static int eap_fast_process_phase1(struct eap_sm *sm,
 static int eap_fast_process_phase2_start(struct eap_sm *sm,
 					 struct eap_fast_data *data)
 {
-	u8 next_type;
+	int next_vendor;
+	enum eap_type next_type;
 
 	if (data->identity) {
 		os_free(sm->identity);
@@ -1481,10 +1503,12 @@ static int eap_fast_process_phase2_start(struct eap_sm *sm,
 					  "Phase2 Identity not found "
 					  "in the user database",
 					  sm->identity, sm->identity_len);
+			next_vendor = EAP_VENDOR_IETF;
 			next_type = eap_fast_req_failure(sm, data);
 		} else {
 			wpa_printf(MSG_DEBUG, "EAP-FAST: Identity already "
 				   "known - skip Phase 2 Identity Request");
+			next_vendor = sm->user->methods[0].vendor;
 			next_type = sm->user->methods[0].method;
 			sm->user_eap_method_index = 1;
 		}
@@ -1492,10 +1516,11 @@ static int eap_fast_process_phase2_start(struct eap_sm *sm,
 		eap_fast_state(data, PHASE2_METHOD);
 	} else {
 		eap_fast_state(data, PHASE2_ID);
+		next_vendor = EAP_VENDOR_IETF;
 		next_type = EAP_TYPE_IDENTITY;
 	}
 
-	return eap_fast_phase2_init(sm, data, next_type);
+	return eap_fast_phase2_init(sm, data, next_vendor, next_type);
 }
 
 
@@ -1509,7 +1534,7 @@ static void eap_fast_process_msg(struct eap_sm *sm, void *priv,
 		if (eap_fast_process_phase1(sm, data))
 			break;
 
-		/* fall through to PHASE2_START */
+		/* fall through */
 	case PHASE2_START:
 		eap_fast_process_phase2_start(sm, data);
 		break;
@@ -1557,7 +1582,10 @@ static u8 * eap_fast_getKey(struct eap_sm *sm, void *priv, size_t *len)
 	if (eapKeyData == NULL)
 		return NULL;
 
-	eap_fast_derive_eap_msk(data->simck, eapKeyData);
+	if (eap_fast_derive_eap_msk(data->simck, eapKeyData) < 0) {
+		os_free(eapKeyData);
+		return NULL;
+	}
 	*len = EAP_FAST_KEY_LEN;
 
 	return eapKeyData;
@@ -1576,7 +1604,10 @@ static u8 * eap_fast_get_emsk(struct eap_sm *sm, void *priv, size_t *len)
 	if (eapKeyData == NULL)
 		return NULL;
 
-	eap_fast_derive_eap_emsk(data->simck, eapKeyData);
+	if (eap_fast_derive_eap_emsk(data->simck, eapKeyData) < 0) {
+		os_free(eapKeyData);
+		return NULL;
+	}
 	*len = EAP_EMSK_LEN;
 
 	return eapKeyData;
@@ -1590,10 +1621,21 @@ static Boolean eap_fast_isSuccess(struct eap_sm *sm, void *priv)
 }
 
 
+static u8 * eap_fast_get_session_id(struct eap_sm *sm, void *priv, size_t *len)
+{
+	struct eap_fast_data *data = priv;
+
+	if (data->state != SUCCESS)
+		return NULL;
+
+	return eap_server_tls_derive_session_id(sm, &data->ssl, EAP_TYPE_FAST,
+						len);
+}
+
+
 int eap_server_fast_register(void)
 {
 	struct eap_method *eap;
-	int ret;
 
 	eap = eap_server_method_alloc(EAP_SERVER_METHOD_INTERFACE_VERSION,
 				      EAP_VENDOR_IETF, EAP_TYPE_FAST, "FAST");
@@ -1609,9 +1651,7 @@ int eap_server_fast_register(void)
 	eap->getKey = eap_fast_getKey;
 	eap->get_emsk = eap_fast_get_emsk;
 	eap->isSuccess = eap_fast_isSuccess;
+	eap->getSessionId = eap_fast_get_session_id;
 
-	ret = eap_server_method_register(eap);
-	if (ret)
-		eap_server_method_free(eap);
-	return ret;
+	return eap_server_method_register(eap);
 }

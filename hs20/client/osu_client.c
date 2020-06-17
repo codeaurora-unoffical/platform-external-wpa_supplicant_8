@@ -9,6 +9,9 @@
 #include "includes.h"
 #include <time.h>
 #include <sys/stat.h>
+#ifdef ANDROID
+#include "private/android_filesystem_config.h"
+#endif /* ANDROID */
 
 #include "common.h"
 #include "utils/browser.h"
@@ -21,6 +24,8 @@
 #include "crypto/crypto.h"
 #include "crypto/sha256.h"
 #include "osu_client.h"
+
+const char *spp_xsd_fname = "spp.xsd";
 
 
 void write_result(struct hs20_osu_client *ctx, const char *fmt, ...)
@@ -100,6 +105,35 @@ static int valid_fqdn(const char *fqdn)
 }
 
 
+static int android_update_permission(const char *path, mode_t mode)
+{
+#ifdef ANDROID
+	/* we need to change file/folder permission for Android */
+
+	if (!path) {
+		wpa_printf(MSG_ERROR, "file path null");
+		return -1;
+	}
+
+	/* Allow processes running with Group ID as AID_WIFI,
+	 * to read files from SP, SP/<fqdn>, Cert and osu-info directories */
+	if (lchown(path, -1, AID_WIFI)) {
+		wpa_printf(MSG_INFO, "CTRL: Could not lchown directory: %s",
+			   strerror(errno));
+		return -1;
+	}
+
+	if (chmod(path, mode) < 0) {
+		wpa_printf(MSG_INFO, "CTRL: Could not chmod directory: %s",
+			   strerror(errno));
+		return -1;
+	}
+#endif  /* ANDROID */
+
+	return 0;
+}
+
+
 int osu_get_certificate(struct hs20_osu_client *ctx, xml_node_t *getcert)
 {
 	xml_node_t *node;
@@ -164,6 +198,8 @@ int osu_get_certificate(struct hs20_osu_client *ctx, xml_node_t *getcert)
 	}
 
 	mkdir("Cert", S_IRWXU);
+	android_update_permission("Cert", S_IRWXU | S_IRWXG);
+
 	if (est_load_cacerts(ctx, url) < 0 ||
 	    est_build_csr(ctx, url) < 0 ||
 	    est_simple_enroll(ctx, url, user, pw) < 0)
@@ -257,7 +293,6 @@ static int process_est_cert(struct hs20_osu_client *ctx, xml_node_t *cert,
 
 	unlink("Cert/est-req.b64");
 	unlink("Cert/est-req.pem");
-	unlink("Cert/est-resp.raw");
 	rmdir("Cert");
 
 	return 0;
@@ -397,11 +432,11 @@ static int cmd_dl_polupd_ca(struct hs20_osu_client *ctx, const char *pps_fname,
 	}
 
 	node = get_child_node(ctx->xml, pps,
-			      "PolicyUpdate/TrustRoot");
+			      "Policy/PolicyUpdate/TrustRoot");
 	if (node == NULL) {
-		wpa_printf(MSG_INFO, "No PolicyUpdate/TrustRoot/CertURL found from PPS");
+		wpa_printf(MSG_INFO, "No Policy/PolicyUpdate/TrustRoot/CertURL found from PPS");
 		xml_node_free(ctx->xml, pps);
-		return -1;
+		return -2;
 	}
 
 	ret = download_cert(ctx, node, ca_fname);
@@ -428,7 +463,7 @@ static int cmd_dl_aaa_ca(struct hs20_osu_client *ctx, const char *pps_fname,
 	if (node == NULL) {
 		wpa_printf(MSG_INFO, "No AAAServerTrustRoot/CertURL found from PPS");
 		xml_node_free(ctx->xml, pps);
-		return -1;
+		return -2;
 	}
 
 	aaa = xml_node_first_child(ctx->xml, node);
@@ -450,7 +485,7 @@ static int download_trust_roots(struct hs20_osu_client *ctx,
 {
 	char *dir, *pos;
 	char fname[300];
-	int ret;
+	int ret, ret1;
 
 	dir = os_strdup(pps_fname);
 	if (dir == NULL)
@@ -465,9 +500,13 @@ static int download_trust_roots(struct hs20_osu_client *ctx,
 	snprintf(fname, sizeof(fname), "%s/ca.pem", dir);
 	ret = cmd_dl_osu_ca(ctx, pps_fname, fname);
 	snprintf(fname, sizeof(fname), "%s/polupd-ca.pem", dir);
-	cmd_dl_polupd_ca(ctx, pps_fname, fname);
+	ret1 = cmd_dl_polupd_ca(ctx, pps_fname, fname);
+	if (ret == 0 && ret1 == -1)
+		ret = -1;
 	snprintf(fname, sizeof(fname), "%s/aaa-ca.pem", dir);
-	cmd_dl_aaa_ca(ctx, pps_fname, fname);
+	ret1 = cmd_dl_aaa_ca(ctx, pps_fname, fname);
+	if (ret == 0 && ret1 == -1)
+		ret = -1;
 
 	os_free(dir);
 
@@ -537,6 +576,7 @@ int hs20_add_pps_mo(struct hs20_osu_client *ctx, const char *uri,
 				   uri);
 			write_result(ctx, "Unsupported location for addMO to "
 				     "add PPS MO (extra directory): '%s'", uri);
+			free(fqdn);
 			return -1;
 		}
 		*pos = '\0'; /* remove trailing slash and PPS node name */
@@ -544,8 +584,9 @@ int hs20_add_pps_mo(struct hs20_osu_client *ctx, const char *uri,
 	wpa_printf(MSG_INFO, "SP FQDN: %s", fqdn);
 
 	if (!server_dnsname_suffix_match(ctx, fqdn)) {
-		wpa_printf(MSG_INFO, "FQDN '%s' for new PPS MO did not have suffix match with server's dNSName values",
-			   fqdn);
+		wpa_printf(MSG_INFO,
+			   "FQDN '%s' for new PPS MO did not have suffix match with server's dNSName values, count: %d",
+			   fqdn, (int) ctx->server_dnsname_count);
 		write_result(ctx, "FQDN '%s' for new PPS MO did not have suffix match with server's dNSName values",
 			     fqdn);
 		free(fqdn);
@@ -570,6 +611,9 @@ int hs20_add_pps_mo(struct hs20_osu_client *ctx, const char *uri,
 			return -1;
 		}
 	}
+
+	android_update_permission("SP", S_IRWXU | S_IRWXG);
+	android_update_permission(fname, S_IRWXU | S_IRWXG);
 
 	snprintf(fname, fname_len, "SP/%s/pps.xml", fqdn);
 
@@ -1191,8 +1235,7 @@ static void set_pps_cred_home_sp_oi(struct hs20_osu_client *ctx, int id,
 			     homeoi) < 0)
 			wpa_printf(MSG_INFO, "Failed to set cred required_roaming_consortium");
 	} else {
-		if (set_cred_quoted(ctx->ifname, id, "roaming_consortium",
-				    homeoi) < 0)
+		if (set_cred(ctx->ifname, id, "roaming_consortium", homeoi) < 0)
 			wpa_printf(MSG_INFO, "Failed to set cred roaming_consortium");
 	}
 
@@ -1267,7 +1310,9 @@ static void set_pps_cred_home_sp_roaming_consortium_oi(
 	if (str == NULL)
 		return;
 	wpa_printf(MSG_INFO, "- HomeSP/RoamingConsortiumOI = %s", str);
-	/* TODO: Set to wpa_supplicant */
+	if (set_cred_quoted(ctx->ifname, id, "roaming_consortiums",
+			    str) < 0)
+		wpa_printf(MSG_INFO, "Failed to set cred roaming_consortiums");
 	xml_node_get_text_free(ctx->xml, str);
 }
 
@@ -1420,10 +1465,92 @@ static void set_pps_cred_able_to_share(struct hs20_osu_client *ctx, int id,
 }
 
 
+static void set_pps_cred_eap_method_eap_type(struct hs20_osu_client *ctx,
+					     int id, xml_node_t *node)
+{
+	char *str = xml_node_get_text(ctx->xml, node);
+	int type;
+	const char *eap_method = NULL;
+
+	if (!str)
+		return;
+	wpa_printf(MSG_INFO,
+		   "- Credential/UsernamePassword/EAPMethod/EAPType = %s", str);
+	type = atoi(str);
+	switch (type) {
+	case EAP_TYPE_TLS:
+		eap_method = "TLS";
+		break;
+	case EAP_TYPE_TTLS:
+		eap_method = "TTLS";
+		break;
+	case EAP_TYPE_PEAP:
+		eap_method = "PEAP";
+		break;
+	case EAP_TYPE_PWD:
+		eap_method = "PWD";
+		break;
+	}
+	xml_node_get_text_free(ctx->xml, str);
+	if (!eap_method) {
+		wpa_printf(MSG_INFO, "Unknown EAPType value");
+		return;
+	}
+
+	if (set_cred(ctx->ifname, id, "eap", eap_method) < 0)
+		wpa_printf(MSG_INFO, "Failed to set cred eap");
+}
+
+
+static void set_pps_cred_eap_method_inner_method(struct hs20_osu_client *ctx,
+						 int id, xml_node_t *node)
+{
+	char *str = xml_node_get_text(ctx->xml, node);
+	const char *phase2 = NULL;
+
+	if (!str)
+		return;
+	wpa_printf(MSG_INFO,
+		   "- Credential/UsernamePassword/EAPMethod/InnerMethod = %s",
+		   str);
+	if (os_strcmp(str, "PAP") == 0)
+		phase2 = "auth=PAP";
+	else if (os_strcmp(str, "CHAP") == 0)
+		phase2 = "auth=CHAP";
+	else if (os_strcmp(str, "MS-CHAP") == 0)
+		phase2 = "auth=MSCHAP";
+	else if (os_strcmp(str, "MS-CHAP-V2") == 0)
+		phase2 = "auth=MSCHAPV2";
+	xml_node_get_text_free(ctx->xml, str);
+	if (!phase2) {
+		wpa_printf(MSG_INFO, "Unknown InnerMethod value");
+		return;
+	}
+
+	if (set_cred_quoted(ctx->ifname, id, "phase2", phase2) < 0)
+		wpa_printf(MSG_INFO, "Failed to set cred phase2");
+}
+
+
 static void set_pps_cred_eap_method(struct hs20_osu_client *ctx, int id,
 				    xml_node_t *node)
 {
-	wpa_printf(MSG_INFO, "- Credential/UsernamePassword/EAPMethod - TODO");
+	xml_node_t *child;
+	const char *name;
+
+	wpa_printf(MSG_INFO, "- Credential/UsernamePassword/EAPMethod");
+
+	xml_node_for_each_child(ctx->xml, child, node) {
+		xml_node_for_each_check(ctx->xml, child);
+		name = xml_node_get_localname(ctx->xml, child);
+		if (os_strcasecmp(name, "EAPType") == 0)
+			set_pps_cred_eap_method_eap_type(ctx, id, child);
+		else if (os_strcasecmp(name, "InnerMethod") == 0)
+			set_pps_cred_eap_method_inner_method(ctx, id, child);
+		else
+			wpa_printf(MSG_INFO, "Unknown Credential/UsernamePassword/EAPMethod node '%s'",
+				   name);
+	}
 }
 
 
@@ -1461,6 +1588,7 @@ static void set_pps_cred_digital_cert(struct hs20_osu_client *ctx, int id,
 				      xml_node_t *node, const char *fqdn)
 {
 	char buf[200], dir[200];
+	int res;
 
 	wpa_printf(MSG_INFO, "- Credential/DigitalCertificate");
 
@@ -1472,14 +1600,20 @@ static void set_pps_cred_digital_cert(struct hs20_osu_client *ctx, int id,
 		wpa_printf(MSG_INFO, "Failed to set username");
 	}
 
-	snprintf(buf, sizeof(buf), "%s/SP/%s/client-cert.pem", dir, fqdn);
+	res = os_snprintf(buf, sizeof(buf), "%s/SP/%s/client-cert.pem", dir,
+			  fqdn);
+	if (os_snprintf_error(sizeof(buf), res))
+		return;
 	if (os_file_exists(buf)) {
 		if (set_cred_quoted(ctx->ifname, id, "client_cert", buf) < 0) {
 			wpa_printf(MSG_INFO, "Failed to set client_cert");
 		}
 	}
 
-	snprintf(buf, sizeof(buf), "%s/SP/%s/client-key.pem", dir, fqdn);
+	res = os_snprintf(buf, sizeof(buf), "%s/SP/%s/client-key.pem", dir,
+			  fqdn);
+	if (os_snprintf_error(sizeof(buf), res))
+		return;
 	if (os_file_exists(buf)) {
 		if (set_cred_quoted(ctx->ifname, id, "private_key", buf) < 0) {
 			wpa_printf(MSG_INFO, "Failed to set private_key");
@@ -1493,6 +1627,7 @@ static void set_pps_cred_realm(struct hs20_osu_client *ctx, int id,
 {
 	char *str = xml_node_get_text(ctx->xml, node);
 	char buf[200], dir[200];
+	int res;
 
 	if (str == NULL)
 		return;
@@ -1507,7 +1642,9 @@ static void set_pps_cred_realm(struct hs20_osu_client *ctx, int id,
 
 	if (getcwd(dir, sizeof(dir)) == NULL)
 		return;
-	snprintf(buf, sizeof(buf), "%s/SP/%s/aaa-ca.pem", dir, fqdn);
+	res = os_snprintf(buf, sizeof(buf), "%s/SP/%s/aaa-ca.pem", dir, fqdn);
+	if (os_snprintf_error(sizeof(buf), res))
+		return;
 	if (os_file_exists(buf)) {
 		if (set_cred_quoted(ctx->ifname, id, "ca_cert", buf) < 0) {
 			wpa_printf(MSG_INFO, "Failed to set CA cert");
@@ -1862,7 +1999,9 @@ struct osu_data {
 	char url[256];
 	unsigned int methods;
 	char osu_ssid[33];
+	char osu_ssid2[33];
 	char osu_nai[256];
+	char osu_nai2[256];
 	struct osu_lang_text friendly_name[MAX_OSU_VALS];
 	size_t friendly_name_count;
 	struct osu_lang_text serv_desc[MAX_OSU_VALS];
@@ -1921,9 +2060,21 @@ static struct osu_data * parse_osu_providers(const char *fname, size_t *count)
 			continue;
 		}
 
+		if (strncmp(buf, "osu_ssid2=", 10) == 0) {
+			snprintf(last->osu_ssid2, sizeof(last->osu_ssid2),
+				 "%s", buf + 10);
+			continue;
+		}
+
 		if (os_strncmp(buf, "osu_nai=", 8) == 0) {
 			os_snprintf(last->osu_nai, sizeof(last->osu_nai),
 				    "%s", buf + 8);
+			continue;
+		}
+
+		if (os_strncmp(buf, "osu_nai2=", 9) == 0) {
+			os_snprintf(last->osu_nai2, sizeof(last->osu_nai2),
+				    "%s", buf + 9);
 			continue;
 		}
 
@@ -2002,9 +2153,9 @@ static struct osu_data * parse_osu_providers(const char *fname, size_t *count)
 
 
 static int osu_connect(struct hs20_osu_client *ctx, const char *bssid,
-		       const char *ssid, const char *url,
+		       const char *ssid, const char *ssid2, const char *url,
 		       unsigned int methods, int no_prod_assoc,
-		       const char *osu_nai)
+		       const char *osu_nai, const char *osu_nai2)
 {
 	int id;
 	const char *ifname = ctx->ifname;
@@ -2012,26 +2163,54 @@ static int osu_connect(struct hs20_osu_client *ctx, const char *bssid,
 	struct wpa_ctrl *mon;
 	int res;
 
+	if (ssid2 && ssid2[0] == '\0')
+		ssid2 = NULL;
+
+	if (ctx->osu_ssid) {
+		if (os_strcmp(ssid, ctx->osu_ssid) == 0) {
+			wpa_printf(MSG_DEBUG,
+				   "Enforced OSU SSID matches ANQP info");
+			ssid2 = NULL;
+		} else if (ssid2 && os_strcmp(ssid2, ctx->osu_ssid) == 0) {
+			wpa_printf(MSG_DEBUG,
+				   "Enforced OSU SSID matches RSN[OSEN] info");
+			ssid = ssid2;
+		} else {
+			wpa_printf(MSG_INFO, "Enforced OSU SSID did not match");
+			write_summary(ctx, "Enforced OSU SSID did not match");
+			return -1;
+		}
+	}
+
 	id = add_network(ifname);
 	if (id < 0)
 		return -1;
 	if (set_network_quoted(ifname, id, "ssid", ssid) < 0)
 		return -1;
+	if (ssid2)
+		osu_nai = osu_nai2;
 	if (osu_nai && os_strlen(osu_nai) > 0) {
 		char dir[255], fname[300];
 		if (getcwd(dir, sizeof(dir)) == NULL)
 			return -1;
 		os_snprintf(fname, sizeof(fname), "%s/osu-ca.pem", dir);
 
+		if (ssid2 && set_network_quoted(ifname, id, "ssid", ssid2) < 0)
+			return -1;
+
 		if (set_network(ifname, id, "proto", "OSEN") < 0 ||
 		    set_network(ifname, id, "key_mgmt", "OSEN") < 0 ||
 		    set_network(ifname, id, "pairwise", "CCMP") < 0 ||
-		    set_network(ifname, id, "group", "GTK_NOT_USED") < 0 ||
+		    set_network(ifname, id, "group", "GTK_NOT_USED CCMP") < 0 ||
 		    set_network(ifname, id, "eap", "WFA-UNAUTH-TLS") < 0 ||
 		    set_network(ifname, id, "ocsp", "2") < 0 ||
 		    set_network_quoted(ifname, id, "identity", osu_nai) < 0 ||
 		    set_network_quoted(ifname, id, "ca_cert", fname) < 0)
 			return -1;
+	} else if (ssid2) {
+		wpa_printf(MSG_INFO, "No OSU_NAI set for RSN[OSEN]");
+		write_summary(ctx, "No OSU_NAI set for RSN[OSEN]");
+		return -1;
 	} else {
 		if (set_network(ifname, id, "key_mgmt", "NONE") < 0)
 			return -1;
@@ -2076,10 +2255,14 @@ static int osu_connect(struct hs20_osu_client *ctx, const char *bssid,
 	}
 
 	ctx->no_reconnect = 1;
-	if (methods & 0x02)
+	if (methods & 0x02) {
+		wpa_printf(MSG_DEBUG, "Calling cmd_prov from osu_connect");
 		res = cmd_prov(ctx, url);
-	else if (methods & 0x01)
+	} else if (methods & 0x01) {
+		wpa_printf(MSG_DEBUG,
+			   "Calling cmd_oma_dm_prov from osu_connect");
 		res = cmd_oma_dm_prov(ctx, url);
+	}
 
 	wpa_printf(MSG_INFO, "Remove OSU network connection");
 	write_summary(ctx, "Remove OSU network connection");
@@ -2108,7 +2291,7 @@ static int cmd_osu_select(struct hs20_osu_client *ctx, const char *dir,
 	char fname[255];
 	FILE *f;
 	struct osu_data *osu = NULL, *last = NULL;
-	size_t osu_count, i, j;
+	size_t osu_count = 0, i, j;
 	int ret;
 
 	write_summary(ctx, "OSU provider selection");
@@ -2121,7 +2304,7 @@ static int cmd_osu_select(struct hs20_osu_client *ctx, const char *dir,
 	snprintf(fname, sizeof(fname), "%s/osu-providers.txt", dir);
 	osu = parse_osu_providers(fname, &osu_count);
 	if (osu == NULL) {
-		wpa_printf(MSG_INFO, "Could not any OSU providers from %s",
+		wpa_printf(MSG_INFO, "Could not find any OSU providers from %s",
 			   fname);
 		write_result(ctx, "No OSU providers available");
 		return -1;
@@ -2203,8 +2386,12 @@ static int cmd_osu_select(struct hs20_osu_client *ctx, const char *dir,
 		fprintf(f, "</table></a><br><small>BSSID: %s<br>\n"
 			"SSID: %s<br>\n",
 			last->bssid, last->osu_ssid);
-		if (last->osu_nai)
+		if (last->osu_ssid2[0])
+			fprintf(f, "SSID2: %s<br>\n", last->osu_ssid2);
+		if (last->osu_nai[0])
 			fprintf(f, "NAI: %s<br>\n", last->osu_nai);
+		if (last->osu_nai2[0])
+			fprintf(f, "NAI2: %s<br>\n", last->osu_nai2);
 		fprintf(f, "URL: %s<br>\n"
 			"methods:%s%s<br>\n"
 			"</small></p>\n",
@@ -2231,6 +2418,8 @@ selected:
 		ret = 0;
 		wpa_printf(MSG_INFO, "BSSID: %s", last->bssid);
 		wpa_printf(MSG_INFO, "SSID: %s", last->osu_ssid);
+		if (last->osu_ssid2[0])
+			wpa_printf(MSG_INFO, "SSID2: %s", last->osu_ssid2);
 		wpa_printf(MSG_INFO, "URL: %s", last->url);
 		write_summary(ctx, "Selected OSU provider id=%d BSSID=%s SSID=%s URL=%s",
 			      ret, last->bssid, last->osu_ssid, last->url);
@@ -2272,16 +2461,26 @@ selected:
 		}
 
 		if (connect == 2) {
-			if (last->methods & 0x02)
+			if (last->methods & 0x02) {
+				wpa_printf(MSG_DEBUG,
+					   "Calling cmd_prov from cmd_osu_select");
 				ret = cmd_prov(ctx, last->url);
-			else if (last->methods & 0x01)
+			} else if (last->methods & 0x01) {
+				wpa_printf(MSG_DEBUG,
+					   "Calling cmd_oma_dm_prov from cmd_osu_select");
 				ret = cmd_oma_dm_prov(ctx, last->url);
-			else
+			} else {
+				wpa_printf(MSG_DEBUG,
+					   "No supported OSU provisioning method");
 				ret = -1;
-		} else if (connect)
+			}
+		} else if (connect) {
 			ret = osu_connect(ctx, last->bssid, last->osu_ssid,
+					  last->osu_ssid2,
 					  last->url, last->methods,
-					  no_prod_assoc, last->osu_nai);
+					  no_prod_assoc, last->osu_nai,
+					  last->osu_nai2);
+		}
 	} else
 		ret = -1;
 
@@ -2306,11 +2505,14 @@ static int cmd_signup(struct hs20_osu_client *ctx, int no_prod_assoc,
 		return -1;
 
 	snprintf(fname, sizeof(fname), "%s/osu-info", dir);
-	if (mkdir(fname, S_IRWXU | S_IRWXG) < 0 && errno != EEXIST) {
+	if (mkdir(fname, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) < 0 &&
+	    errno != EEXIST) {
 		wpa_printf(MSG_INFO, "mkdir(%s) failed: %s",
 			   fname, strerror(errno));
 		return -1;
 	}
+
+	android_update_permission(fname, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
 
 	snprintf(buf, sizeof(buf), "SET osu_dir %s", fname);
 	if (wpa_command(ifname, buf) < 0) {
@@ -2347,8 +2549,8 @@ static int cmd_signup(struct hs20_osu_client *ctx, int no_prod_assoc,
 }
 
 
-static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
-			const char *pps_fname, const char *ca_fname)
+static int cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
+		       const char *pps_fname, const char *ca_fname)
 {
 	xml_node_t *pps, *node;
 	char pps_fname_buf[300];
@@ -2375,12 +2577,12 @@ static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
 		} else if (get_wpa_status(ctx->ifname, "provisioning_sp", buf,
 					  sizeof(buf)) < 0) {
 			wpa_printf(MSG_INFO, "Could not get provisioning Home SP FQDN from wpa_supplicant");
-			return;
+			return -1;
 		}
 		os_free(ctx->fqdn);
 		ctx->fqdn = os_strdup(buf);
 		if (ctx->fqdn == NULL)
-			return;
+			return -1;
 		wpa_printf(MSG_INFO, "Home SP FQDN for current credential: %s",
 			   buf);
 		os_snprintf(pps_fname_buf, sizeof(pps_fname_buf),
@@ -2395,14 +2597,14 @@ static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
 	if (!os_file_exists(pps_fname)) {
 		wpa_printf(MSG_INFO, "PPS file '%s' does not exist or is not accessible",
 			   pps_fname);
-		return;
+		return -1;
 	}
 	wpa_printf(MSG_INFO, "Using PPS file: %s", pps_fname);
 
 	if (ca_fname && !os_file_exists(ca_fname)) {
 		wpa_printf(MSG_INFO, "CA file '%s' does not exist or is not accessible",
 			   ca_fname);
-		return;
+		return -1;
 	}
 	wpa_printf(MSG_INFO, "Using server trust root: %s", ca_fname);
 	ctx->ca_fname = ca_fname;
@@ -2410,7 +2612,7 @@ static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
 	pps = node_from_file(ctx->xml, pps_fname);
 	if (pps == NULL) {
 		wpa_printf(MSG_INFO, "Could not read PPS MO");
-		return;
+		return -1;
 	}
 
 	if (!ctx->fqdn) {
@@ -2418,18 +2620,18 @@ static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
 		node = get_child_node(ctx->xml, pps, "HomeSP/FQDN");
 		if (node == NULL) {
 			wpa_printf(MSG_INFO, "No HomeSP/FQDN found from PPS");
-			return;
+			return -1;
 		}
 		tmp = xml_node_get_text(ctx->xml, node);
 		if (tmp == NULL) {
 			wpa_printf(MSG_INFO, "No HomeSP/FQDN text found from PPS");
-			return;
+			return -1;
 		}
 		ctx->fqdn = os_strdup(tmp);
 		xml_node_get_text_free(ctx->xml, tmp);
 		if (!ctx->fqdn) {
 			wpa_printf(MSG_INFO, "No FQDN known");
-			return;
+			return -1;
 		}
 	}
 
@@ -2478,7 +2680,7 @@ static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
 	}
 	if (!address) {
 		wpa_printf(MSG_INFO, "Server URL not known");
-		return;
+		return -1;
 	}
 
 	write_summary(ctx, "Wait for IP address for subscriptiom remediation");
@@ -2501,6 +2703,7 @@ static void cmd_sub_rem(struct hs20_osu_client *ctx, const char *address,
 	xml_node_get_text_free(ctx->xml, cred_username);
 	str_clear_free(cred_password);
 	xml_node_free(ctx->xml, pps);
+	return 0;
 }
 
 
@@ -2524,8 +2727,10 @@ static int cmd_pol_upd(struct hs20_osu_client *ctx, const char *address,
 
 	if (!pps_fname) {
 		char buf[256];
+		int res;
+
 		wpa_printf(MSG_INFO, "Determining PPS file based on Home SP information");
-		if (os_strncmp(address, "fqdn=", 5) == 0) {
+		if (address && os_strncmp(address, "fqdn=", 5) == 0) {
 			wpa_printf(MSG_INFO, "Use requested FQDN from command line");
 			os_snprintf(buf, sizeof(buf), "%s", address + 5);
 			address = NULL;
@@ -2544,8 +2749,13 @@ static int cmd_pol_upd(struct hs20_osu_client *ctx, const char *address,
 			    "SP/%s/pps.xml", ctx->fqdn);
 		pps_fname = pps_fname_buf;
 
-		os_snprintf(ca_fname_buf, sizeof(ca_fname_buf), "SP/%s/ca.pem",
-			    buf);
+		res = os_snprintf(ca_fname_buf, sizeof(ca_fname_buf),
+				  "SP/%s/ca.pem", buf);
+		if (os_snprintf_error(sizeof(ca_fname_buf), res)) {
+			os_free(ctx->fqdn);
+			ctx->fqdn = NULL;
+			return -1;
+		}
 		ca_fname = ca_fname_buf;
 	}
 
@@ -2671,7 +2881,7 @@ static char * get_hostname(const char *url)
 
 	end = os_strchr(pos, '/');
 	end2 = os_strchr(pos, ':');
-	if (end && end2 && end2 < end)
+	if ((end && end2 && end2 < end) || (!end && end2))
 		end = end2;
 	if (end)
 		end--;
@@ -2701,8 +2911,8 @@ static int osu_cert_cb(void *_ctx, struct http_cert *cert)
 	int found;
 	char *host = NULL;
 
-	wpa_printf(MSG_INFO, "osu_cert_cb(osu_cert_validation=%d)",
-		   !ctx->no_osu_cert_validation);
+	wpa_printf(MSG_INFO, "osu_cert_cb(osu_cert_validation=%d, url=%s)",
+		   !ctx->no_osu_cert_validation, ctx->server_url);
 
 	host = get_hostname(ctx->server_url);
 
@@ -2791,17 +3001,21 @@ static int osu_cert_cb(void *_ctx, struct http_cert *cert)
 		char *name = ctx->icon_filename[j];
 		size_t name_len = os_strlen(name);
 
-		wpa_printf(MSG_INFO, "Looking for icon file name '%s' match",
-			   name);
+		wpa_printf(MSG_INFO,
+			   "[%i] Looking for icon file name '%s' match",
+			   j, name);
 		for (i = 0; i < cert->num_logo; i++) {
 			struct http_logo *logo = &cert->logo[i];
 			size_t uri_len = os_strlen(logo->uri);
 			char *pos;
 
-			wpa_printf(MSG_INFO, "Comparing to '%s' uri_len=%d name_len=%d",
-				   logo->uri, (int) uri_len, (int) name_len);
-			if (uri_len < 1 + name_len)
+			wpa_printf(MSG_INFO,
+				   "[%i] Comparing to '%s' uri_len=%d name_len=%d",
+				   i, logo->uri, (int) uri_len, (int) name_len);
+			if (uri_len < 1 + name_len) {
+				wpa_printf(MSG_INFO, "URI Length is too short");
 				continue;
+			}
 			pos = &logo->uri[uri_len - name_len - 1];
 			if (*pos != '/')
 				continue;
@@ -2828,17 +3042,30 @@ static int osu_cert_cb(void *_ctx, struct http_cert *cert)
 		for (i = 0; i < cert->num_logo; i++) {
 			struct http_logo *logo = &cert->logo[i];
 
-			if (logo->hash_len != 32)
+			if (logo->hash_len != 32) {
+				wpa_printf(MSG_INFO,
+					   "[%i][%i] Icon hash length invalid (should be 32): %d",
+					   j, i, (int) logo->hash_len);
 				continue;
+			}
 			if (os_memcmp(logo->hash, ctx->icon_hash[j], 32) == 0) {
 				found = 1;
 				break;
 			}
+
+			wpa_printf(MSG_DEBUG,
+				   "[%u][%u] Icon hash did not match", j, i);
+			wpa_hexdump_ascii(MSG_DEBUG, "logo->hash",
+					  logo->hash, 32);
+			wpa_hexdump_ascii(MSG_DEBUG, "ctx->icon_hash[j]",
+					  ctx->icon_hash[j], 32);
 		}
 
 		if (!found) {
-			wpa_printf(MSG_INFO, "No icon hash match found");
-			write_result(ctx, "No icon hash match found");
+			wpa_printf(MSG_INFO,
+				   "No icon hash match (by hash) found");
+			write_result(ctx,
+				     "No icon hash match (by hash) found");
 			return -1;
 		}
 	}
@@ -2858,24 +3085,17 @@ static int init_ctx(struct hs20_osu_client *ctx)
 		return -1;
 
 	devinfo = node_from_file(ctx->xml, "devinfo.xml");
-	if (!devinfo) {
-		wpa_printf(MSG_ERROR, "devinfo.xml not found");
-		return -1;
-	}
+	if (devinfo) {
+		devid = get_node(ctx->xml, devinfo, "DevId");
+		if (devid) {
+			char *tmp = xml_node_get_text(ctx->xml, devid);
 
-	devid = get_node(ctx->xml, devinfo, "DevId");
-	if (devid) {
-		char *tmp = xml_node_get_text(ctx->xml, devid);
-		if (tmp) {
-			ctx->devid = os_strdup(tmp);
-			xml_node_get_text_free(ctx->xml, tmp);
+			if (tmp) {
+				ctx->devid = os_strdup(tmp);
+				xml_node_get_text_free(ctx->xml, tmp);
+			}
 		}
-	}
-	xml_node_free(ctx->xml, devinfo);
-
-	if (ctx->devid == NULL) {
-		wpa_printf(MSG_ERROR, "Could not fetch DevId from devinfo.xml");
-		return -1;
+		xml_node_free(ctx->xml, devinfo);
 	}
 
 	ctx->http = http_init_ctx(ctx, ctx->xml);
@@ -2936,6 +3156,7 @@ static void usage(void)
 	       "    [-w<wpa_supplicant ctrl_iface dir>] "
 	       "[-r<result file>] [-f<debug file>] \\\n"
 	       "    [-s<summary file>] \\\n"
+	       "    [-x<spp.xsd file name>] \\\n"
 	       "    <command> [arguments..]\n"
 	       "commands:\n"
 	       "- to_tnds <XML MO> <XML MO in TNDS format> [URN]\n"
@@ -2977,7 +3198,7 @@ int main(int argc, char *argv[])
 		return -1;
 
 	for (;;) {
-		c = getopt(argc, argv, "df:hi:KNO:qr:s:S:tw:");
+		c = getopt(argc, argv, "df:hKNo:O:qr:s:S:tw:x:");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -2993,6 +3214,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'N':
 			no_prod_assoc = 1;
+			break;
+		case 'o':
+			ctx.osu_ssid = optarg;
 			break;
 		case 'O':
 			friendly_name = optarg;
@@ -3014,6 +3238,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'w':
 			wpas_ctrl_path = optarg;
+			break;
+		case 'x':
+			spp_xsd_fname = optarg;
 			break;
 		case 'h':
 		default:
@@ -3067,19 +3294,12 @@ int main(int argc, char *argv[])
 			usage();
 			exit(0);
 		}
-		if (argc - optind < 2)
-			wpa_printf(MSG_ERROR, "Server URL missing from command line");
-		else
-			cmd_sub_rem(&ctx, argv[optind + 1],
-				    argc > optind + 2 ? argv[optind + 2] : NULL,
-				    argc > optind + 3 ? argv[optind + 3] :
-				    NULL);
+		ret = cmd_sub_rem(&ctx, argv[optind + 1],
+				  argc > optind + 2 ? argv[optind + 2] : NULL,
+				  argc > optind + 3 ? argv[optind + 3] : NULL);
 	} else if (strcmp(argv[optind], "pol_upd") == 0) {
-		if (argc - optind < 2) {
-			usage();
-			exit(0);
-		}
-		ret = cmd_pol_upd(&ctx, argc > 2 ? argv[optind + 1] : NULL,
+		ret = cmd_pol_upd(&ctx,
+				  argc > optind + 1 ? argv[optind + 1] : NULL,
 				  argc > optind + 2 ? argv[optind + 2] : NULL,
 				  argc > optind + 3 ? argv[optind + 3] : NULL);
 	} else if (strcmp(argv[optind], "prov") == 0) {
@@ -3088,6 +3308,7 @@ int main(int argc, char *argv[])
 			exit(0);
 		}
 		ctx.ca_fname = argv[optind + 2];
+		wpa_printf(MSG_DEBUG, "Calling cmd_prov from main");
 		cmd_prov(&ctx, argv[optind + 1]);
 	} else if (strcmp(argv[optind], "sim_prov") == 0) {
 		if (argc - optind < 2) {

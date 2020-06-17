@@ -105,6 +105,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 {
 	struct wpabuf *msg;
 	u16 config_methods;
+	u8 multi_ap_backhaul_sta = 0;
 
 	if (random_get_bytes(wps->nonce_e, WPS_NONCE_LEN) < 0)
 		return NULL;
@@ -134,6 +135,9 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 				    WPS_CONFIG_PHY_PUSHBUTTON);
 	}
 
+	if (wps->multi_ap_backhaul_sta)
+		multi_ap_backhaul_sta = MULTI_AP_BACKHAUL_STA;
+
 	if (wps_build_version(msg) ||
 	    wps_build_msg_type(msg, WPS_M1) ||
 	    wps_build_uuid_e(msg, wps->uuid_e) ||
@@ -152,7 +156,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 	    wps_build_dev_password_id(msg, wps->dev_pw_id) ||
 	    wps_build_config_error(msg, WPS_CFG_NO_ERROR) ||
 	    wps_build_os_version(&wps->wps->dev, msg) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, multi_ap_backhaul_sta) ||
 	    wps_build_vendor_ext_m1(&wps->wps->dev, msg)) {
 		wpabuf_free(msg);
 		return NULL;
@@ -173,7 +177,14 @@ static struct wpabuf * wps_build_m3(struct wps_data *wps)
 		wpa_printf(MSG_DEBUG, "WPS: No Device Password available");
 		return NULL;
 	}
-	wps_derive_psk(wps, wps->dev_password, wps->dev_password_len);
+	if (wps_derive_psk(wps, wps->dev_password, wps->dev_password_len) < 0)
+		return NULL;
+
+	if (wps->wps->ap && random_pool_ready() != 1) {
+		wpa_printf(MSG_INFO,
+			   "WPS: Not enough entropy in random pool to proceed - do not allow AP PIN to be used");
+		return NULL;
+	}
 
 	msg = wpabuf_alloc(1000);
 	if (msg == NULL)
@@ -183,7 +194,7 @@ static struct wpabuf * wps_build_m3(struct wps_data *wps)
 	    wps_build_msg_type(msg, WPS_M3) ||
 	    wps_build_registrar_nonce(wps, msg) ||
 	    wps_build_e_hash(wps, msg) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
 	    wps_build_authenticator(wps, msg)) {
 		wpabuf_free(msg);
 		return NULL;
@@ -216,13 +227,13 @@ static struct wpabuf * wps_build_m5(struct wps_data *wps)
 	    wps_build_e_snonce1(wps, plain) ||
 	    wps_build_key_wrap_auth(wps, plain) ||
 	    wps_build_encr_settings(wps, msg, plain) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
 	    wps_build_authenticator(wps, msg)) {
-		wpabuf_free(plain);
+		wpabuf_clear_free(plain);
 		wpabuf_free(msg);
 		return NULL;
 	}
-	wpabuf_free(plain);
+	wpabuf_clear_free(plain);
 
 	wps->state = RECV_M6;
 	return msg;
@@ -241,22 +252,48 @@ static int wps_build_cred_ssid(struct wps_data *wps, struct wpabuf *msg)
 
 static int wps_build_cred_auth_type(struct wps_data *wps, struct wpabuf *msg)
 {
-	wpa_printf(MSG_DEBUG, "WPS:  * Authentication Type (0x%x)",
-		   wps->wps->ap_auth_type);
+	u16 auth_type = wps->wps->ap_auth_type;
+
+	/*
+	 * Work around issues with Windows 7 WPS implementation not liking
+	 * multiple Authentication Type bits in M7 AP Settings attribute by
+	 * showing only the most secure option from current configuration.
+	 */
+	if (auth_type & WPS_AUTH_WPA2PSK)
+		auth_type = WPS_AUTH_WPA2PSK;
+	else if (auth_type & WPS_AUTH_WPAPSK)
+		auth_type = WPS_AUTH_WPAPSK;
+	else if (auth_type & WPS_AUTH_OPEN)
+		auth_type = WPS_AUTH_OPEN;
+
+	wpa_printf(MSG_DEBUG, "WPS:  * Authentication Type (0x%x)", auth_type);
 	wpabuf_put_be16(msg, ATTR_AUTH_TYPE);
 	wpabuf_put_be16(msg, 2);
-	wpabuf_put_be16(msg, wps->wps->ap_auth_type);
+	wpabuf_put_be16(msg, auth_type);
 	return 0;
 }
 
 
 static int wps_build_cred_encr_type(struct wps_data *wps, struct wpabuf *msg)
 {
-	wpa_printf(MSG_DEBUG, "WPS:  * Encryption Type (0x%x)",
-		   wps->wps->ap_encr_type);
+	u16 encr_type = wps->wps->ap_encr_type;
+
+	/*
+	 * Work around issues with Windows 7 WPS implementation not liking
+	 * multiple Encryption Type bits in M7 AP Settings attribute by
+	 * showing only the most secure option from current configuration.
+	 */
+	if (wps->wps->ap_auth_type & (WPS_AUTH_WPA2PSK | WPS_AUTH_WPAPSK)) {
+		if (encr_type & WPS_ENCR_AES)
+			encr_type = WPS_ENCR_AES;
+		else if (encr_type & WPS_ENCR_TKIP)
+			encr_type = WPS_ENCR_TKIP;
+	}
+
+	wpa_printf(MSG_DEBUG, "WPS:  * Encryption Type (0x%x)", encr_type);
 	wpabuf_put_be16(msg, ATTR_ENCR_TYPE);
 	wpabuf_put_be16(msg, 2);
-	wpabuf_put_be16(msg, wps->wps->ap_encr_type);
+	wpabuf_put_be16(msg, encr_type);
 	return 0;
 }
 
@@ -268,8 +305,12 @@ static int wps_build_cred_network_key(struct wps_data *wps, struct wpabuf *msg)
 		char hex[65];
 		u8 psk[32];
 		/* Generate a random per-device PSK */
-		if (random_get_bytes(psk, sizeof(psk)) < 0)
+		if (random_pool_ready() != 1 ||
+		    random_get_bytes(psk, sizeof(psk)) < 0) {
+			wpa_printf(MSG_INFO,
+				   "WPS: Could not generate random PSK");
 			return -1;
+		}
 		wpa_hexdump_key(MSG_DEBUG, "WPS: Generated per-device PSK",
 				psk, sizeof(psk));
 		wpa_printf(MSG_DEBUG, "WPS:  * Network Key (len=%u)",
@@ -356,13 +397,13 @@ static struct wpabuf * wps_build_m7(struct wps_data *wps)
 	    (wps->wps->ap && wps_build_ap_settings(wps, plain)) ||
 	    wps_build_key_wrap_auth(wps, plain) ||
 	    wps_build_encr_settings(wps, msg, plain) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
 	    wps_build_authenticator(wps, msg)) {
-		wpabuf_free(plain);
+		wpabuf_clear_free(plain);
 		wpabuf_free(msg);
 		return NULL;
 	}
-	wpabuf_free(plain);
+	wpabuf_clear_free(plain);
 
 	if (wps->wps->ap && wps->wps->registrar) {
 		/*
@@ -393,7 +434,7 @@ static struct wpabuf * wps_build_wsc_done(struct wps_data *wps)
 	    wps_build_msg_type(msg, WPS_WSC_DONE) ||
 	    wps_build_enrollee_nonce(wps, msg) ||
 	    wps_build_registrar_nonce(wps, msg) ||
-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
+	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
 		wpabuf_free(msg);
 		return NULL;
 	}
@@ -723,7 +764,7 @@ static int wps_process_cred_e(struct wps_data *wps, const u8 *cred,
 
 
 static int wps_process_creds(struct wps_data *wps, const u8 *cred[],
-			     size_t cred_len[], size_t num_cred, int wps2)
+			     u16 cred_len[], unsigned int num_cred, int wps2)
 {
 	size_t i;
 	int ok = 0;
@@ -763,6 +804,7 @@ static int wps_process_ap_settings_e(struct wps_data *wps,
 				     struct wpabuf *attrs, int wps2)
 {
 	struct wps_credential cred;
+	int ret = 0;
 
 	if (!wps->wps->ap)
 		return 0;
@@ -841,10 +883,10 @@ static int wps_process_ap_settings_e(struct wps_data *wps,
 	if (wps->wps->cred_cb) {
 		cred.cred_attr = wpabuf_head(attrs);
 		cred.cred_attr_len = wpabuf_len(attrs);
-		wps->wps->cred_cb(wps->wps->cb_ctx, &cred);
+		ret = wps->wps->cred_cb(wps->wps->cb_ctx, &cred);
 	}
 
-	return 0;
+	return ret;
 }
 
 
@@ -970,11 +1012,11 @@ static enum wps_process_res wps_process_m2(struct wps_data *wps,
 					      eattr.key_wrap_auth) ||
 		    wps_process_creds(wps, eattr.cred, eattr.cred_len,
 				      eattr.num_cred, attr->version2 != NULL)) {
-			wpabuf_free(decrypted);
+			wpabuf_clear_free(decrypted);
 			wps->state = SEND_WSC_NACK;
 			return WPS_CONTINUE;
 		}
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 
 		wps->state = WPS_MSG_DONE;
 		return WPS_CONTINUE;
@@ -1075,7 +1117,7 @@ static enum wps_process_res wps_process_m4(struct wps_data *wps,
 	}
 
 	if (wps_validate_m4_encr(decrypted, attr->version2 != NULL) < 0) {
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
@@ -1085,11 +1127,11 @@ static enum wps_process_res wps_process_m4(struct wps_data *wps,
 	if (wps_parse_msg(decrypted, &eattr) < 0 ||
 	    wps_process_key_wrap_auth(wps, decrypted, eattr.key_wrap_auth) ||
 	    wps_process_r_snonce1(wps, eattr.r_snonce1)) {
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
-	wpabuf_free(decrypted);
+	wpabuf_clear_free(decrypted);
 
 	wps->state = SEND_M5;
 	return WPS_CONTINUE;
@@ -1128,7 +1170,7 @@ static enum wps_process_res wps_process_m6(struct wps_data *wps,
 	}
 
 	if (wps_validate_m6_encr(decrypted, attr->version2 != NULL) < 0) {
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
@@ -1138,11 +1180,11 @@ static enum wps_process_res wps_process_m6(struct wps_data *wps,
 	if (wps_parse_msg(decrypted, &eattr) < 0 ||
 	    wps_process_key_wrap_auth(wps, decrypted, eattr.key_wrap_auth) ||
 	    wps_process_r_snonce2(wps, eattr.r_snonce2)) {
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
-	wpabuf_free(decrypted);
+	wpabuf_clear_free(decrypted);
 
 	if (wps->wps->ap)
 		wps->wps->event_cb(wps->wps->cb_ctx, WPS_EV_AP_PIN_SUCCESS,
@@ -1199,7 +1241,7 @@ static enum wps_process_res wps_process_m8(struct wps_data *wps,
 
 	if (wps_validate_m8_encr(decrypted, wps->wps->ap,
 				 attr->version2 != NULL) < 0) {
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
@@ -1212,11 +1254,11 @@ static enum wps_process_res wps_process_m8(struct wps_data *wps,
 			      eattr.num_cred, attr->version2 != NULL) ||
 	    wps_process_ap_settings_e(wps, &eattr, decrypted,
 				      attr->version2 != NULL)) {
-		wpabuf_free(decrypted);
+		wpabuf_clear_free(decrypted);
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
-	wpabuf_free(decrypted);
+	wpabuf_clear_free(decrypted);
 
 	wps->state = WPS_MSG_DONE;
 	return WPS_CONTINUE;

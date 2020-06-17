@@ -111,6 +111,12 @@ static xml_node_t * oma_dm_build_hdr(struct hs20_osu_client *ctx,
 	xml_node_t *syncml, *synchdr;
 	xml_namespace_t *ns;
 
+	if (!ctx->devid) {
+		wpa_printf(MSG_ERROR,
+			   "DevId from devinfo.xml is not available - cannot use OMA DM");
+		return NULL;
+	}
+
 	syncml = xml_node_create_root(ctx->xml, "SYNCML:SYNCML1.2", NULL, &ns,
 				      "SyncML");
 
@@ -772,6 +778,11 @@ static int oma_dm_replace(struct hs20_osu_client *ctx, xml_node_t *replace,
 	if (node) {
 		char *type;
 		type = xml_node_get_text(ctx->xml, node);
+		if (type == NULL) {
+			wpa_printf(MSG_INFO, "Could not find type text");
+			os_free(locuri);
+			return DM_RESP_BAD_REQUEST;
+		}
 		use_tnds = node &&
 			os_strstr(type, "application/vnd.syncml.dmtnds+xml");
 	}

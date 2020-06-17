@@ -8,11 +8,16 @@ ifndef LDO
 LDO=$(CC)
 endif
 
+ifeq ($(QUIET), 1)
+Q=@
+E=true
+else
 Q=@
 E=echo
 ifeq ($(V), 1)
 Q=
 E=true
+endif
 endif
 
 ifndef CFLAGS
@@ -67,9 +72,16 @@ OBJS += ../../src/crypto/sha256-internal.o
 
 CFLAGS += $(shell xml2-config --cflags)
 LIBS += $(shell xml2-config --libs)
+
+# Allow static/custom linking of libcurl.
+ifdef CUST_CURL_LINKAGE
+LIBS += ${CUST_CURL_LINKAGE}
+else
 LIBS += -lcurl
+endif
 
 CFLAGS += -DEAP_TLS_OPENSSL
+OBJS += ../../src/crypto/tls_openssl_ocsp.o
 LIBS += -lssl -lcrypto
 
 hs20-osu-client: $(OBJS)

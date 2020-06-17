@@ -103,10 +103,10 @@ static void * eap_wsc_init(struct eap_sm *sm)
 	data->registrar = registrar;
 
 	os_memset(&cfg, 0, sizeof(cfg));
-	cfg.wps = sm->wps;
+	cfg.wps = sm->cfg->wps;
 	cfg.registrar = registrar;
 	if (registrar) {
-		if (sm->wps == NULL || sm->wps->registrar == NULL) {
+		if (!sm->cfg->wps || !sm->cfg->wps->registrar) {
 			wpa_printf(MSG_INFO, "EAP-WSC: WPS Registrar not "
 				   "initialized");
 			os_free(data);
@@ -138,14 +138,14 @@ static void * eap_wsc_init(struct eap_sm *sm)
 		cfg.p2p_dev_addr = p2p_get_go_dev_addr(sm->assoc_p2p_ie);
 	}
 #endif /* CONFIG_P2P */
-	cfg.pbc_in_m1 = sm->pbc_in_m1;
+	cfg.pbc_in_m1 = sm->cfg->pbc_in_m1;
 	data->wps = wps_init(&cfg);
 	if (data->wps == NULL) {
 		os_free(data);
 		return NULL;
 	}
-	data->fragment_size = sm->fragment_size > 0 ? sm->fragment_size :
-		WSC_FRAGMENT_SIZE;
+	data->fragment_size = sm->cfg->fragment_size > 0 ?
+		sm->cfg->fragment_size : WSC_FRAGMENT_SIZE;
 
 	return data;
 }
@@ -257,7 +257,7 @@ static struct wpabuf * eap_wsc_buildReq(struct eap_sm *sm, void *priv, u8 id)
 			}
 			data->out_used = 0;
 		}
-		/* pass through */
+		/* fall through */
 	case WAIT_FRAG_ACK:
 		return eap_wsc_build_msg(data, id);
 	case FRAG_ACK:
@@ -380,7 +380,7 @@ static void eap_wsc_process(struct eap_sm *sm, void *priv,
 		message_length = WPA_GET_BE16(pos);
 		pos += 2;
 
-		if (message_length < end - pos) {
+		if (message_length < end - pos || message_length > 50000) {
 			wpa_printf(MSG_DEBUG, "EAP-WSC: Invalid Message "
 				   "Length");
 			return;
@@ -488,7 +488,6 @@ static int eap_wsc_getTimeout(struct eap_sm *sm, void *priv)
 int eap_server_wsc_register(void)
 {
 	struct eap_method *eap;
-	int ret;
 
 	eap = eap_server_method_alloc(EAP_SERVER_METHOD_INTERFACE_VERSION,
 				      EAP_VENDOR_WFA, EAP_VENDOR_TYPE_WSC,
@@ -505,8 +504,5 @@ int eap_server_wsc_register(void)
 	eap->isSuccess = eap_wsc_isSuccess;
 	eap->getTimeout = eap_wsc_getTimeout;
 
-	ret = eap_server_method_register(eap);
-	if (ret)
-		eap_server_method_free(eap);
-	return ret;
+	return eap_server_method_register(eap);
 }

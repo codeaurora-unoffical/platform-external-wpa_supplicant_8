@@ -1,6 +1,6 @@
 /*
  * wpa_supplicant - WPA/RSN IE and KDE processing
- * Copyright (c) 2003-2008, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2003-2018, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -29,6 +29,9 @@ int wpa_parse_wpa_ie(const u8 *wpa_ie, size_t wpa_ie_len,
 		     struct wpa_ie_data *data)
 {
 	if (wpa_ie_len >= 1 && wpa_ie[0] == WLAN_EID_RSN)
+		return wpa_parse_wpa_ie_rsn(wpa_ie, wpa_ie_len, data);
+	if (wpa_ie_len >= 6 && wpa_ie[0] == WLAN_EID_VENDOR_SPECIFIC &&
+	    wpa_ie[1] >= 4 && WPA_GET_BE32(&wpa_ie[2]) == OSEN_IE_VENDOR_TYPE)
 		return wpa_parse_wpa_ie_rsn(wpa_ie, wpa_ie_len, data);
 	else
 		return wpa_parse_wpa_ie_wpa(wpa_ie, wpa_ie_len, data);
@@ -158,6 +161,10 @@ static int wpa_gen_wpa_ie_rsn(u8 *rsn_ie, size_t rsn_ie_len,
 #ifdef CONFIG_IEEE80211R
 	} else if (key_mgmt == WPA_KEY_MGMT_FT_IEEE8021X) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_802_1X);
+#ifdef CONFIG_SHA384
+	} else if (key_mgmt == WPA_KEY_MGMT_FT_IEEE8021X_SHA384) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_802_1X_SHA384);
+#endif /* CONFIG_SHA384 */
 	} else if (key_mgmt == WPA_KEY_MGMT_FT_PSK) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_PSK);
 #endif /* CONFIG_IEEE80211R */
@@ -173,6 +180,34 @@ static int wpa_gen_wpa_ie_rsn(u8 *rsn_ie, size_t rsn_ie_len,
 	} else if (key_mgmt == WPA_KEY_MGMT_FT_SAE) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_SAE);
 #endif /* CONFIG_SAE */
+	} else if (key_mgmt == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_802_1X_SUITE_B_192);
+	} else if (key_mgmt == WPA_KEY_MGMT_IEEE8021X_SUITE_B) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_802_1X_SUITE_B);
+#ifdef CONFIG_FILS
+	} else if (key_mgmt & WPA_KEY_MGMT_FILS_SHA256) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FILS_SHA256);
+	} else if (key_mgmt & WPA_KEY_MGMT_FILS_SHA384) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FILS_SHA384);
+#ifdef CONFIG_IEEE80211R
+	} else if (key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA256) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_FILS_SHA256);
+	} else if (key_mgmt & WPA_KEY_MGMT_FT_FILS_SHA384) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_FILS_SHA384);
+#endif /* CONFIG_IEEE80211R */
+#endif /* CONFIG_FILS */
+#ifdef CONFIG_OWE
+	} else if (key_mgmt & WPA_KEY_MGMT_OWE) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_OWE);
+#endif /* CONFIG_OWE */
+#ifdef CONFIG_DPP
+	} else if (key_mgmt & WPA_KEY_MGMT_DPP) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_DPP);
+#endif /* CONFIG_DPP */
+#ifdef CONFIG_HS20
+	} else if (key_mgmt & WPA_KEY_MGMT_OSEN) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_OSEN);
+#endif /* CONFIG_HS20 */
 	} else {
 		wpa_printf(MSG_WARNING, "Invalid key management type (%d).",
 			   key_mgmt);
@@ -188,6 +223,8 @@ static int wpa_gen_wpa_ie_rsn(u8 *rsn_ie, size_t rsn_ie_len,
 	if (sm->mfp == 2)
 		capab |= WPA_CAPABILITY_MFPR;
 #endif /* CONFIG_IEEE80211W */
+	if (sm->ocv)
+		capab |= WPA_CAPABILITY_OCVC;
 	WPA_PUT_LE16(pos, capab);
 	pos += 2;
 
@@ -371,7 +408,7 @@ static int wpa_parse_generic(const u8 *pos, const u8 *end,
 		return 0;
 	}
 
-	if (pos + 1 + RSN_SELECTOR_LEN < end &&
+	if (1 + RSN_SELECTOR_LEN < end - pos &&
 	    pos[1] >= RSN_SELECTOR_LEN + PMKID_LEN &&
 	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_PMKID) {
 		ie->pmkid = pos + 2 + RSN_SELECTOR_LEN;
@@ -397,44 +434,6 @@ static int wpa_parse_generic(const u8 *pos, const u8 *end,
 			    pos, pos[1] + 2);
 		return 0;
 	}
-
-#ifdef CONFIG_PEERKEY
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_SMK) {
-		ie->smk = pos + 2 + RSN_SELECTOR_LEN;
-		ie->smk_len = pos[1] - RSN_SELECTOR_LEN;
-		wpa_hexdump_key(MSG_DEBUG, "WPA: SMK in EAPOL-Key",
-				pos, pos[1] + 2);
-		return 0;
-	}
-
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_NONCE) {
-		ie->nonce = pos + 2 + RSN_SELECTOR_LEN;
-		ie->nonce_len = pos[1] - RSN_SELECTOR_LEN;
-		wpa_hexdump(MSG_DEBUG, "WPA: Nonce in EAPOL-Key",
-			    pos, pos[1] + 2);
-		return 0;
-	}
-
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_LIFETIME) {
-		ie->lifetime = pos + 2 + RSN_SELECTOR_LEN;
-		ie->lifetime_len = pos[1] - RSN_SELECTOR_LEN;
-		wpa_hexdump(MSG_DEBUG, "WPA: Lifetime in EAPOL-Key",
-			    pos, pos[1] + 2);
-		return 0;
-	}
-
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_ERROR) {
-		ie->error = pos + 2 + RSN_SELECTOR_LEN;
-		ie->error_len = pos[1] - RSN_SELECTOR_LEN;
-		wpa_hexdump(MSG_DEBUG, "WPA: Error in EAPOL-Key",
-			    pos, pos[1] + 2);
-		return 0;
-	}
-#endif /* CONFIG_PEERKEY */
 
 #ifdef CONFIG_IEEE80211W
 	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
@@ -466,6 +465,17 @@ static int wpa_parse_generic(const u8 *pos, const u8 *end,
 	}
 #endif /* CONFIG_P2P */
 
+#ifdef CONFIG_OCV
+	if (pos[1] >= RSN_SELECTOR_LEN + 1 &&
+	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_OCI) {
+		ie->oci = pos + 2 + RSN_SELECTOR_LEN;
+		ie->oci_len = pos[1] - RSN_SELECTOR_LEN;
+		wpa_hexdump(MSG_DEBUG, "WPA: OCI KDE in EAPOL-Key",
+			    pos, pos[1] + 2);
+		return 0;
+	}
+#endif /* CONFIG_OCV */
+
 	return 0;
 }
 
@@ -484,13 +494,13 @@ int wpa_supplicant_parse_ies(const u8 *buf, size_t len,
 	int ret = 0;
 
 	os_memset(ie, 0, sizeof(*ie));
-	for (pos = buf, end = pos + len; pos + 1 < end; pos += 2 + pos[1]) {
+	for (pos = buf, end = pos + len; end - pos > 1; pos += 2 + pos[1]) {
 		if (pos[0] == 0xdd &&
 		    ((pos == buf + len - 1) || pos[1] == 0)) {
 			/* Ignore padding */
 			break;
 		}
-		if (pos + 2 + pos[1] > end) {
+		if (2 + pos[1] > end - pos) {
 			wpa_printf(MSG_DEBUG, "WPA: EAPOL-Key Key Data "
 				   "underflow (ie=%d len=%d pos=%d)",
 				   pos[0], pos[1], (int) (pos - buf));
@@ -504,12 +514,14 @@ int wpa_supplicant_parse_ies(const u8 *buf, size_t len,
 			ie->rsn_ie_len = pos[1] + 2;
 			wpa_hexdump(MSG_DEBUG, "WPA: RSN IE in EAPOL-Key",
 				    ie->rsn_ie, ie->rsn_ie_len);
-		} else if (*pos == WLAN_EID_MOBILITY_DOMAIN) {
+		} else if (*pos == WLAN_EID_MOBILITY_DOMAIN &&
+			   pos[1] >= sizeof(struct rsn_mdie)) {
 			ie->mdie = pos;
 			ie->mdie_len = pos[1] + 2;
 			wpa_hexdump(MSG_DEBUG, "WPA: MDIE in EAPOL-Key",
 				    ie->mdie, ie->mdie_len);
-		} else if (*pos == WLAN_EID_FAST_BSS_TRANSITION) {
+		} else if (*pos == WLAN_EID_FAST_BSS_TRANSITION &&
+			   pos[1] >= sizeof(struct rsn_ftie)) {
 			ie->ftie = pos;
 			ie->ftie_len = pos[1] + 2;
 			wpa_hexdump(MSG_DEBUG, "WPA: FTIE in EAPOL-Key",
@@ -544,15 +556,16 @@ int wpa_supplicant_parse_ies(const u8 *buf, size_t len,
 		} else if (*pos == WLAN_EID_EXT_SUPP_RATES) {
 			ie->ext_supp_rates = pos;
 			ie->ext_supp_rates_len = pos[1] + 2;
-		} else if (*pos == WLAN_EID_HT_CAP) {
+		} else if (*pos == WLAN_EID_HT_CAP &&
+			   pos[1] >= sizeof(struct ieee80211_ht_capabilities)) {
 			ie->ht_capabilities = pos + 2;
-			ie->ht_capabilities_len = pos[1];
 		} else if (*pos == WLAN_EID_VHT_AID) {
 			if (pos[1] >= 2)
 				ie->aid = WPA_GET_LE16(pos + 2) & 0x3fff;
-		} else if (*pos == WLAN_EID_VHT_CAP) {
+		} else if (*pos == WLAN_EID_VHT_CAP &&
+			   pos[1] >= sizeof(struct ieee80211_vht_capabilities))
+		{
 			ie->vht_capabilities = pos + 2;
-			ie->vht_capabilities_len = pos[1];
 		} else if (*pos == WLAN_EID_QOS && pos[1] >= 1) {
 			ie->qosinfo = pos[2];
 		} else if (*pos == WLAN_EID_SUPPORTED_CHANNELS) {
