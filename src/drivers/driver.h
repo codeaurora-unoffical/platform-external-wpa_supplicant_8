@@ -1838,7 +1838,7 @@ struct wpa_driver_capa {
 #define WPA_DRIVER_FLAGS_FTM_RESPONDER		0x0100000000000000ULL
 /** Driver support 4-way handshake offload for WPA-Personal */
 #define WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK	0x0200000000000000ULL
-/** Driver supports a separate control port for EAPOL frames */
+/** Driver supports a separate control port TX for EAPOL frames */
 #define WPA_DRIVER_FLAGS_CONTROL_PORT		0x0400000000000000ULL
 /** Driver supports VLAN offload */
 #define WPA_DRIVER_FLAGS_VLAN_OFFLOAD		0x0800000000000000ULL
@@ -1851,6 +1851,10 @@ struct wpa_driver_capa {
 /** Driver supports Extended Key ID */
 #define WPA_DRIVER_FLAGS_EXTENDED_KEY_ID	0x8000000000000000ULL
 	u64 flags;
+
+/** Driver supports a separate control port RX for EAPOL frames */
+#define WPA_DRIVER_FLAGS2_CONTROL_PORT_RX	0x0000000000000001ULL
+	u64 flags2;
 
 #define FULL_AP_CLIENT_STATE_SUPP(drv_flags) \
 	(drv_flags & WPA_DRIVER_FLAGS_FULL_AP_CLIENT_STATE)
@@ -2302,9 +2306,9 @@ struct wmm_params {
 
 #ifdef CONFIG_MACSEC
 struct macsec_init_params {
-	Boolean always_include_sci;
-	Boolean use_es;
-	Boolean use_scb;
+	bool always_include_sci;
+	bool use_es;
+	bool use_scb;
 };
 #endif /* CONFIG_MACSEC */
 
@@ -3999,30 +4003,30 @@ struct wpa_driver_ops {
 	/**
 	 * enable_protect_frames - Set protect frames status
 	 * @priv: Private driver interface data
-	 * @enabled: TRUE = protect frames enabled
-	 *           FALSE = protect frames disabled
+	 * @enabled: true = protect frames enabled
+	 *           false = protect frames disabled
 	 * Returns: 0 on success, -1 on failure (or if not supported)
 	 */
-	int (*enable_protect_frames)(void *priv, Boolean enabled);
+	int (*enable_protect_frames)(void *priv, bool enabled);
 
 	/**
 	 * enable_encrypt - Set encryption status
 	 * @priv: Private driver interface data
-	 * @enabled: TRUE = encrypt outgoing traffic
-	 *           FALSE = integrity-only protection on outgoing traffic
+	 * @enabled: true = encrypt outgoing traffic
+	 *           false = integrity-only protection on outgoing traffic
 	 * Returns: 0 on success, -1 on failure (or if not supported)
 	 */
-	int (*enable_encrypt)(void *priv, Boolean enabled);
+	int (*enable_encrypt)(void *priv, bool enabled);
 
 	/**
 	 * set_replay_protect - Set replay protect status and window size
 	 * @priv: Private driver interface data
-	 * @enabled: TRUE = replay protect enabled
-	 *           FALSE = replay protect disabled
+	 * @enabled: true = replay protect enabled
+	 *           false = replay protect disabled
 	 * @window: replay window size, valid only when replay protect enabled
 	 * Returns: 0 on success, -1 on failure (or if not supported)
 	 */
-	int (*set_replay_protect)(void *priv, Boolean enabled, u32 window);
+	int (*set_replay_protect)(void *priv, bool enabled, u32 window);
 
 	/**
 	 * set_current_cipher_suite - Set current cipher suite
@@ -4035,11 +4039,11 @@ struct wpa_driver_ops {
 	/**
 	 * enable_controlled_port - Set controlled port status
 	 * @priv: Private driver interface data
-	 * @enabled: TRUE = controlled port enabled
-	 *           FALSE = controlled port disabled
+	 * @enabled: true = controlled port enabled
+	 *           false = controlled port disabled
 	 * Returns: 0 on success, -1 on failure (or if not supported)
 	 */
-	int (*enable_controlled_port)(void *priv, Boolean enabled);
+	int (*enable_controlled_port)(void *priv, bool enabled);
 
 	/**
 	 * get_receive_lowest_pn - Get receive lowest pn
@@ -4420,6 +4424,17 @@ struct wpa_driver_ops {
 	 */
 	int (*update_dh_ie)(void *priv, const u8 *peer_mac, u16 reason_code,
 			    const u8 *ie, size_t ie_len);
+
+	/**
+	 * dpp_listen - Notify driver about start/stop of DPP listen
+	 * @priv: Private driver interface data
+	 * @enable: Whether listen state is enabled (or disabled)
+	 * Returns: 0 on success, -1 on failure
+	 *
+	 * This optional callback can be used to update RX frame filtering to
+	 * explicitly allow reception of broadcast Public Action frames.
+	 */
+	int (*dpp_listen)(void *priv, bool enable);
 };
 
 /**
@@ -5921,6 +5936,7 @@ wpa_get_wowlan_triggers(const char *wowlan_triggers,
 			const struct wpa_driver_capa *capa);
 /* Convert driver flag to string */
 const char * driver_flag_to_string(u64 flag);
+const char * driver_flag2_to_string(u64 flag2);
 
 /* NULL terminated array of linked in driver wrappers */
 extern const struct wpa_driver_ops *const wpa_drivers[];

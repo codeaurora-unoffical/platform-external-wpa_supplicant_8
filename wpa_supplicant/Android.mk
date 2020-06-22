@@ -19,9 +19,8 @@ endif
 include $(LOCAL_PATH)/android.config
 
 ifeq ($(call is-board-platform-in-list,msm8998),true)
-  $(warning "Disabling SAE, OWE and DPP support in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
+  $(warning "Disabling SAE and OWE in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
   CONFIG_OWE=n
-  CONFIG_DPP=n
   CONFIG_SAE=n
   # Enabling mesh support enables SAE, so make sure mesh supoort is disabled
   CONFIG_MESH=n
@@ -282,6 +281,7 @@ L_CFLAGS += -DCONFIG_SAE
 OBJS += src/common/sae.c
 NEED_ECC=y
 NEED_DH_GROUPS=y
+NEED_HMAC_SHA256_KDF=y
 NEED_DRAGONFLY=y
 ifdef CONFIG_TESTING_OPTIONS
 NEED_DH_GROUPS_ALL=y
@@ -433,6 +433,10 @@ endif
 
 ifdef CONFIG_WEP
 L_CFLAGS += -DCONFIG_WEP
+endif
+
+ifdef CONFIG_NO_TKIP
+L_CFLAGS += -DCONFIG_NO_TKIP
 endif
 
 
@@ -1729,19 +1733,6 @@ LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_SRC_FILES := $(OBJS_c)
 LOCAL_C_INCLUDES := $(INCLUDES)
 include $(BUILD_EXECUTABLE)
-
-#####################################
-
-include $(CLEAR_VARS)
-
-LOCAL_SRC_FILES := move_wifi_data.sh
-LOCAL_MODULE_CLASS := EXECUTABLES
-LOCAL_MODULE := $(LOCAL_SRC_FILES)
-LOCAL_MODULE_TAGS := optional
-LOCAL_MODULE_OWNER := qti
-LOCAL_MODULE := move_wifi_data.sh
-
-include $(BUILD_PREBUILT)
 
 ########################
 include $(CLEAR_VARS)

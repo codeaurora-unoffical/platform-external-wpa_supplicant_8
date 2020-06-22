@@ -174,6 +174,7 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 			  wpabuf_len(conf->igtk_rsc_override));
 		wconf->igtk_rsc_override_set = 1;
 	}
+	wconf->ft_rsnxe_used = conf->ft_rsnxe_used;
 #endif /* CONFIG_TESTING_OPTIONS */
 #ifdef CONFIG_P2P
 	os_memcpy(wconf->ip_addr_go, conf->ip_addr_go, 4);
@@ -276,16 +277,15 @@ static void hostapd_wpa_auth_set_eapol(void *ctx, const u8 *addr,
 		break;
 	case WPA_EAPOL_keyRun:
 		if (sta->eapol_sm)
-			sta->eapol_sm->keyRun = value ? TRUE : FALSE;
+			sta->eapol_sm->keyRun = value;
 		break;
 	case WPA_EAPOL_keyAvailable:
 		if (sta->eapol_sm)
-			sta->eapol_sm->eap_if->eapKeyAvailable =
-				value ? TRUE : FALSE;
+			sta->eapol_sm->eap_if->eapKeyAvailable = value;
 		break;
 	case WPA_EAPOL_keyDone:
 		if (sta->eapol_sm)
-			sta->eapol_sm->keyDone = value ? TRUE : FALSE;
+			sta->eapol_sm->keyDone = value;
 		break;
 	case WPA_EAPOL_inc_EapolFramesTx:
 		if (sta->eapol_sm)
@@ -1038,6 +1038,34 @@ hostapd_wpa_auth_add_sta(void *ctx, const u8 *sta_addr)
 }
 
 
+static int hostapd_wpa_auth_add_sta_ft(void *ctx, const u8 *sta_addr)
+{
+	struct hostapd_data *hapd = ctx;
+	struct sta_info *sta;
+
+	sta = ap_get_sta(hapd, sta_addr);
+	if (!sta)
+		return -1;
+
+	if (FULL_AP_CLIENT_STATE_SUPP(hapd->iface->drv_flags) &&
+	    (sta->flags & WLAN_STA_MFP) && ap_sta_is_authorized(sta) &&
+	    !(hapd->conf->mesh & MESH_ENABLED) && !(sta->added_unassoc)) {
+		/* We could not do this in handle_auth() since there was a
+		 * PMF-enabled association for the STA and the new
+		 * authentication attempt was not yet fully processed. Now that
+		 * we are ready to configure the TK to the driver,
+		 * authentication has succeeded and we can clean up the driver
+		 * STA entry to avoid issues with any maintained state from the
+		 * previous association. */
+		wpa_printf(MSG_DEBUG,
+			   "FT: Remove and re-add driver STA entry after successful FT authentication");
+		return ap_sta_re_add(hapd, sta);
+	}
+
+	return 0;
+}
+
+
 static int hostapd_wpa_auth_set_vlan(void *ctx, const u8 *sta_addr,
 				     struct vlan_description *vlan)
 {
@@ -1399,6 +1427,7 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 #ifdef CONFIG_IEEE80211R_AP
 		.send_ft_action = hostapd_wpa_auth_send_ft_action,
 		.add_sta = hostapd_wpa_auth_add_sta,
+		.add_sta_ft = hostapd_wpa_auth_add_sta_ft,
 		.add_tspec = hostapd_wpa_auth_add_tspec,
 		.set_vlan = hostapd_wpa_auth_set_vlan,
 		.get_vlan = hostapd_wpa_auth_get_vlan,

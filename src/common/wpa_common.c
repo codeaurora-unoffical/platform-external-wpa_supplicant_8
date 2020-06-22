@@ -2319,11 +2319,18 @@ enum wpa_alg wpa_cipher_to_alg(int cipher)
 
 int wpa_cipher_valid_pairwise(int cipher)
 {
+#ifdef CONFIG_NO_TKIP
+	return cipher == WPA_CIPHER_CCMP_256 ||
+		cipher == WPA_CIPHER_GCMP_256 ||
+		cipher == WPA_CIPHER_CCMP ||
+		cipher == WPA_CIPHER_GCMP;
+#else /* CONFIG_NO_TKIP */
 	return cipher == WPA_CIPHER_CCMP_256 ||
 		cipher == WPA_CIPHER_GCMP_256 ||
 		cipher == WPA_CIPHER_CCMP ||
 		cipher == WPA_CIPHER_GCMP ||
 		cipher == WPA_CIPHER_TKIP;
+#endif /* CONFIG_NO_TKIP */
 }
 
 
@@ -2476,8 +2483,10 @@ int wpa_parse_cipher(const char *value)
 			val |= WPA_CIPHER_CCMP;
 		else if (os_strcmp(start, "GCMP") == 0)
 			val |= WPA_CIPHER_GCMP;
+#ifndef CONFIG_NO_TKIP
 		else if (os_strcmp(start, "TKIP") == 0)
 			val |= WPA_CIPHER_TKIP;
+#endif /* CONFIG_NO_TKIP */
 #ifdef CONFIG_WEP
 		else if (os_strcmp(start, "WEP104") == 0)
 			val |= WPA_CIPHER_WEP104;
@@ -2646,10 +2655,9 @@ int fils_domain_name_hash(const char *domain, u8 *hash)
  * @pos: Pointer to the IE header
  * @end: Pointer to the end of the Key Data buffer
  * @ie: Pointer to parsed IE data
- * Returns: 0 on success, 1 if end mark is found, -1 on failure
  */
-static int wpa_parse_vendor_specific(const u8 *pos, const u8 *end,
-				     struct wpa_eapol_ie_parse *ie)
+static void wpa_parse_vendor_specific(const u8 *pos, const u8 *end,
+				      struct wpa_eapol_ie_parse *ie)
 {
 	unsigned int oui;
 
@@ -2657,7 +2665,7 @@ static int wpa_parse_vendor_specific(const u8 *pos, const u8 *end,
 		wpa_printf(MSG_MSGDUMP,
 			   "Too short vendor specific IE ignored (len=%u)",
 			   pos[1]);
-		return 1;
+		return;
 	}
 
 	oui = WPA_GET_BE24(&pos[2]);
@@ -2674,7 +2682,6 @@ static int wpa_parse_vendor_specific(const u8 *pos, const u8 *end,
 				    ie->wmm, ie->wmm_len);
 		}
 	}
-	return 0;
 }
 
 
@@ -2682,7 +2689,7 @@ static int wpa_parse_vendor_specific(const u8 *pos, const u8 *end,
  * wpa_parse_generic - Parse EAPOL-Key Key Data Generic IEs
  * @pos: Pointer to the IE header
  * @ie: Pointer to parsed IE data
- * Returns: 0 on success, 1 if end mark is found, -1 on failure
+ * Returns: 0 on success, 1 if end mark is found, 2 if KDE is not recognized
  */
 static int wpa_parse_generic(const u8 *pos, struct wpa_eapol_ie_parse *ie)
 {
@@ -2794,7 +2801,7 @@ static int wpa_parse_generic(const u8 *pos, struct wpa_eapol_ie_parse *ie)
 		return 0;
 	}
 
-	return 0;
+	return 2;
 }
 
 
@@ -2903,20 +2910,18 @@ int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie)
 			}
 		} else if (*pos == WLAN_EID_VENDOR_SPECIFIC) {
 			ret = wpa_parse_generic(pos, ie);
-			if (ret < 0)
-				break;
-			if (ret > 0) {
+			if (ret == 1) {
+				/* end mark found */
 				ret = 0;
 				break;
 			}
 
-			ret = wpa_parse_vendor_specific(pos, end, ie);
-			if (ret < 0)
-				break;
-			if (ret > 0) {
-				ret = 0;
-				break;
+			if (ret == 2) {
+				/* not a known KDE */
+				wpa_parse_vendor_specific(pos, end, ie);
 			}
+
+			ret = 0;
 		} else {
 			wpa_hexdump(MSG_DEBUG,
 				    "WPA: Unrecognized EAPOL-Key Key Data IE",

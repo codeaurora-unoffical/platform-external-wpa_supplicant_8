@@ -320,14 +320,14 @@ void wpa_supplicant_initiate_eapol(struct wpa_supplicant *wpa_s)
 		 * per-BSSID EAPOL authentication.
 		 */
 		eapol_sm_notify_portControl(wpa_s->eapol, ForceAuthorized);
-		eapol_sm_notify_eap_success(wpa_s->eapol, TRUE);
-		eapol_sm_notify_eap_fail(wpa_s->eapol, FALSE);
+		eapol_sm_notify_eap_success(wpa_s->eapol, true);
+		eapol_sm_notify_eap_fail(wpa_s->eapol, false);
 		return;
 	}
 #endif /* CONFIG_IBSS_RSN */
 
-	eapol_sm_notify_eap_success(wpa_s->eapol, FALSE);
-	eapol_sm_notify_eap_fail(wpa_s->eapol, FALSE);
+	eapol_sm_notify_eap_success(wpa_s->eapol, false);
+	eapol_sm_notify_eap_fail(wpa_s->eapol, false);
 
 	if (wpa_s->key_mgmt == WPA_KEY_MGMT_NONE ||
 	    wpa_s->key_mgmt == WPA_KEY_MGMT_WPA_NONE)
@@ -895,7 +895,7 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 {
 	enum wpa_states old_state = wpa_s->wpa_state;
 #if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
-	Boolean update_fils_connect_params = FALSE;
+	bool update_fils_connect_params = false;
 #endif /* CONFIG_FILS && IEEE8021X_EAPOL */
 
 	wpa_dbg(wpa_s, MSG_DEBUG, "State: %s -> %s",
@@ -994,7 +994,7 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 
 #if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
 		if (!fils_hlp_sent && ssid && ssid->eap.erp)
-			update_fils_connect_params = TRUE;
+			update_fils_connect_params = true;
 #endif /* CONFIG_FILS && IEEE8021X_EAPOL */
 #ifdef CONFIG_OWE
 		if (ssid && (ssid->key_mgmt & WPA_KEY_MGMT_OWE))
@@ -1161,7 +1161,7 @@ int wpa_supplicant_reload_configuration(struct wpa_supplicant *wpa_s)
 		 * Clear forced success to clear EAP state for next
 		 * authentication.
 		 */
-		eapol_sm_notify_eap_success(wpa_s->eapol, FALSE);
+		eapol_sm_notify_eap_success(wpa_s->eapol, false);
 	}
 	eapol_sm_notify_config(wpa_s->eapol, NULL, NULL);
 	wpa_sm_set_config(wpa_s->wpa, NULL);
@@ -1659,6 +1659,10 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 	if (ssid->sae_password_id && sae_pwe != 3)
 		sae_pwe = 1;
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SAE_PWE, sae_pwe);
+#ifdef CONFIG_TESTING_OPTIONS
+	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_FT_RSNXE_USED,
+			 wpa_s->ft_rsnxe_used);
+#endif /* CONFIG_TESTING_OPTIONS */
 
 	/* Extended Key ID is only supported in infrastructure BSS so far */
 	if (ssid->mode == WPAS_MODE_INFRA && wpa_s->conf->extended_key_id &&
@@ -4767,13 +4771,20 @@ void wpa_supplicant_rx_eapol(void *ctx, const u8 *src_addr,
 		wpa_sm_rx_eapol(wpa_s->wpa, src_addr, buf, len);
 	else if (wpa_key_mgmt_wpa_ieee8021x(wpa_s->key_mgmt)) {
 		/*
-		 * Set portValid = TRUE here since we are going to skip 4-way
+		 * Set portValid = true here since we are going to skip 4-way
 		 * handshake processing which would normally set portValid. We
 		 * need this to allow the EAPOL state machines to be completed
 		 * without going through EAPOL-Key handshake.
 		 */
-		eapol_sm_notify_portValid(wpa_s->eapol, TRUE);
+		eapol_sm_notify_portValid(wpa_s->eapol, true);
 	}
+}
+
+
+static int wpas_eapol_needs_l2_packet(struct wpa_supplicant *wpa_s)
+{
+	return !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_CONTROL_PORT) ||
+		!(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_CONTROL_PORT_RX);
 }
 
 
@@ -4786,7 +4797,9 @@ int wpa_supplicant_update_mac_addr(struct wpa_supplicant *wpa_s)
 		wpa_s->l2 = l2_packet_init(wpa_s->ifname,
 					   wpa_drv_get_mac_addr(wpa_s),
 					   ETH_P_EAPOL,
-					   wpa_supplicant_rx_eapol, wpa_s, 0);
+					   wpas_eapol_needs_l2_packet(wpa_s) ?
+					   wpa_supplicant_rx_eapol : NULL,
+					   wpa_s, 0);
 		if (wpa_s->l2 == NULL)
 			return -1;
 
@@ -4794,15 +4807,16 @@ int wpa_supplicant_update_mac_addr(struct wpa_supplicant *wpa_s)
 						L2_PACKET_FILTER_PKTTYPE))
 			wpa_dbg(wpa_s, MSG_DEBUG,
 				"Failed to attach pkt_type filter");
+
+		if (l2_packet_get_own_addr(wpa_s->l2, wpa_s->own_addr)) {
+			wpa_msg(wpa_s, MSG_ERROR,
+				"Failed to get own L2 address");
+			return -1;
+		}
 	} else {
 		const u8 *addr = wpa_drv_get_mac_addr(wpa_s);
 		if (addr)
 			os_memcpy(wpa_s->own_addr, addr, ETH_ALEN);
-	}
-
-	if (wpa_s->l2 && l2_packet_get_own_addr(wpa_s->l2, wpa_s->own_addr)) {
-		wpa_msg(wpa_s, MSG_ERROR, "Failed to get own L2 address");
-		return -1;
 	}
 
 	wpa_sm_set_own_addr(wpa_s->wpa, wpa_s->own_addr);
@@ -4863,7 +4877,7 @@ int wpa_supplicant_driver_init(struct wpa_supplicant *wpa_s)
 	os_memcpy(wpa_s->perm_addr, wpa_s->own_addr, ETH_ALEN);
 	wpa_sm_set_own_addr(wpa_s->wpa, wpa_s->own_addr);
 
-	if (wpa_s->bridge_ifname[0]) {
+	if (wpa_s->bridge_ifname[0] && wpas_eapol_needs_l2_packet(wpa_s)) {
 		wpa_dbg(wpa_s, MSG_DEBUG, "Receiving packets from bridge "
 			"interface '%s'", wpa_s->bridge_ifname);
 		wpa_s->l2_br = l2_packet_init_bridge(
@@ -5481,7 +5495,7 @@ static void wpas_fst_update_mb_ie_cb(void *ctx, const u8 *addr,
 
 static const u8 * wpas_fst_get_peer_first(void *ctx,
 					  struct fst_get_peer_ctx **get_ctx,
-					  Boolean mb_only)
+					  bool mb_only)
 {
 	struct wpa_supplicant *wpa_s = ctx;
 
@@ -5495,7 +5509,7 @@ static const u8 * wpas_fst_get_peer_first(void *ctx,
 
 static const u8 * wpas_fst_get_peer_next(void *ctx,
 					 struct fst_get_peer_ctx **get_ctx,
-					 Boolean mb_only)
+					 bool mb_only)
 {
 	return NULL;
 }
@@ -6191,8 +6205,8 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 	}
 
 	/* RSNA Supplicant Key Management - INITIALIZE */
-	eapol_sm_notify_portEnabled(wpa_s->eapol, FALSE);
-	eapol_sm_notify_portValid(wpa_s->eapol, FALSE);
+	eapol_sm_notify_portEnabled(wpa_s->eapol, false);
+	eapol_sm_notify_portValid(wpa_s->eapol, false);
 
 	/* Initialize driver interface and register driver event handler before
 	 * L2 receive handler so that association events are processed before
@@ -6259,6 +6273,7 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 	if (capa_res == 0) {
 		wpa_s->drv_capa_known = 1;
 		wpa_s->drv_flags = capa.flags;
+		wpa_s->drv_flags2 = capa.flags2;
 		wpa_s->drv_enc = capa.enc;
 		wpa_s->drv_rrm_flags = capa.rrm_flags;
 		wpa_s->probe_resp_offloads = capa.probe_resp_offloads;
