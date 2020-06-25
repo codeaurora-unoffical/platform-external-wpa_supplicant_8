@@ -28,9 +28,24 @@ namespace hidl_return_util {
 template <typename ObjT, typename WorkFuncT, typename... Args>
 Return<void> call(
     ObjT* obj, WorkFuncT&& work,
-    const std::function<void(const HostapdStatus&)>& hidl_cb, Args&&... args)
+    const std::function<void(const V1_0::HostapdStatus&)>& hidl_cb, Args&&... args)
 {
 	hidl_cb((obj->*work)(std::forward<Args>(args)...));
+	return Void();
+}
+
+// Use for HIDL methods which return an instance of HostapdStatus and
+// a single return value.
+template <typename ObjT, typename WorkFuncT, typename ReturnT, typename... Args>
+Return<void> call(
+    ObjT* obj, WorkFuncT&& work,
+    const std::function<void(const V1_0::HostapdStatus&, ReturnT)>& hidl_cb,
+    Args&&... args)
+{
+	const auto& ret_pair = (obj->*work)(std::forward<Args>(args)...);
+	const V1_0::HostapdStatus& status = std::get<0>(ret_pair);
+	const auto& ret_value = std::get<1>(ret_pair);
+	hidl_cb(status, ret_value);
 	return Void();
 }
 

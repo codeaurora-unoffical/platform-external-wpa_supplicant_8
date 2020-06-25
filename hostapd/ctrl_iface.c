@@ -83,6 +83,9 @@ static int hostapd_ctrl_iface_attach(struct hostapd_data *hapd,
 				     struct sockaddr_storage *from,
 				     socklen_t fromlen, const char *input)
 {
+	if (from == NULL || fromlen == 0) {
+		return -1;
+	}
 	return ctrl_iface_attach(&hapd->ctrl_dst, from, fromlen, input);
 }
 
@@ -91,6 +94,9 @@ static int hostapd_ctrl_iface_detach(struct hostapd_data *hapd,
 				     struct sockaddr_storage *from,
 				     socklen_t fromlen)
 {
+	if (from == NULL || fromlen == 0) {
+		return -1;
+	}
 	return ctrl_iface_detach(&hapd->ctrl_dst, from, fromlen);
 }
 
@@ -100,6 +106,9 @@ static int hostapd_ctrl_iface_level(struct hostapd_data *hapd,
 				    socklen_t fromlen,
 				    char *level)
 {
+	if (from == NULL || fromlen == 0) {
+		return -1;
+	}
 	return ctrl_iface_level(&hapd->ctrl_dst, from, fromlen, level);
 }
 
@@ -2361,6 +2370,21 @@ static int hostapd_ctrl_iface_mib(struct hostapd_data *hapd, char *reply,
 	return -1;
 }
 
+#ifdef ANDROID
+static int hostapd_ctrl_iface_driver_cmd(struct hostapd_data *hapd, char *cmd,
+				     char *buf, size_t buflen)
+{
+	int ret;
+
+	ret = hostapd_drv_driver_cmd(hapd, cmd, buf, buflen);
+	if (ret == 0) {
+		ret = os_snprintf(buf, buflen, "%s\n", "OK");
+		if (os_snprintf_error(buflen, ret))
+			ret = -1;
+	}
+	return ret;
+}
+#endif /* ANDROID */
 
 static int hostapd_ctrl_iface_vendor(struct hostapd_data *hapd, char *cmd,
 				     char *buf, size_t buflen)
@@ -2911,7 +2935,7 @@ static int hostapd_ctrl_iface_get_capability(struct hostapd_data *hapd,
 }
 
 
-static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
+int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 					      char *buf, char *reply,
 					      int reply_size,
 					      struct sockaddr_storage *from,
@@ -3169,6 +3193,11 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 	} else if (os_strncmp(buf, "CHAN_SWITCH ", 12) == 0) {
 		if (hostapd_ctrl_iface_chan_switch(hapd->iface, buf + 12))
 			reply_len = -1;
+#ifdef ANDROID
+	} else if (os_strncmp(buf, "DRIVER ", 7) == 0) {
+		reply_len = hostapd_ctrl_iface_driver_cmd(hapd, buf + 7, reply,
+							  reply_size);
+#endif /* ANDROID */
 	} else if (os_strncmp(buf, "VENDOR ", 7) == 0) {
 		reply_len = hostapd_ctrl_iface_vendor(hapd, buf + 7, reply,
 						      reply_size);
