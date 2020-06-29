@@ -1,6 +1,6 @@
 /*
  * IEEE 802.1X-2004 Authenticator - EAPOL state machine
- * Copyright (c) 2002-2009, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2002-2015, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -15,33 +15,14 @@
 #define EAPOL_SM_FROM_PMKSA_CACHE BIT(3)
 
 struct eapol_auth_config {
+	const struct eap_config *eap_cfg;
 	int eap_reauth_period;
 	int wpa;
 	int individual_wep_key_len;
-	int eap_server;
-	void *ssl_ctx;
-	void *msg_ctx;
-	void *eap_sim_db_priv;
 	char *eap_req_id_text; /* a copy of this will be allocated */
 	size_t eap_req_id_text_len;
 	int erp_send_reauth_start;
 	char *erp_domain; /* a copy of this will be allocated */
-	int erp; /* Whether ERP is enabled on authentication server */
-	u8 *pac_opaque_encr_key;
-	u8 *eap_fast_a_id;
-	size_t eap_fast_a_id_len;
-	char *eap_fast_a_id_info;
-	int eap_fast_prov;
-	int pac_key_lifetime;
-	int pac_key_refresh_time;
-	int eap_sim_aka_result_ind;
-	int tnc;
-	struct wps_context *wps;
-	int fragment_size;
-	u16 pwd_group;
-	int pbc_in_m1;
-	const u8 *server_id;
-	size_t server_id_len;
 
 	/* Opaque context pointer to owner data for callback functions */
 	void *ctx;
@@ -94,5 +75,8 @@ void eapol_auth_step(struct eapol_state_machine *sm);
 int eapol_auth_dump_state(struct eapol_state_machine *sm, char *buf,
 			  size_t buflen);
 int eapol_auth_eap_pending_cb(struct eapol_state_machine *sm, void *ctx);
+void eapol_auth_reauthenticate(struct eapol_state_machine *sm);
+int eapol_auth_set_conf(struct eapol_state_machine *sm, const char *param,
+			const char *value);
 
 #endif /* EAPOL_AUTH_SM_H */
