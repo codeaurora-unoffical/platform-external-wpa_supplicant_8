@@ -1364,6 +1364,12 @@ struct wpa_ssid * wpa_scan_res_match(struct wpa_supplicant *wpa_s,
 			continue;
 		}
 #endif /* CONFIG_DPP */
+		if (bss->ssid_len == 0) {
+			if (debug_print)
+				wpa_dbg(wpa_s, MSG_DEBUG,
+					"   skip - no SSID known for the BSS");
+			return NULL;
+		}
 
 		/* Matching configuration found */
 		return ssid;
