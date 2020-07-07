@@ -1,6 +1,6 @@
 /*
  * BSS table
- * Copyright (c) 2009-2015, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2009-2019, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -102,6 +102,8 @@ static struct wpa_bss_anqp * wpa_bss_anqp_clone(struct wpa_bss_anqp *anqp)
 	ANQP_DUP(hs20_connection_capability);
 	ANQP_DUP(hs20_operating_class);
 	ANQP_DUP(hs20_osu_providers_list);
+	ANQP_DUP(hs20_operator_icon_metadata);
+	ANQP_DUP(hs20_osu_providers_nai_list);
 #endif /* CONFIG_HS20 */
 #undef ANQP_DUP
 
@@ -185,6 +187,8 @@ static void wpa_bss_anqp_free(struct wpa_bss_anqp *anqp)
 	wpabuf_free(anqp->hs20_connection_capability);
 	wpabuf_free(anqp->hs20_operating_class);
 	wpabuf_free(anqp->hs20_osu_providers_list);
+	wpabuf_free(anqp->hs20_operator_icon_metadata);
+	wpabuf_free(anqp->hs20_osu_providers_nai_list);
 #endif /* CONFIG_HS20 */
 
 	os_free(anqp);
@@ -427,6 +431,7 @@ static struct wpa_bss * wpa_bss_add(struct wpa_supplicant *wpa_s,
 				    struct os_reltime *fetch_time)
 {
 	struct wpa_bss *bss;
+	char extra[50];
 
 	bss = os_zalloc(sizeof(*bss) + res->ie_len + res->beacon_ie_len);
 	if (bss == NULL)
@@ -452,10 +457,15 @@ static struct wpa_bss * wpa_bss_add(struct wpa_supplicant *wpa_s,
 	dl_list_add_tail(&wpa_s->bss, &bss->list);
 	dl_list_add_tail(&wpa_s->bss_id, &bss->list_id);
 	wpa_s->num_bss++;
+	if (!is_zero_ether_addr(bss->hessid))
+		os_snprintf(extra, sizeof(extra), " HESSID " MACSTR,
+			    MAC2STR(bss->hessid));
+	else
+		extra[0] = '\0';
 	wpa_dbg(wpa_s, MSG_DEBUG, "BSS: Add new id %u BSSID " MACSTR
-		" SSID '%s' freq %d",
+		" SSID '%s' freq %d%s",
 		bss->id, MAC2STR(bss->bssid), wpa_ssid_txt(ssid, ssid_len),
-		bss->freq);
+		bss->freq, extra);
 	wpas_notify_bss_added(wpa_s, bss->bssid, bss->id);
 	return bss;
 }
@@ -1028,23 +1038,30 @@ struct wpa_bss * wpa_bss_get_bssid_latest(struct wpa_supplicant *wpa_s,
 
 #ifdef CONFIG_P2P
 /**
- * wpa_bss_get_p2p_dev_addr - Fetch a BSS table entry based on P2P Device Addr
+ * wpa_bss_get_p2p_dev_addr - Fetch the latest BSS table entry based on P2P Device Addr
  * @wpa_s: Pointer to wpa_supplicant data
  * @dev_addr: P2P Device Address of the GO
  * Returns: Pointer to the BSS entry or %NULL if not found
+ *
+ * This function tries to find the entry that has the most recent update. This
+ * can help in finding the correct entry in cases where the SSID of the P2P
+ * Device may have changed recently.
  */
 struct wpa_bss * wpa_bss_get_p2p_dev_addr(struct wpa_supplicant *wpa_s,
 					  const u8 *dev_addr)
 {
-	struct wpa_bss *bss;
+	struct wpa_bss *bss, *found = NULL;
 	dl_list_for_each_reverse(bss, &wpa_s->bss, struct wpa_bss, list) {
 		u8 addr[ETH_ALEN];
 		if (p2p_parse_dev_addr((const u8 *) (bss + 1), bss->ie_len,
-				       addr) == 0 &&
-		    os_memcmp(addr, dev_addr, ETH_ALEN) == 0)
-			return bss;
+				       addr) != 0 ||
+		    os_memcmp(addr, dev_addr, ETH_ALEN) != 0)
+			continue;
+		if (!found ||
+		    os_reltime_before(&found->last_update, &bss->last_update))
+			found = bss;
 	}
-	return NULL;
+	return found;
 }
 #endif /* CONFIG_P2P */
 
@@ -1333,3 +1350,10 @@ const u8 * wpa_bss_get_fils_cache_id(struct wpa_bss *bss)
 	return NULL;
 }
 #endif /* CONFIG_FILS */
+
+
+int wpa_bss_ext_capab(const struct wpa_bss *bss, unsigned int capab)
+{
+	return ieee802_11_ext_capab(wpa_bss_get_ie(bss, WLAN_EID_EXT_CAPAB),
+				    capab);
+}

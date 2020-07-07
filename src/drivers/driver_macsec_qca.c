@@ -3,6 +3,7 @@
  * Copyright (c) 2005-2009, Jouni Malinen <j@w1.fi>
  * Copyright (c) 2004, Gunter Burchardt <tira@isx.de>
  * Copyright (c) 2013-2014, Qualcomm Atheros, Inc.
+ * Copyright (c) 2019, The Linux Foundation
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -29,6 +30,7 @@
 #include "utils/eloop.h"
 #include "common/defs.h"
 #include "common/ieee802_1x_defs.h"
+#include "common/eapol_common.h"
 #include "pae/ieee802_1x_kay.h"
 #include "driver.h"
 #include "driver_wired_common.h"
@@ -38,6 +40,9 @@
 #include "nss_macsec_secy_tx.h"
 
 #define MAXSC 16
+
+#define SAK_128_LEN	16
+#define SAK_256_LEN	32
 
 /* TCI field definition */
 #define TCI_ES                0x40
@@ -61,6 +66,7 @@ struct channel_map {
 struct macsec_qca_data {
 	struct driver_wired_common_data common;
 
+	int use_pae_group_addr;
 	u32 secy_id;
 
 	/* shadow */
@@ -123,6 +129,134 @@ static void __macsec_drv_deinit(struct macsec_qca_data *drv)
 }
 
 
+#ifdef __linux__
+
+static void macsec_qca_handle_data(void *ctx, unsigned char *buf, size_t len)
+{
+#ifdef HOSTAPD
+	struct ieee8023_hdr *hdr;
+	u8 *pos, *sa;
+	size_t left;
+	union wpa_event_data event;
+
+	/* at least 6 bytes src macaddress, 6 bytes dst macaddress
+	 * and 2 bytes ethertype
+	*/
+	if (len < 14) {
+		wpa_printf(MSG_MSGDUMP,
+			   "macsec_qca_handle_data: too short (%lu)",
+			   (unsigned long) len);
+		return;
+	}
+	hdr = (struct ieee8023_hdr *) buf;
+
+	switch (ntohs(hdr->ethertype)) {
+	case ETH_P_PAE:
+		wpa_printf(MSG_MSGDUMP, "Received EAPOL packet");
+		sa = hdr->src;
+		os_memset(&event, 0, sizeof(event));
+		event.new_sta.addr = sa;
+		wpa_supplicant_event(ctx, EVENT_NEW_STA, &event);
+
+		pos = (u8 *) (hdr + 1);
+		left = len - sizeof(*hdr);
+		drv_event_eapol_rx(ctx, sa, pos, left);
+		break;
+	default:
+		wpa_printf(MSG_DEBUG, "Unknown ethertype 0x%04x in data frame",
+			   ntohs(hdr->ethertype));
+		break;
+	}
+#endif /* HOSTAPD */
+}
+
+
+static void macsec_qca_handle_read(int sock, void *eloop_ctx, void *sock_ctx)
+{
+	int len;
+	unsigned char buf[3000];
+
+	len = recv(sock, buf, sizeof(buf), 0);
+	if (len < 0) {
+		wpa_printf(MSG_ERROR, "macsec_qca: recv: %s", strerror(errno));
+		return;
+	}
+
+	macsec_qca_handle_data(eloop_ctx, buf, len);
+}
+
+#endif /* __linux__ */
+
+
+static int macsec_qca_init_sockets(struct macsec_qca_data *drv, u8 *own_addr)
+{
+#ifdef __linux__
+	struct ifreq ifr;
+	struct sockaddr_ll addr;
+
+	drv->common.sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_PAE));
+	if (drv->common.sock < 0) {
+		wpa_printf(MSG_ERROR, "socket[PF_PACKET,SOCK_RAW]: %s",
+			   strerror(errno));
+		return -1;
+	}
+
+	if (eloop_register_read_sock(drv->common.sock, macsec_qca_handle_read,
+				     drv->common.ctx, NULL)) {
+		wpa_printf(MSG_INFO, "Could not register read socket");
+		return -1;
+	}
+
+	os_memset(&ifr, 0, sizeof(ifr));
+	os_strlcpy(ifr.ifr_name, drv->common.ifname, sizeof(ifr.ifr_name));
+	if (ioctl(drv->common.sock, SIOCGIFINDEX, &ifr) != 0) {
+		wpa_printf(MSG_ERROR, "ioctl(SIOCGIFINDEX): %s",
+			   strerror(errno));
+		return -1;
+	}
+
+	os_memset(&addr, 0, sizeof(addr));
+	addr.sll_family = AF_PACKET;
+	addr.sll_ifindex = ifr.ifr_ifindex;
+	wpa_printf(MSG_DEBUG, "Opening raw packet socket for ifindex %d",
+		   addr.sll_ifindex);
+
+	if (bind(drv->common.sock, (struct sockaddr *) &addr,
+		 sizeof(addr)) < 0) {
+		wpa_printf(MSG_ERROR, "macsec_qca: bind: %s", strerror(errno));
+		return -1;
+	}
+
+	/* filter multicast address */
+	if (wired_multicast_membership(drv->common.sock, ifr.ifr_ifindex,
+				       pae_group_addr, 1) < 0) {
+		wpa_printf(MSG_ERROR,
+			"macsec_qca_init_sockets: Failed to add multicast group membership");
+		return -1;
+	}
+
+	os_memset(&ifr, 0, sizeof(ifr));
+	os_strlcpy(ifr.ifr_name, drv->common.ifname, sizeof(ifr.ifr_name));
+	if (ioctl(drv->common.sock, SIOCGIFHWADDR, &ifr) != 0) {
+		wpa_printf(MSG_ERROR, "ioctl(SIOCGIFHWADDR): %s",
+			   strerror(errno));
+		return -1;
+	}
+
+	if (ifr.ifr_hwaddr.sa_family != ARPHRD_ETHER) {
+		wpa_printf(MSG_INFO, "Invalid HW-addr family 0x%04x",
+			   ifr.ifr_hwaddr.sa_family);
+		return -1;
+	}
+	os_memcpy(own_addr, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+
+	return 0;
+#else /* __linux__ */
+	return -1;
+#endif /* __linux__ */
+}
+
+
 static void * macsec_qca_init(void *ctx, const char *ifname)
 {
 	struct macsec_qca_data *drv;
@@ -154,6 +288,97 @@ static void macsec_qca_deinit(void *priv)
 
 	driver_wired_deinit_common(&drv->common);
 	os_free(drv);
+}
+
+
+static void * macsec_qca_hapd_init(struct hostapd_data *hapd,
+				   struct wpa_init_params *params)
+{
+	struct macsec_qca_data *drv;
+
+	drv = os_zalloc(sizeof(struct macsec_qca_data));
+	if (!drv) {
+		wpa_printf(MSG_INFO,
+			   "Could not allocate memory for macsec_qca driver data");
+		return NULL;
+	}
+
+	/* Board specific settings */
+	if (os_memcmp("eth2", params->ifname, 4) == 0)
+		drv->secy_id = 1;
+	else if (os_memcmp("eth3", params->ifname, 4) == 0)
+		drv->secy_id = 2;
+	else if (os_memcmp("eth4", params->ifname, 4) == 0)
+		drv->secy_id = 0;
+	else if (os_memcmp("eth5", params->ifname, 4) == 0)
+		drv->secy_id = 1;
+	else
+		drv->secy_id = -1;
+
+	drv->common.ctx = hapd;
+	os_strlcpy(drv->common.ifname, params->ifname,
+		   sizeof(drv->common.ifname));
+	drv->use_pae_group_addr = params->use_pae_group_addr;
+
+	if (macsec_qca_init_sockets(drv, params->own_addr)) {
+		os_free(drv);
+		return NULL;
+	}
+
+	return drv;
+}
+
+
+static void macsec_qca_hapd_deinit(void *priv)
+{
+	struct macsec_qca_data *drv = priv;
+
+	if (drv->common.sock >= 0) {
+		eloop_unregister_read_sock(drv->common.sock);
+		close(drv->common.sock);
+	}
+
+	os_free(drv);
+}
+
+
+static int macsec_qca_send_eapol(void *priv, const u8 *addr,
+				 const u8 *data, size_t data_len, int encrypt,
+				 const u8 *own_addr, u32 flags)
+{
+	struct macsec_qca_data *drv = priv;
+	struct ieee8023_hdr *hdr;
+	size_t len;
+	u8 *pos;
+	int res;
+
+	len = sizeof(*hdr) + data_len;
+	hdr = os_zalloc(len);
+	if (!hdr) {
+		wpa_printf(MSG_INFO,
+			   "malloc() failed for macsec_qca_send_eapol(len=%lu)",
+			   (unsigned long) len);
+		return -1;
+	}
+
+	os_memcpy(hdr->dest, drv->use_pae_group_addr ? pae_group_addr : addr,
+		  ETH_ALEN);
+	os_memcpy(hdr->src, own_addr, ETH_ALEN);
+	hdr->ethertype = htons(ETH_P_PAE);
+
+	pos = (u8 *) (hdr + 1);
+	os_memcpy(pos, data, data_len);
+
+	res = send(drv->common.sock, (u8 *) hdr, len, 0);
+	os_free(hdr);
+
+	if (res < 0) {
+		wpa_printf(MSG_ERROR,
+			   "macsec_qca_send_eapol - packet len: %lu - failed: send: %s",
+			   (unsigned long) len, strerror(errno));
+	}
+
+	return res;
 }
 
 
@@ -226,19 +451,32 @@ static int macsec_qca_set_replay_protect(void *priv, Boolean enabled,
 }
 
 
+static fal_cipher_suite_e macsec_qca_cs_type_get(u64 cs)
+{
+	if (cs == CS_ID_GCM_AES_128)
+		return FAL_CIPHER_SUITE_AES_GCM_128;
+	if (cs == CS_ID_GCM_AES_256)
+		return FAL_CIPHER_SUITE_AES_GCM_256;
+	return FAL_CIPHER_SUITE_MAX;
+}
+
+
 static int macsec_qca_set_current_cipher_suite(void *priv, u64 cs)
 {
-	if (cs != CS_ID_GCM_AES_128) {
+	struct macsec_qca_data *drv = priv;
+	fal_cipher_suite_e cs_type;
+
+	if (cs != CS_ID_GCM_AES_128 && cs != CS_ID_GCM_AES_256) {
 		wpa_printf(MSG_ERROR,
 			   "%s: NOT supported CipherSuite: %016" PRIx64,
 			   __func__, cs);
 		return -1;
 	}
 
-	/* Support default Cipher Suite 0080020001000001 (GCM-AES-128) */
-	wpa_printf(MSG_DEBUG, "%s: default support aes-gcm-128", __func__);
+	wpa_printf(MSG_DEBUG, "%s: CipherSuite: %016" PRIx64, __func__, cs);
 
-	return 0;
+	cs_type = macsec_qca_cs_type_get(cs);
+	return nss_macsec_secy_cipher_suite_set(drv->secy_id, cs_type);
 }
 
 
@@ -367,7 +605,7 @@ static int macsec_qca_get_transmit_next_pn(void *priv, struct transmit_sa *sa)
 }
 
 
-int macsec_qca_set_transmit_next_pn(void *priv, struct transmit_sa *sa)
+static int macsec_qca_set_transmit_next_pn(void *priv, struct transmit_sa *sa)
 {
 	struct macsec_qca_data *drv = priv;
 	int ret = 0;
@@ -436,8 +674,8 @@ static int macsec_qca_create_receive_sc(void *priv, struct receive_sc *sc,
 	os_memset(&entry, 0, sizeof(entry));
 
 	os_memcpy(entry.sci, sci_addr, ETH_ALEN);
-	entry.sci[6] = (sci_port >> 8) & 0xf;
-	entry.sci[7] = sci_port & 0xf;
+	entry.sci[6] = (sci_port >> 8) & 0xff;
+	entry.sci[7] = sci_port & 0xff;
 	entry.sci_mask = 0xf;
 
 	entry.valid = 1;
@@ -499,6 +737,8 @@ static int macsec_qca_create_receive_sa(void *priv, struct receive_sa *sa)
 	fal_rx_sak_t rx_sak;
 	int i = 0;
 	u32 channel;
+	fal_rx_prc_lut_t entry;
+	u32 offset;
 
 	ret = macsec_qca_lookup_receive_channel(priv, sa->sc, &channel);
 	if (ret != 0)
@@ -508,9 +748,30 @@ static int macsec_qca_create_receive_sa(void *priv, struct receive_sa *sa)
 		   __func__, channel, sa->an, sa->lowest_pn);
 
 	os_memset(&rx_sak, 0, sizeof(rx_sak));
-	for (i = 0; i < 16; i++)
-		rx_sak.sak[i] = sa->pkey->key[15 - i];
+	rx_sak.sak_len = sa->pkey->key_len;
+	if (sa->pkey->key_len == SAK_128_LEN) {
+		for (i = 0; i < 16; i++)
+			rx_sak.sak[i] = sa->pkey->key[15 - i];
+	} else if (sa->pkey->key_len == SAK_256_LEN) {
+		for (i = 0; i < 16; i++) {
+			rx_sak.sak1[i] = sa->pkey->key[15 - i];
+			rx_sak.sak[i] = sa->pkey->key[31 - i];
+		}
+	} else {
+		return -1;
+	}
 
+	if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_0)
+		offset = 0;
+	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_30)
+		offset = 30;
+	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_50)
+		offset = 50;
+	else
+		return -1;
+	ret += nss_macsec_secy_rx_prc_lut_get(drv->secy_id, channel, &entry);
+	entry.offset = offset;
+	ret += nss_macsec_secy_rx_prc_lut_set(drv->secy_id, channel, &entry);
 	ret += nss_macsec_secy_rx_sa_create(drv->secy_id, channel, sa->an);
 	ret += nss_macsec_secy_rx_sak_set(drv->secy_id, channel, sa->an,
 					  &rx_sak);
@@ -592,6 +853,7 @@ static int macsec_qca_create_transmit_sc(void *priv, struct transmit_sc *sc,
 	fal_tx_class_lut_t entry;
 	u8 psci[ETH_ALEN + 2];
 	u32 channel;
+	u16 sci_port = be_to_host16(sc->sci.port);
 
 	ret = macsec_qca_get_available_transmit_sc(priv, &channel);
 	if (ret != 0)
@@ -607,8 +869,8 @@ static int macsec_qca_create_transmit_sc(void *priv, struct transmit_sc *sc,
 	entry.channel = channel;
 
 	os_memcpy(psci, sc->sci.addr, ETH_ALEN);
-	psci[6] = (sc->sci.port >> 8) & 0xf;
-	psci[7] = sc->sci.port & 0xf;
+	psci[6] = (sci_port >> 8) & 0xff;
+	psci[7] = sci_port & 0xff;
 
 	ret += nss_macsec_secy_tx_class_lut_set(drv->secy_id, channel, &entry);
 	ret += nss_macsec_secy_tx_sc_create(drv->secy_id, channel, psci, 8);
@@ -655,6 +917,7 @@ static int macsec_qca_create_transmit_sa(void *priv, struct transmit_sa *sa)
 	fal_tx_sak_t tx_sak;
 	int i;
 	u32 channel;
+	u32 offset;
 
 	ret = macsec_qca_lookup_transmit_channel(priv, sa->sc, &channel);
 	if (ret != 0)
@@ -675,9 +938,30 @@ static int macsec_qca_create_transmit_sa(void *priv, struct transmit_sa *sa)
 		tci |= TCI_E | TCI_C;
 
 	os_memset(&tx_sak, 0, sizeof(tx_sak));
-	for (i = 0; i < 16; i++)
-		tx_sak.sak[i] = sa->pkey->key[15 - i];
+	tx_sak.sak_len = sa->pkey->key_len;
+	if (sa->pkey->key_len == SAK_128_LEN) {
+		for (i = 0; i < 16; i++)
+			tx_sak.sak[i] = sa->pkey->key[15 - i];
+	} else if (sa->pkey->key_len == SAK_256_LEN) {
+		for (i = 0; i < 16; i++) {
+			tx_sak.sak1[i] = sa->pkey->key[15 - i];
+			tx_sak.sak[i] = sa->pkey->key[31 - i];
+		}
+	} else {
+		return -1;
+	}
 
+	if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_0)
+		offset = 0;
+	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_30)
+		offset = 30;
+	else if (sa->pkey->confidentiality_offset == CONFIDENTIALITY_OFFSET_50)
+		offset = 50;
+	else
+		return -1;
+	ret += nss_macsec_secy_tx_sc_confidentiality_offset_set(drv->secy_id,
+								channel,
+								offset);
 	ret += nss_macsec_secy_tx_sa_next_pn_set(drv->secy_id, channel, sa->an,
 						 sa->next_pn);
 	ret += nss_macsec_secy_tx_sak_set(drv->secy_id, channel, sa->an,
@@ -738,6 +1022,9 @@ const struct wpa_driver_ops wpa_driver_macsec_qca_ops = {
 	.get_capa = driver_wired_get_capa,
 	.init = macsec_qca_init,
 	.deinit = macsec_qca_deinit,
+	.hapd_init = macsec_qca_hapd_init,
+	.hapd_deinit = macsec_qca_hapd_deinit,
+	.hapd_send_eapol = macsec_qca_send_eapol,
 
 	.macsec_init = macsec_qca_macsec_init,
 	.macsec_deinit = macsec_qca_macsec_deinit,

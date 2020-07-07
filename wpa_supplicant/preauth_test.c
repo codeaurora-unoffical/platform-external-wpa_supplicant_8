@@ -35,7 +35,7 @@ struct preauth_test_data {
 };
 
 
-static void _wpa_supplicant_deauthenticate(void *wpa_s, int reason_code)
+static void _wpa_supplicant_deauthenticate(void *wpa_s, u16 reason_code)
 {
 	wpa_supplicant_deauthenticate(wpa_s, reason_code);
 }
@@ -127,7 +127,8 @@ static int wpa_supplicant_get_bssid(void *wpa_s, u8 *bssid)
 static int wpa_supplicant_set_key(void *wpa_s, enum wpa_alg alg,
 				  const u8 *addr, int key_idx, int set_tx,
 				  const u8 *seq, size_t seq_len,
-				  const u8 *key, size_t key_len)
+				  const u8 *key, size_t key_len,
+				  enum key_flag key_flag)
 {
 	printf("%s - not implemented\n", __func__);
 	return -1;
@@ -348,7 +349,7 @@ int main(int argc, char *argv[])
 		ret = -2;
 	else {
 		ret = pmksa_cache_set_current(wpa_s.wpa, NULL, bssid, NULL, 0,
-					      NULL) ? 0 : -3;
+					      NULL, 0) ? 0 : -3;
 	}
 
 	test_eapol_clean(&wpa_s);
