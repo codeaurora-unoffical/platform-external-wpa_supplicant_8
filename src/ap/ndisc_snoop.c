@@ -17,6 +17,7 @@
 #include "ap_drv_ops.h"
 #include "list.h"
 #include "x_snoop.h"
+#include "ndisc_snoop.h"
 
 struct ip6addr {
 	struct in6_addr addr;
@@ -98,7 +99,7 @@ static void handle_ndisc(void *ctx, const u8 *src_addr, const u8 *buf,
 {
 	struct hostapd_data *hapd = ctx;
 	struct icmpv6_ndmsg *msg;
-	struct in6_addr *saddr;
+	struct in6_addr saddr;
 	struct sta_info *sta;
 	int res;
 	char addrtxt[INET6_ADDRSTRLEN + 1];
@@ -113,25 +114,30 @@ static void handle_ndisc(void *ctx, const u8 *src_addr, const u8 *buf,
 		if (msg->opt_type != SOURCE_LL_ADDR)
 			return;
 
-		saddr = &msg->ipv6h.ip6_src;
-		if (!(saddr->s6_addr32[0] == 0 && saddr->s6_addr32[1] == 0 &&
-		      saddr->s6_addr32[2] == 0 && saddr->s6_addr32[3] == 0)) {
+		/*
+		 * IPv6 header may not be 32-bit aligned in the buffer, so use
+		 * a local copy to avoid unaligned reads.
+		 */
+		os_memcpy(&saddr, &msg->ipv6h.ip6_src, sizeof(saddr));
+		if (!(saddr.s6_addr32[0] == 0 && saddr.s6_addr32[1] == 0 &&
+		      saddr.s6_addr32[2] == 0 && saddr.s6_addr32[3] == 0)) {
 			if (len < ETH_HLEN + sizeof(*msg) + ETH_ALEN)
 				return;
 			sta = ap_get_sta(hapd, msg->opt_lladdr);
 			if (!sta)
 				return;
 
-			if (sta_has_ip6addr(sta, saddr))
+			if (sta_has_ip6addr(sta, &saddr))
 				return;
 
-			if (inet_ntop(AF_INET6, saddr, addrtxt, sizeof(addrtxt))
-			    == NULL)
+			if (inet_ntop(AF_INET6, &saddr, addrtxt,
+				      sizeof(addrtxt)) == NULL)
 				addrtxt[0] = '\0';
 			wpa_printf(MSG_DEBUG, "ndisc_snoop: Learned new IPv6 address %s for "
 				   MACSTR, addrtxt, MAC2STR(sta->addr));
-			hostapd_drv_br_delete_ip_neigh(hapd, 6, (u8 *) saddr);
-			res = hostapd_drv_br_add_ip_neigh(hapd, 6, (u8 *) saddr,
+			hostapd_drv_br_delete_ip_neigh(hapd, 6, (u8 *) &saddr);
+			res = hostapd_drv_br_add_ip_neigh(hapd, 6,
+							  (u8 *) &saddr,
 							  128, sta->addr);
 			if (res) {
 				wpa_printf(MSG_ERROR,
@@ -140,7 +146,7 @@ static void handle_ndisc(void *ctx, const u8 *src_addr, const u8 *buf,
 				return;
 			}
 
-			if (sta_ip6addr_add(sta, saddr))
+			if (sta_ip6addr_add(sta, &saddr))
 				return;
 		}
 		break;
@@ -176,4 +182,5 @@ int ndisc_snoop_init(struct hostapd_data *hapd)
 void ndisc_snoop_deinit(struct hostapd_data *hapd)
 {
 	l2_packet_deinit(hapd->sock_ndisc);
+	hapd->sock_ndisc = NULL;
 }

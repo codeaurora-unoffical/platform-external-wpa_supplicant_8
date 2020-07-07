@@ -35,6 +35,7 @@ int close(int fd);
 #include "driver.h"
 #include "eloop.h"
 #include "common/ieee802_11_defs.h"
+#include "common/ieee802_11_common.h"
 #include "driver_ndis.h"
 
 int wpa_driver_register_event_cb(struct wpa_driver_ndis_data *drv);
@@ -718,7 +719,7 @@ static int wpa_driver_ndis_disconnect(struct wpa_driver_ndis_data *drv)
 
 
 static int wpa_driver_ndis_deauthenticate(void *priv, const u8 *addr,
-					  int reason_code)
+					  u16 reason_code)
 {
 	struct wpa_driver_ndis_data *drv = priv;
 	return wpa_driver_ndis_disconnect(drv);
@@ -780,20 +781,7 @@ static int wpa_driver_ndis_scan(void *priv,
 
 static const u8 * wpa_scan_get_ie(const struct wpa_scan_res *res, u8 ie)
 {
-	const u8 *end, *pos;
-
-	pos = (const u8 *) (res + 1);
-	end = pos + res->ie_len;
-
-	while (pos + 1 < end) {
-		if (pos + 2 + pos[1] > end)
-			break;
-		if (pos[0] == ie)
-			return pos;
-		pos += 2 + pos[1];
-	}
-
-	return NULL;
+	return get_ie((const u8 *) (res + 1), res->ie_len, ie);
 }
 
 
@@ -1232,12 +1220,16 @@ static int wpa_driver_ndis_set_pmkid(struct wpa_driver_ndis_data *drv)
 }
 
 
-static int wpa_driver_ndis_add_pmkid(void *priv, const u8 *bssid,
-				     const u8 *pmkid)
+static int wpa_driver_ndis_add_pmkid(void *priv,
+				     struct wpa_pmkid_params *params)
 {
 	struct wpa_driver_ndis_data *drv = priv;
 	struct ndis_pmkid_entry *entry, *prev;
+	const u8 *bssid = params->bssid;
+	const u8 *pmkid = params->pmkid;
 
+	if (!bssid || !pmkid)
+		return -1;
 	if (drv->no_of_pmkid == 0)
 		return 0;
 
@@ -1273,12 +1265,16 @@ static int wpa_driver_ndis_add_pmkid(void *priv, const u8 *bssid,
 }
 
 
-static int wpa_driver_ndis_remove_pmkid(void *priv, const u8 *bssid,
-		 			const u8 *pmkid)
+static int wpa_driver_ndis_remove_pmkid(void *priv,
+					struct wpa_pmkid_params *params)
 {
 	struct wpa_driver_ndis_data *drv = priv;
 	struct ndis_pmkid_entry *entry, *prev;
+	const u8 *bssid = params->bssid;
+	const u8 *pmkid = params->pmkid;
 
+	if (!bssid || !pmkid)
+		return -1;
 	if (drv->no_of_pmkid == 0)
 		return 0;
 
