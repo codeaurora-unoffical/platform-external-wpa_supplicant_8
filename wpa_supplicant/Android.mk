@@ -19,9 +19,8 @@ endif
 include $(LOCAL_PATH)/android.config
 
 ifeq ($(call is-board-platform-in-list,msm8998),true)
-  $(warning "Disabling SAE, OWE and DPP support in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
+  $(warning "Disabling SAE and OWE in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
   CONFIG_OWE=n
-  CONFIG_DPP=n
   CONFIG_SAE=n
   # Enabling mesh support enables SAE, so make sure mesh supoort is disabled
   CONFIG_MESH=n
@@ -279,6 +278,7 @@ L_CFLAGS += -DCONFIG_SAE
 OBJS += src/common/sae.c
 NEED_ECC=y
 NEED_DH_GROUPS=y
+NEED_HMAC_SHA256_KDF=y
 NEED_DRAGONFLY=y
 ifdef CONFIG_TESTING_OPTIONS
 NEED_DH_GROUPS_ALL=y
