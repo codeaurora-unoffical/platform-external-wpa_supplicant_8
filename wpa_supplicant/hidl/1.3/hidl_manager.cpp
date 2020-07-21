@@ -468,6 +468,20 @@ int HidlManager::registerInterface(struct wpa_supplicant *wpa_s)
 			    wpa_s->ifname);
 			return 1;
 		}
+#ifdef SUPPLICANT_VENDOR_HIDL
+		wpa_printf(MSG_INFO,"Mapping to vendor sta iface");
+		if (addHidlObjectToMap<VendorStaIface>(
+			wpa_s->ifname,
+			new VendorStaIface(wpa_s->global, wpa_s->ifname),
+			vendor_sta_iface_object_map_)) {
+			wpa_printf(
+			    MSG_ERROR,
+			    "Failed to register Vendor STA interface with HIDL "
+			    "control: %s",
+			    wpa_s->ifname);
+			return 1;
+		}
+#endif
 		sta_iface_callbacks_map_[wpa_s->ifname] =
 		    std::vector<android::sp<ISupplicantStaIfaceCallback>>();
 		// Turn on Android specific customizations for STA interfaces
@@ -526,6 +540,15 @@ int HidlManager::unregisterInterface(struct wpa_supplicant *wpa_s)
 			success = !removeAllIfaceCallbackHidlObjectsFromMap(
 			    wpa_s->ifname, sta_iface_callbacks_map_);
 		}
+#ifdef SUPPLICANT_VENDOR_HIDL
+		wpa_printf(MSG_INFO,"Try to unregister vendor interface");
+		if(removeHidlObjectFromMap(
+		   wpa_s->ifname, vendor_sta_iface_object_map_)) {
+			wpa_printf(MSG_ERROR,
+				   "Failed to unregister vendor interface"
+				   "with HIDL control: %s", wpa_s->ifname);
+		}
+#endif
 	}
 	if (!success) {
 		wpa_printf(
@@ -2212,6 +2235,47 @@ void HidlManager::callWithEachStaNetworkCallback(
 	callWithEachNetworkCallback(
 	    ifname, network_id, method, sta_network_callbacks_map_);
 }
+#ifdef SUPPLICANT_VENDOR_HIDL
+// Method for vendor.qti.hardware.wifi.supplicant@2.X HAL interface
+
+int HidlManager::registerVendorHidlService(struct wpa_global *global)
+{
+	::android::status_t status;
+
+	// Create the vendor hidl service object and register it.
+	supplicantvendor_object_ = new SupplicantVendor(global);
+	status = supplicantvendor_object_->registerAsService();
+	if (status != android::NO_ERROR) {
+		wpa_printf(MSG_ERROR,"Failed to Register Vendor HIDL service");
+		return 1;
+	}
+	wpa_printf(MSG_INFO,"Register Vendor HIDL default service");
+	return 0;
+}
+
+/**
+ * Retrieve the |ISupplicantVendorStaIface| hidl object reference using the provided
+ * ifname.
+ *
+ * @param ifname Name of the corresponding interface.
+ * @param iface_object Hidl reference corresponding to the iface.
+ *
+ * @return 0 on success, 1 on failure.
+ */
+int HidlManager::getVendorStaIfaceHidlObjectByIfname(
+    const std::string &ifname, android::sp<ISupplicantVendorStaIface> *iface_object)
+{
+	if (ifname.empty() || !iface_object)
+		return 1;
+
+	auto iface_object_iter = vendor_sta_iface_object_map_.find(ifname);
+	if (iface_object_iter == vendor_sta_iface_object_map_.end())
+		return 1;
+
+	*iface_object = iface_object_iter->second;
+	return 0;
+}
+#endif
 }  // namespace implementation
 }  // namespace V1_3
 }  // namespace supplicant
