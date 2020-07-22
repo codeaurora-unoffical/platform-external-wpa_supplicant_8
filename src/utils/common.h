@@ -53,15 +53,14 @@ static inline unsigned int bswap_32(unsigned int v)
 }
 #endif /* __APPLE__ */
 
-#ifdef CONFIG_TI_COMPILER
-#define __BIG_ENDIAN 4321
-#define __LITTLE_ENDIAN 1234
-#ifdef __big_endian__
-#define __BYTE_ORDER __BIG_ENDIAN
-#else
-#define __BYTE_ORDER __LITTLE_ENDIAN
-#endif
-#endif /* CONFIG_TI_COMPILER */
+#ifdef __rtems__
+#include <rtems/endian.h>
+#define __BYTE_ORDER BYTE_ORDER
+#define __LITTLE_ENDIAN LITTLE_ENDIAN
+#define __BIG_ENDIAN BIG_ENDIAN
+#define bswap_16 CPU_swap_u16
+#define bswap_32 CPU_swap_u32
+#endif /* __rtems__ */
 
 #ifdef CONFIG_NATIVE_WINDOWS
 #include <winsock.h>
@@ -110,22 +109,6 @@ typedef INT8 s8;
 #define WPA_TYPES_DEFINED
 #endif /* __vxworks */
 
-#ifdef CONFIG_TI_COMPILER
-#ifdef _LLONG_AVAILABLE
-typedef unsigned long long u64;
-#else
-/*
- * TODO: 64-bit variable not available. Using long as a workaround to test the
- * build, but this will likely not work for all operations.
- */
-typedef unsigned long u64;
-#endif
-typedef unsigned int u32;
-typedef unsigned short u16;
-typedef unsigned char u8;
-#define WPA_TYPES_DEFINED
-#endif /* CONFIG_TI_COMPILER */
-
 #ifndef WPA_TYPES_DEFINED
 #ifdef CONFIG_USE_INTTYPES_H
 #include <inttypes.h>
@@ -167,6 +150,7 @@ static inline unsigned int wpa_swap_32(unsigned int v)
 #define host_to_le32(n) (n)
 #define be_to_host32(n) wpa_swap_32(n)
 #define host_to_be32(n) wpa_swap_32(n)
+#define host_to_le64(n) (n)
 
 #define WPA_BYTE_SWAP_DEFINED
 
@@ -262,7 +246,7 @@ static inline void WPA_PUT_BE24(u8 *a, u32 val)
 
 static inline u32 WPA_GET_BE32(const u8 *a)
 {
-	return (a[0] << 24) | (a[1] << 16) | (a[2] << 8) | a[3];
+	return ((u32) a[0] << 24) | (a[1] << 16) | (a[2] << 8) | a[3];
 }
 
 static inline void WPA_PUT_BE32(u8 *a, u32 val)
@@ -275,7 +259,7 @@ static inline void WPA_PUT_BE32(u8 *a, u32 val)
 
 static inline u32 WPA_GET_LE32(const u8 *a)
 {
-	return (a[3] << 24) | (a[2] << 16) | (a[1] << 8) | a[0];
+	return ((u32) a[3] << 24) | (a[2] << 16) | (a[1] << 8) | a[0];
 }
 
 static inline void WPA_PUT_LE32(u8 *a, u32 val)
@@ -339,6 +323,9 @@ static inline void WPA_PUT_LE64(u8 *a, u64 val)
 #ifndef ETH_P_ALL
 #define ETH_P_ALL 0x0003
 #endif
+#ifndef ETH_P_IP
+#define ETH_P_IP 0x0800
+#endif
 #ifndef ETH_P_80211_ENCAP
 #define ETH_P_80211_ENCAP 0x890d /* TDLS comes under this category */
 #endif
@@ -354,6 +341,9 @@ static inline void WPA_PUT_LE64(u8 *a, u64 val)
 #ifndef ETH_P_RRB
 #define ETH_P_RRB 0x890D
 #endif /* ETH_P_RRB */
+#ifndef ETH_P_OUI
+#define ETH_P_OUI 0x88B7
+#endif /* ETH_P_OUI */
 
 
 #ifdef __GNUC__
@@ -433,7 +423,7 @@ void perror(const char *s);
 #endif
 
 #ifndef BIT
-#define BIT(x) (1 << (x))
+#define BIT(x) (1U << (x))
 #endif
 
 /*
@@ -442,9 +432,11 @@ void perror(const char *s);
  */
 #ifdef __CHECKER__
 #define __force __attribute__((force))
+#undef __bitwise
 #define __bitwise __attribute__((bitwise))
 #else
 #define __force
+#undef __bitwise
 #define __bitwise
 #endif
 
@@ -471,6 +463,13 @@ typedef u64 __bitwise le64;
 #endif /* __GNUC__ */
 #endif /* __must_check */
 
+#define SSID_MAX_LEN 32
+
+struct wpa_ssid_value {
+	u8 ssid[SSID_MAX_LEN];
+	size_t ssid_len;
+};
+
 int hwaddr_aton(const char *txt, u8 *addr);
 int hwaddr_masked_aton(const char *txt, u8 *addr, u8 *mask, u8 maskable);
 int hwaddr_compact_aton(const char *txt, u8 *addr);
@@ -478,6 +477,7 @@ int hwaddr_aton2(const char *txt, u8 *addr);
 int hex2byte(const char *hex);
 int hexstr2bin(const char *hex, u8 *buf, size_t len);
 void inc_byte_array(u8 *counter, size_t len);
+void buf_shift_right(u8 *buf, size_t len, size_t bits);
 void wpa_get_ntp_timestamp(u8 *buf);
 int wpa_scnprintf(char *buf, size_t size, const char *fmt, ...);
 int wpa_snprintf_hex_sep(char *buf, size_t buf_size, const u8 *data, size_t len,
@@ -487,6 +487,7 @@ int wpa_snprintf_hex_uppercase(char *buf, size_t buf_size, const u8 *data,
 			       size_t len);
 
 int hwaddr_mask_txt(char *buf, size_t len, const u8 *addr, const u8 *mask);
+int ssid_parse(const char *buf, struct wpa_ssid_value *ssid);
 
 #ifdef CONFIG_NATIVE_WINDOWS
 void wpa_unicode2ascii_inplace(TCHAR *str);
@@ -556,6 +557,7 @@ void bin_clear_free(void *bin, size_t len);
 int random_mac_addr(u8 *addr);
 int random_mac_addr_keep_oui(u8 *addr);
 
+const char * cstr_token(const char *str, const char *delim, const char **last);
 char * str_token(char *str, const char *delim, char **context);
 size_t utf8_escape(const char *inp, size_t in_size,
 		   char *outp, size_t out_size);
@@ -563,6 +565,12 @@ size_t utf8_unescape(const char *inp, size_t in_size,
 		     char *outp, size_t out_size);
 int is_ctrl_char(char c);
 
+int str_starts(const char *str, const char *start);
+
+u8 rssi_to_rcpi(int rssi);
+char * get_param(const char *cmd, const char *param);
+
+void forced_memzero(void *ptr, size_t len);
 
 /*
  * gcc 4.4 ends up generating strict-aliasing warnings about some very common

@@ -102,13 +102,19 @@ char * os_readfile(const char *name, size_t *len)
 }
 
 
-int os_fsync(FILE *stream)
+int os_fdatasync(FILE *stream)
 {
 	return 0;
 }
 
 
 void * os_zalloc(size_t size)
+{
+	return NULL;
+}
+
+
+void * os_memdup(const void *src, size_t n)
 {
 	return NULL;
 }
@@ -209,12 +215,6 @@ int os_strcmp(const char *s1, const char *s2)
 int os_strncmp(const char *s1, const char *s2, size_t n)
 {
 	return 0;
-}
-
-
-char * os_strncpy(char *dest, const char *src, size_t n)
-{
-	return dest;
 }
 
 
