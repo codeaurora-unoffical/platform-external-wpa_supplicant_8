@@ -243,7 +243,7 @@ char * os_readfile(const char *name, size_t *len)
 }
 
 
-int os_fsync(FILE *stream)
+int os_fdatasync(FILE *stream)
 {
 	return 0;
 }
@@ -427,22 +427,6 @@ int os_strncmp(const char *s1, const char *s2, size_t n)
 	}
 
 	return *s1 - *s2;
-}
-
-
-char * os_strncpy(char *dest, const char *src, size_t n)
-{
-	char *d = dest;
-
-	while (n--) {
-		*d = *src;
-		if (*src == '\0')
-			break;
-		d++;
-		src++;
-	}
-
-	return dest;
 }
 
 

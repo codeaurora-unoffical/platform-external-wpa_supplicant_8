@@ -322,11 +322,10 @@ static int wps_er_ap_use_cached_settings(struct wps_er *er,
 	if (!s)
 		return -1;
 
-	ap->ap_settings = os_malloc(sizeof(*ap->ap_settings));
+	ap->ap_settings = os_memdup(&s->ap_settings, sizeof(*ap->ap_settings));
 	if (ap->ap_settings == NULL)
 		return -1;
 
-	os_memcpy(ap->ap_settings, &s->ap_settings, sizeof(*ap->ap_settings));
 	wpa_printf(MSG_DEBUG, "WPS ER: Use cached AP settings");
 	return 0;
 }
@@ -1531,7 +1530,7 @@ void wps_er_set_sel_reg(struct wps_er *er, int sel_reg, u16 dev_passwd_id,
 	    wps_er_build_selected_registrar(msg, sel_reg) ||
 	    wps_er_build_dev_password_id(msg, dev_passwd_id) ||
 	    wps_er_build_sel_reg_config_methods(msg, sel_reg_config_methods) ||
-	    wps_build_wfa_ext(msg, 0, auth_macs, count) ||
+	    wps_build_wfa_ext(msg, 0, auth_macs, count, 0) ||
 	    wps_er_build_uuid_r(msg, er->wps->uuid)) {
 		wpabuf_free(msg);
 		return;
@@ -1649,11 +1648,15 @@ static void wps_er_http_put_message_cb(void *ctx, struct http_client *c,
 	case HTTP_CLIENT_OK:
 		wpa_printf(MSG_DEBUG, "WPS ER: PutMessage OK");
 		reply = http_client_get_body(c);
-		if (reply == NULL)
+		if (reply)
+			msg = os_zalloc(wpabuf_len(reply) + 1);
+		if (msg == NULL) {
+			if (ap->wps) {
+				wps_deinit(ap->wps);
+				ap->wps = NULL;
+			}
 			break;
-		msg = os_zalloc(wpabuf_len(reply) + 1);
-		if (msg == NULL)
-			break;
+		}
 		os_memcpy(msg, wpabuf_head(reply), wpabuf_len(reply));
 		break;
 	case HTTP_CLIENT_FAILED:
@@ -1709,21 +1712,30 @@ static void wps_er_ap_put_message(struct wps_er_ap *ap,
 	url = http_client_url_parse(ap->control_url, &dst, &path);
 	if (url == NULL) {
 		wpa_printf(MSG_DEBUG, "WPS ER: Failed to parse controlURL");
-		return;
+		goto fail;
 	}
 
 	buf = wps_er_soap_hdr(msg, "PutMessage", "NewInMessage", path, &dst,
 			      &len_ptr, &body_ptr);
 	os_free(url);
 	if (buf == NULL)
-		return;
+		goto fail;
 
 	wps_er_soap_end(buf, "PutMessage", len_ptr, body_ptr);
 
 	ap->http = http_client_addr(&dst, buf, 10000,
 				    wps_er_http_put_message_cb, ap);
-	if (ap->http == NULL)
+	if (ap->http == NULL) {
 		wpabuf_free(buf);
+		goto fail;
+	}
+	return;
+
+fail:
+	if (ap->wps) {
+		wps_deinit(ap->wps);
+		ap->wps = NULL;
+	}
 }
 
 
@@ -1945,10 +1957,9 @@ int wps_er_set_config(struct wps_er *er, const u8 *uuid, const u8 *addr,
 	}
 
 	os_free(ap->ap_settings);
-	ap->ap_settings = os_malloc(sizeof(*cred));
+	ap->ap_settings = os_memdup(cred, sizeof(*cred));
 	if (ap->ap_settings == NULL)
 		return -1;
-	os_memcpy(ap->ap_settings, cred, sizeof(*cred));
 	ap->ap_settings->cred_attr = NULL;
 	wpa_printf(MSG_DEBUG, "WPS ER: Updated local AP settings based set "
 		   "config request");
@@ -2005,10 +2016,9 @@ int wps_er_config(struct wps_er *er, const u8 *uuid, const u8 *addr,
 	}
 
 	os_free(ap->ap_settings);
-	ap->ap_settings = os_malloc(sizeof(*cred));
+	ap->ap_settings = os_memdup(cred, sizeof(*cred));
 	if (ap->ap_settings == NULL)
 		return -1;
-	os_memcpy(ap->ap_settings, cred, sizeof(*cred));
 	ap->ap_settings->cred_attr = NULL;
 
 	if (wps_er_send_get_device_info(ap, wps_er_ap_config_m1) < 0)
@@ -2038,7 +2048,7 @@ struct wpabuf * wps_er_config_token_from_cred(struct wps_context *wps,
 	data.wps = wps;
 	data.use_cred = cred;
 	if (wps_build_cred(&data, ret) ||
-	    wps_build_wfa_ext(ret, 0, NULL, 0)) {
+	    wps_build_wfa_ext(ret, 0, NULL, 0, 0)) {
 		wpabuf_free(ret);
 		return NULL;
 	}
