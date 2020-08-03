@@ -2453,13 +2453,49 @@ int StaNetwork::setByteArrayKeyFieldAndResetState(
  */
 void StaNetwork::setFastTransitionKeyMgmt(uint32_t &key_mgmt_mask)
 {
-	if (key_mgmt_mask & WPA_KEY_MGMT_PSK) {
+	struct wpa_supplicant *wpa_s = retrieveIfacePtr();
+	struct wpa_driver_capa capa;
+
+	if (wpa_drv_get_capa(wpa_s, &capa) < 0) {
+		return;
+	}
+
+	if ((key_mgmt_mask & WPA_KEY_MGMT_PSK) &&
+	    (capa.key_mgmt_iftype[WPA_IF_STATION] &
+		WPA_DRIVER_CAPA_KEY_MGMT_FT_PSK)) {
 		key_mgmt_mask |= WPA_KEY_MGMT_FT_PSK;
 	}
 
-	if (key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X) {
+	if ((key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X) &&
+	    (capa.key_mgmt_iftype[WPA_IF_STATION] &
+		WPA_DRIVER_CAPA_KEY_MGMT_FT)) {
 		key_mgmt_mask |= WPA_KEY_MGMT_FT_IEEE8021X;
 	}
+
+	if ((key_mgmt_mask & WPA_KEY_MGMT_SAE) &&
+	    (capa.key_mgmt_iftype[WPA_IF_STATION] &
+		WPA_DRIVER_CAPA_KEY_MGMT_FT_SAE)) {
+		key_mgmt_mask |= WPA_KEY_MGMT_FT_SAE;
+	}
+
+	if ((key_mgmt_mask & WPA_KEY_MGMT_FILS_SHA256) &&
+	    (capa.key_mgmt_iftype[WPA_IF_STATION] &
+		WPA_DRIVER_CAPA_KEY_MGMT_FT_FILS_SHA256)) {
+		key_mgmt_mask |= WPA_KEY_MGMT_FT_FILS_SHA256;
+	}
+
+	if ((key_mgmt_mask & WPA_KEY_MGMT_FILS_SHA384) &&
+	    (capa.key_mgmt_iftype[WPA_IF_STATION] &
+		WPA_DRIVER_CAPA_KEY_MGMT_FT_FILS_SHA384)) {
+		key_mgmt_mask |= WPA_KEY_MGMT_FT_FILS_SHA384;
+	}
+
+	if ((key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) &&
+	    (capa.key_mgmt_iftype[WPA_IF_STATION] &
+		WPA_DRIVER_CAPA_KEY_MGMT_FT_802_1X_SHA384)) {
+		key_mgmt_mask |= WPA_KEY_MGMT_FT_IEEE8021X_SHA384;
+	}
+
 }
 
 /**
@@ -2474,6 +2510,22 @@ void StaNetwork::resetFastTransitionKeyMgmt(uint32_t &key_mgmt_mask)
 
 	if (key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X) {
 		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_IEEE8021X;
+	}
+
+	if (key_mgmt_mask & WPA_KEY_MGMT_SAE) {
+		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_SAE;
+	}
+
+	if (key_mgmt_mask & WPA_KEY_MGMT_FILS_SHA256) {
+		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_FILS_SHA256;
+	}
+
+	if (key_mgmt_mask & WPA_KEY_MGMT_FILS_SHA384) {
+		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_FILS_SHA384;
+	}
+
+	if (key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
+		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_IEEE8021X_SHA384;
 	}
 }
 
