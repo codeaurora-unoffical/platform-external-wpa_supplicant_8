@@ -20,7 +20,6 @@ ifeq ($(call is-board-platform-in-list,msm8909 msm8937 msm8953 msm8996 msm8998 s
   $(warning "Disabling WPA3 support in hostapd for $(TARGET_BOARD_PLATFORM)")
   CONFIG_OWE=n
   CONFIG_DPP=n
-  CONFIG_SAE=n
   CONFIG_SUITEB192=n
 endif
 
@@ -272,6 +271,7 @@ L_CFLAGS += -DCONFIG_SAE
 OBJS += src/common/sae.c
 NEED_ECC=y
 NEED_DH_GROUPS=y
+NEED_HMAC_SHA256_KDF=y
 NEED_DRAGONFLY=y
 endif
 
@@ -1155,6 +1155,7 @@ LOCAL_STATIC_LIBRARIES += libhostapd_hidl
 ifdef HOSTAPD_USE_VENDOR_HIDL
 LOCAL_SHARED_LIBRARIES += vendor.qti.hardware.wifi.hostapd@1.0 \
     vendor.qti.hardware.wifi.hostapd@1.1 \
+    vendor.qti.hardware.wifi.hostapd@1.2 \
     libqsap_sdk
 endif
 endif
@@ -1214,7 +1215,7 @@ LOCAL_EXPORT_C_INCLUDE_DIRS := \
     $(LOCAL_PATH)/hidl/$(HIDL_INTERFACE_VERSION)
 
 ifdef HOSTAPD_USE_VENDOR_HIDL
-VENDOR_HIDL_INTERFACE_VERSION = 1.1
+VENDOR_HIDL_INTERFACE_VERSION = 1.2
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/hidl/$(HIDL_INTERFACE_VERSION)
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/hidl/vendor/$(VENDOR_HIDL_INTERFACE_VERSION)
 ifeq ($(BOARD_HAS_QCOM_WLAN), true)
@@ -1227,6 +1228,7 @@ LOCAL_SRC_FILES += \
 LOCAL_SHARED_LIBRARIES += \
     vendor.qti.hardware.wifi.hostapd@1.0 \
     vendor.qti.hardware.wifi.hostapd@1.1 \
+    vendor.qti.hardware.wifi.hostapd@1.2 \
     libqsap_sdk
 LOCAL_HEADER_LIBRARIES := libqsap_headers
 endif
