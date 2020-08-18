@@ -42,7 +42,6 @@ static struct wpa_ctrl *mon_conn;
 static int wpa_cli_quit = 0;
 static int wpa_cli_attached = 0;
 static int wpa_cli_connected = -1;
-static int wpa_cli_last_id = 0;
 #ifndef CONFIG_CTRL_IFACE_DIR
 #define CONFIG_CTRL_IFACE_DIR "/var/run/wpa_supplicant"
 #endif /* CONFIG_CTRL_IFACE_DIR */
@@ -3957,11 +3956,9 @@ static void wpa_cli_action_process(const char *msg)
 
 		os_setenv("WPA_CTRL_DIR", ctrl_iface_dir, 1);
 
-		if (wpa_cli_connected <= 0 || new_id != wpa_cli_last_id) {
-			wpa_cli_connected = 1;
-			wpa_cli_last_id = new_id;
-			wpa_cli_exec(action_file, ifname, "CONNECTED");
-		}
+		wpa_cli_connected = 1;
+		wpa_cli_exec(action_file, ifname, "CONNECTED");
+		printf("Call action file to send CONNECTED command '%s'\n", ifname);
 	} else if (str_starts(pos, WPA_EVENT_DISCONNECTED)) {
 		if (wpa_cli_connected) {
 			wpa_cli_connected = 0;
