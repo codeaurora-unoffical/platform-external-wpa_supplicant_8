@@ -290,6 +290,30 @@ std::string CreateHostapdConfig(
 	}
 #endif
 
+	bool support_11ax = false;
+	FILE *fp;
+	fp = fopen("/sys/kernel/wifi/wlan/dot11ax", "r");
+	if (fp) {
+		char buf[64] = {0};
+		size_t len;
+
+		len = fread(buf, sizeof(char), sizeof(buf), fp);
+		fclose(fp);
+		support_11ax =  (0 == strncmp("11ax 1", buf, 6));
+	}
+
+	std::string he_params_as_string;
+	if (support_11ax) {
+		he_params_as_string = StringPrintf(
+				"ieee80211ax=1\n"
+				"he_su_beamformer=%d\n"
+				"he_su_beamformee=%d\n"
+				"he_mu_beamformer=%d\n"
+				"he_twt_required=%d\n", 1, 1, 1, 1);
+	} else {
+		he_params_as_string = "ieee80211ax=0";
+	}
+
 	std::string bridge_as_string;
 	if (!vendor_params.bridgeIfaceName.empty()) {
 		bridge_as_string = StringPrintf("bridge=%s", vendor_params.bridgeIfaceName.c_str());
@@ -308,6 +332,7 @@ std::string CreateHostapdConfig(
 	    "ieee80211ac=%d\n"
 	    "%s\n"
 	    "%s\n"
+	    "%s\n"
 	    "ignore_broadcast_ssid=%d\n"
 	    "wowlan_triggers=any\n"
 	    "%s\n"
@@ -319,6 +344,7 @@ std::string CreateHostapdConfig(
 	    channel_config_as_string.c_str(),
 	    iface_params.V1_0.hwModeParams.enable80211N ? 1 : 0,
 	    iface_params.V1_0.hwModeParams.enable80211AC ? 1 : 0,
+	    he_params_as_string.c_str(),
 	    hw_mode_as_string.c_str(), ht_cap_vht_oper_chwidth_as_string.c_str(),
 	    nw_params.isHidden ? 1 : 0, encryption_config_as_string.c_str(),
 #ifdef CONFIG_OWE
