@@ -22,6 +22,7 @@ struct wpa_state_machine {
 
 	u8 addr[ETH_ALEN];
 	u8 p2p_dev_addr[ETH_ALEN];
+	u16 auth_alg;
 
 	enum {
 		WPA_PTK_INITIALIZE, WPA_PTK_DISCONNECT, WPA_PTK_DISCONNECTED,
@@ -58,6 +59,7 @@ struct wpa_state_machine {
 	u8 alt_replay_counter[WPA_REPLAY_COUNTER_LEN];
 	u8 PMK[PMK_LEN_MAX];
 	unsigned int pmk_len;
+	u8 pmkid[PMKID_LEN]; /* valid if pmkid_set == 1 */
 	struct wpa_ptk PTK;
 	Boolean PTK_valid;
 	Boolean pairwise_set;
@@ -90,12 +92,18 @@ struct wpa_state_machine {
 	unsigned int pmk_r1_name_valid:1;
 #endif /* CONFIG_IEEE80211R_AP */
 	unsigned int is_wnmsleep:1;
+	unsigned int pmkid_set:1;
+#ifdef CONFIG_OCV
+	unsigned int ocv_enabled:1;
+#endif /* CONFIG_OCV */
 
 	u8 req_replay_counter[WPA_REPLAY_COUNTER_LEN];
 	int req_replay_counter_used;
 
 	u8 *wpa_ie;
 	size_t wpa_ie_len;
+	u8 *rsnxe;
+	size_t rsnxe_len;
 
 	enum {
 		WPA_VERSION_NO_WPA = 0 /* WPA not used */,
@@ -110,8 +118,11 @@ struct wpa_state_machine {
 	u32 dot11RSNAStatsTKIPRemoteMICFailures;
 
 #ifdef CONFIG_IEEE80211R_AP
-	u8 xxkey[PMK_LEN]; /* PSK or the second 256 bits of MSK */
+	u8 xxkey[PMK_LEN_MAX]; /* PSK or the second 256 bits of MSK, or the
+				* first 384 bits of MSK */
 	size_t xxkey_len;
+	u8 pmk_r1[PMK_LEN_MAX];
+	unsigned int pmk_r1_len;
 	u8 pmk_r1_name[WPA_PMK_NAME_LEN]; /* PMKR1Name derived from FT Auth
 					   * Request */
 	u8 r0kh_id[FT_R0KH_ID_MAX_LEN]; /* R0KH-ID from FT Auth Request */
@@ -143,6 +154,16 @@ struct wpa_state_machine {
 	size_t fils_key_auth_len;
 	unsigned int fils_completed:1;
 #endif /* CONFIG_FILS */
+
+#ifdef CONFIG_DPP2
+	struct wpabuf *dpp_z;
+#endif /* CONFIG_DPP2 */
+
+#ifdef CONFIG_TESTING_OPTIONS
+	void (*eapol_status_cb)(void *ctx1, void *ctx2);
+	void *eapol_status_cb_ctx1;
+	void *eapol_status_cb_ctx2;
+#endif /* CONFIG_TESTING_OPTIONS */
 };
 
 
@@ -171,10 +192,8 @@ struct wpa_group {
 	Boolean changed;
 	Boolean first_sta_seen;
 	Boolean reject_4way_hs_for_entropy;
-#ifdef CONFIG_IEEE80211W
 	u8 IGTK[2][WPA_IGTK_MAX_LEN];
 	int GN_igtk, GM_igtk;
-#endif /* CONFIG_IEEE80211W */
 	/* Number of references except those in struct wpa_group->next */
 	unsigned int references;
 	unsigned int num_setup_iface;
@@ -250,6 +269,7 @@ struct ft_remote_seq {
 
 int wpa_write_rsn_ie(struct wpa_auth_config *conf, u8 *buf, size_t len,
 		     const u8 *pmkid);
+int wpa_write_rsnxe(struct wpa_auth_config *conf, u8 *buf, size_t len);
 void wpa_auth_logger(struct wpa_authenticator *wpa_auth, const u8 *addr,
 		     logger_level level, const char *txt);
 void wpa_auth_vlogger(struct wpa_authenticator *wpa_auth, const u8 *addr,
@@ -266,33 +286,19 @@ int wpa_auth_for_each_auth(struct wpa_authenticator *wpa_auth,
 			   int (*cb)(struct wpa_authenticator *a, void *ctx),
 			   void *cb_ctx);
 
-#ifdef CONFIG_PEERKEY
-void wpa_smk_error(struct wpa_authenticator *wpa_auth,
-		   struct wpa_state_machine *sm,
-		   const u8 *key_data, size_t key_data_len);
-void wpa_smk_m1(struct wpa_authenticator *wpa_auth,
-		struct wpa_state_machine *sm, struct wpa_eapol_key *key,
-		const u8 *key_data, size_t key_data_len);
-void wpa_smk_m3(struct wpa_authenticator *wpa_auth,
-		struct wpa_state_machine *sm, struct wpa_eapol_key *key,
-		const u8 *key_data, size_t key_data_len);
-#endif /* CONFIG_PEERKEY */
-
 #ifdef CONFIG_IEEE80211R_AP
 int wpa_write_mdie(struct wpa_auth_config *conf, u8 *buf, size_t len);
-int wpa_write_ftie(struct wpa_auth_config *conf, const u8 *r0kh_id,
-		   size_t r0kh_id_len,
+int wpa_write_ftie(struct wpa_auth_config *conf, int use_sha384,
+		   const u8 *r0kh_id, size_t r0kh_id_len,
 		   const u8 *anonce, const u8 *snonce,
 		   u8 *buf, size_t len, const u8 *subelem,
 		   size_t subelem_len);
-int wpa_auth_derive_ptk_ft(struct wpa_state_machine *sm, const u8 *pmk,
-			   struct wpa_ptk *ptk);
+int wpa_auth_derive_ptk_ft(struct wpa_state_machine *sm, struct wpa_ptk *ptk);
 struct wpa_ft_pmk_cache * wpa_ft_pmk_cache_init(void);
 void wpa_ft_pmk_cache_deinit(struct wpa_ft_pmk_cache *cache);
 void wpa_ft_install_ptk(struct wpa_state_machine *sm);
-int wpa_ft_store_pmk_r0(struct wpa_authenticator *wpa_auth,
-			const u8 *spa, const u8 *pmk_r0,
-			const u8 *pmk_r0_name, int pairwise);
+int wpa_ft_store_pmk_fils(struct wpa_state_machine *sm, const u8 *pmk_r0,
+			  const u8 *pmk_r0_name);
 #endif /* CONFIG_IEEE80211R_AP */
 
 #endif /* WPA_AUTH_I_H */

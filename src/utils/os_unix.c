@@ -1,6 +1,6 @@
 /*
  * OS specific functions for UNIX/POSIX systems
- * Copyright (c) 2005-2009, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2005-2019, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -51,10 +51,16 @@ struct os_alloc_trace {
 
 void os_sleep(os_time_t sec, os_time_t usec)
 {
+#if defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200809L)
+	const struct timespec req = { sec, usec * 1000 };
+
+	nanosleep(&req, NULL);
+#else
 	if (sec)
 		sleep(sec);
 	if (usec)
 		usleep(usec);
+#endif
 }
 
 
@@ -252,6 +258,13 @@ void os_daemonize_terminate(const char *pid_file)
 
 int os_get_random(unsigned char *buf, size_t len)
 {
+#ifdef TEST_FUZZ
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		buf[i] = i & 0xff;
+	return 0;
+#else /* TEST_FUZZ */
 	FILE *f;
 	size_t rc;
 
@@ -268,6 +281,7 @@ int os_get_random(unsigned char *buf, size_t len)
 	fclose(f);
 
 	return rc != len ? -1 : 0;
+#endif /* TEST_FUZZ */
 }
 
 
@@ -341,22 +355,28 @@ int os_program_init(void)
 	gid_t groups[] = { ANDROID_SETGROUPS_OVERRIDE };
 
 	if (!gid_wifi || !uid_wifi) return -1;
+	setgroups(ARRAY_SIZE(groups), groups);
 #else /* ANDROID_SETGROUPS_OVERRIDE */
-	gid_t groups[3];
+	gid_t groups[4];
+	int group_idx = 0;
 
 	if (!gid_wifi || !uid_wifi) return -1;
-	groups[0] = gid_wifi;
+	groups[group_idx] = gid_wifi;
 
 	grp = getgrnam("inet");
-	groups[1] = grp ? grp->gr_gid : 0;
-	if (!groups[1]) return -1;
+	groups[++group_idx] = grp ? grp->gr_gid : 0;
+	if (!groups[group_idx]) return -1;
 
 	grp = getgrnam("keystore");
-	groups[2] = grp ? grp->gr_gid : 0;
-	if (!groups[2]) return -1;
-#endif /* ANDROID_SETGROUPS_OVERRIDE */
+	groups[++group_idx] = grp ? grp->gr_gid : 0;
+	if (!groups[group_idx]) return -1;
 
-	setgroups(ARRAY_SIZE(groups), groups);
+	grp = getgrnam("log");
+	groups[++group_idx] = grp ? grp->gr_gid : 0;
+	if (!groups[group_idx]) group_idx--;
+
+	setgroups(group_idx + 1, groups);
+#endif /* ANDROID_SETGROUPS_OVERRIDE */
 
 	prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0);
 
@@ -532,7 +552,7 @@ void * os_memdup(const void *src, size_t len)
 {
 	void *r = os_malloc(len);
 
-	if (r)
+	if (r && src)
 		os_memcpy(r, src, len);
 	return r;
 }

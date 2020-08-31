@@ -1,6 +1,6 @@
 /*
  * hostapd - command line interface for hostapd daemon
- * Copyright (c) 2004-2017, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2019, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -21,7 +21,7 @@
 
 static const char *const hostapd_cli_version =
 "hostapd_cli v" VERSION_STR "\n"
-"Copyright (c) 2004-2017, Jouni Malinen <j@w1.fi> and contributors";
+"Copyright (c) 2004-2019, Jouni Malinen <j@w1.fi> and contributors";
 
 static struct wpa_ctrl *ctrl_conn;
 static int hostapd_cli_quit = 0;
@@ -54,7 +54,7 @@ static void usage(void)
 	fprintf(stderr, "%s\n", hostapd_cli_version);
 	fprintf(stderr,
 		"\n"
-		"usage: hostapd_cli [-p<path>] [-i<ifname>] [-hvB] "
+		"usage: hostapd_cli [-p<path>] [-i<ifname>] [-hvBr] "
 		"[-a<path>] \\\n"
 		"                   [-P<pid file>] [-G<ping interval>] [command..]\n"
 		"\n"
@@ -68,6 +68,9 @@ static void usage(void)
 		"   -a<file>     run in daemon mode executing the action file "
 		"based on events\n"
 		"                from hostapd\n"
+		"   -r           try to reconnect when client socket is "
+		"disconnected.\n"
+		"                This is useful only when used with -a.\n"
 		"   -B           run a daemon in the background\n"
 		"   -i<ifname>   Interface to listen on (default: first "
 		"interface found in the\n"
@@ -401,7 +404,6 @@ static int hostapd_cli_cmd_signature(struct wpa_ctrl *ctrl, int argc,
 #endif /* CONFIG_TAXONOMY */
 
 
-#ifdef CONFIG_IEEE80211W
 static int hostapd_cli_cmd_sa_query(struct wpa_ctrl *ctrl, int argc,
 				    char *argv[])
 {
@@ -414,7 +416,6 @@ static int hostapd_cli_cmd_sa_query(struct wpa_ctrl *ctrl, int argc,
 	snprintf(buf, sizeof(buf), "SA_QUERY %s", argv[0]);
 	return wpa_ctrl_command(ctrl, buf);
 }
-#endif /* CONFIG_IEEE80211W */
 
 
 #ifdef CONFIG_WPS
@@ -1214,6 +1215,28 @@ static int hostapd_cli_cmd_disable(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int hostapd_cli_cmd_driver(struct wpa_ctrl *ctrl, int argc, char *argv[])
+{
+	char buf[4096];
+	int res;
+
+	if (argc < 1) {
+		printf("Invalid DRIVER command - at least 1 argument "
+		       "required.\n");
+		return -1;
+	}
+	if (write_cmd(buf, sizeof(buf), "DRIVER", argc, argv) < 0)
+		return -1;
+	return wpa_ctrl_command(ctrl, buf);
+}
+
+static int hostapd_cli_cmd_update_beacon(struct wpa_ctrl *ctrl, int argc,
+				      char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "UPDATE_BEACON");
+}
+
+
 static int hostapd_cli_cmd_vendor(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	char cmd[256];
@@ -1304,24 +1327,17 @@ static int hostapd_cli_cmd_set_neighbor(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int hostapd_cli_cmd_show_neighbor(struct wpa_ctrl *ctrl, int argc,
+					 char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "SHOW_NEIGHBOR");
+}
+
+
 static int hostapd_cli_cmd_remove_neighbor(struct wpa_ctrl *ctrl, int argc,
 					   char *argv[])
 {
-	char cmd[400];
-	int res;
-
-	if (argc != 2) {
-		printf("Invalid remove_neighbor command: needs 2 arguments\n");
-		return -1;
-	}
-
-	res = os_snprintf(cmd, sizeof(cmd), "REMOVE_NEIGHBOR %s %s",
-			  argv[0], argv[1]);
-	if (os_snprintf_error(sizeof(cmd), res)) {
-		printf("Too long REMOVE_NEIGHBOR command.\n");
-		return -1;
-	}
-	return wpa_ctrl_command(ctrl, cmd);
+	return hostapd_cli_cmd(ctrl, "REMOVE_NEIGHBOR", 1, argc, argv);
 }
 
 
@@ -1408,6 +1424,20 @@ static int hostapd_cli_cmd_dpp_auth_init(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int hostapd_cli_cmd_dpp_listen(struct wpa_ctrl *ctrl, int argc,
+				      char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "DPP_LISTEN", 1, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_dpp_stop_listen(struct wpa_ctrl *ctrl, int argc,
+				       char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "DPP_STOP_LISTEN");
+}
+
+
 static int hostapd_cli_cmd_dpp_configurator_add(struct wpa_ctrl *ctrl, int argc,
 						char *argv[])
 {
@@ -1419,6 +1449,20 @@ static int hostapd_cli_cmd_dpp_configurator_remove(struct wpa_ctrl *ctrl,
 						   int argc, char *argv[])
 {
 	return hostapd_cli_cmd(ctrl, "DPP_CONFIGURATOR_REMOVE", 1, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_dpp_configurator_get_key(struct wpa_ctrl *ctrl,
+						    int argc, char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "DPP_CONFIGURATOR_GET_KEY", 1, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_dpp_configurator_sign(struct wpa_ctrl *ctrl,
+						 int argc, char *argv[])
+{
+       return hostapd_cli_cmd(ctrl, "DPP_CONFIGURATOR_SIGN", 1, argc, argv);
 }
 
 
@@ -1436,6 +1480,41 @@ static int hostapd_cli_cmd_dpp_pkex_remove(struct wpa_ctrl *ctrl, int argc,
 }
 
 #endif /* CONFIG_DPP */
+
+
+static int hostapd_cli_cmd_accept_macacl(struct wpa_ctrl *ctrl, int argc,
+					 char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "ACCEPT_ACL", 1, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_deny_macacl(struct wpa_ctrl *ctrl, int argc,
+				       char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "DENY_ACL", 1, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_poll_sta(struct wpa_ctrl *ctrl, int argc,
+				    char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "POLL_STA", 1, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_req_beacon(struct wpa_ctrl *ctrl, int argc,
+				      char *argv[])
+{
+	return hostapd_cli_cmd(ctrl, "REQ_BEACON", 2, argc, argv);
+}
+
+
+static int hostapd_cli_cmd_reload_wpa_psk(struct wpa_ctrl *ctrl, int argc,
+					  char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "RELOAD_WPA_PSK");
+}
 
 
 struct hostapd_cli_cmd {
@@ -1472,10 +1551,8 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	{ "signature", hostapd_cli_cmd_signature, hostapd_complete_stations,
 	  "<addr> = get taxonomy signature for a station" },
 #endif /* CONFIG_TAXONOMY */
-#ifdef CONFIG_IEEE80211W
 	{ "sa_query", hostapd_cli_cmd_sa_query, hostapd_complete_stations,
 	  "<addr> = send SA Query to a station" },
-#endif /* CONFIG_IEEE80211W */
 #ifdef CONFIG_WPS
 	{ "wps_pin", hostapd_cli_cmd_wps_pin, NULL,
 	  "<uuid> <pin> [timeout] [addr] = add WPS Enrollee PIN" },
@@ -1548,12 +1625,17 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	{ "vendor", hostapd_cli_cmd_vendor, NULL,
 	  "<vendor id> <sub command id> [<hex formatted data>]\n"
 	  "  = send vendor driver command" },
+	{ "driver", hostapd_cli_cmd_driver, NULL,
+	  "<driver sub command> [<hex formatted data>]\n"
+	  "  = send driver command data" },
 	{ "enable", hostapd_cli_cmd_enable, NULL,
 	  "= enable hostapd on current interface" },
 	{ "reload", hostapd_cli_cmd_reload, NULL,
 	  "= reload configuration for current interface" },
 	{ "disable", hostapd_cli_cmd_disable, NULL,
 	  "= disable hostapd on current interface" },
+	{ "update_beacon", hostapd_cli_cmd_update_beacon, NULL,
+	  "= update Beacon frame contents\n"},
 	{ "erp_flush", hostapd_cli_cmd_erp_flush, NULL,
 	  "= drop all ERP keys"},
 	{ "log_level", hostapd_cli_cmd_log_level, NULL,
@@ -1565,8 +1647,10 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	{ "set_neighbor", hostapd_cli_cmd_set_neighbor, NULL,
 	  "<addr> <ssid=> <nr=> [lci=] [civic=] [stat]\n"
 	  "  = add AP to neighbor database" },
+	{ "show_neighbor", hostapd_cli_cmd_show_neighbor, NULL,
+	  "  = show neighbor database entries" },
 	{ "remove_neighbor", hostapd_cli_cmd_remove_neighbor, NULL,
-	  "<addr> <ssid=> = remove AP from neighbor database" },
+	  "<addr> [ssid=<hex>] = remove AP from neighbor database" },
 	{ "req_lci", hostapd_cli_cmd_req_lci, hostapd_complete_stations,
 	  "<addr> = send LCI request to a station"},
 	{ "req_range", hostapd_cli_cmd_req_range, NULL,
@@ -1586,16 +1670,35 @@ static const struct hostapd_cli_cmd hostapd_cli_commands[] = {
 	  "<id> = show DPP bootstrap information" },
 	{ "dpp_auth_init", hostapd_cli_cmd_dpp_auth_init, NULL,
 	  "peer=<id> [own=<id>] = initiate DPP bootstrapping" },
+	{ "dpp_listen", hostapd_cli_cmd_dpp_listen, NULL,
+	  "<freq in MHz> = start DPP listen" },
+	{ "dpp_stop_listen", hostapd_cli_cmd_dpp_stop_listen, NULL,
+	  "= stop DPP listen" },
 	{ "dpp_configurator_add", hostapd_cli_cmd_dpp_configurator_add, NULL,
 	  "[curve=..] [key=..] = add DPP configurator" },
 	{ "dpp_configurator_remove", hostapd_cli_cmd_dpp_configurator_remove,
 	  NULL,
 	  "*|<id> = remove DPP configurator" },
+	{ "dpp_configurator_get_key", hostapd_cli_cmd_dpp_configurator_get_key,
+	  NULL,
+	  "<id> = Get DPP configurator's private key" },
+	{ "dpp_configurator_sign", hostapd_cli_cmd_dpp_configurator_sign, NULL,
+	  "conf=<role> configurator=<id> = generate self DPP configuration" },
 	{ "dpp_pkex_add", hostapd_cli_cmd_dpp_pkex_add, NULL,
 	  "add PKEX code" },
 	{ "dpp_pkex_remove", hostapd_cli_cmd_dpp_pkex_remove, NULL,
 	  "*|<id> = remove DPP pkex information" },
 #endif /* CONFIG_DPP */
+	{ "accept_acl", hostapd_cli_cmd_accept_macacl, NULL,
+	  "=Add/Delete/Show/Clear accept MAC ACL" },
+	{ "deny_acl", hostapd_cli_cmd_deny_macacl, NULL,
+	  "=Add/Delete/Show/Clear deny MAC ACL" },
+	{ "poll_sta", hostapd_cli_cmd_poll_sta, hostapd_complete_stations,
+	  "<addr> = poll a STA to check connectivity with a QoS null frame" },
+	{ "req_beacon", hostapd_cli_cmd_req_beacon, NULL,
+	  "<addr> [req_mode=] <measurement request hexdump>  = send a Beacon report request to a station" },
+	{ "reload_wpa_psk", hostapd_cli_cmd_reload_wpa_psk, NULL,
+	  "= reload wpa_psk_file only" },
 	{ NULL, NULL, NULL, NULL }
 };
 
@@ -1920,12 +2023,13 @@ int main(int argc, char *argv[])
 	int warning_displayed = 0;
 	int c;
 	int daemonize = 0;
+	int reconnect = 0;
 
 	if (os_program_init())
 		return -1;
 
 	for (;;) {
-		c = getopt(argc, argv, "a:BhG:i:p:P:s:v");
+		c = getopt(argc, argv, "a:BhG:i:p:P:rs:v");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -1953,6 +2057,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'P':
 			pid_file = optarg;
+			break;
+		case 'r':
+			reconnect = 1;
 			break;
 		case 's':
 			client_socket_dir = optarg;
@@ -1996,8 +2103,7 @@ int main(int argc, char *argv[])
 				printf("Connection established.\n");
 			break;
 		}
-
-		if (!interactive) {
+		if (!interactive && !reconnect) {
 			perror("Failed to connect to hostapd - "
 			       "wpa_ctrl_open");
 			return -1;
@@ -2015,8 +2121,14 @@ int main(int argc, char *argv[])
 		return -1;
 	if (daemonize && os_daemonize(pid_file) && eloop_sock_requeue())
 		return -1;
-
-	if (interactive)
+	if (reconnect && action_file && ctrl_ifname) {
+		while (!hostapd_cli_quit) {
+			if (ctrl_conn)
+				hostapd_cli_action(ctrl_conn);
+			os_sleep(1, 0);
+			hostapd_cli_reconnect(ctrl_ifname);
+		}
+	} else if (interactive)
 		hostapd_cli_interactive();
 	else if (action_file)
 		hostapd_cli_action(ctrl_conn);

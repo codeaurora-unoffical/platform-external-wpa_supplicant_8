@@ -21,11 +21,11 @@
 
 #ifdef ANDROID
 #include <dirent.h>
+#include <sys/stat.h>
+#include <cutils/sockets.h>
 #include <grp.h>
 #include <pwd.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <cutils/sockets.h>
 #endif /* ANDROID */
 
 #ifdef CONFIG_CTRL_IFACE_UDP_IPV6
@@ -159,8 +159,8 @@ try_again:
 	}
 
 #ifdef ANDROID
-	chmod(ctrl->local.sun_path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 	/* Set group even if we do not have privileges to change owner */
+	chmod(ctrl->local.sun_path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 	grp_wifi = getgrnam("wifi");
 	gid_wifi = grp_wifi ? grp_wifi->gr_gid : 0;
 	pwd_system = getpwnam("system");
@@ -270,7 +270,6 @@ void wpa_ctrl_close(struct wpa_ctrl *ctrl)
 void wpa_ctrl_cleanup(void)
 {
 	DIR *dir;
-	struct dirent entry;
 	struct dirent *result;
 	size_t dirnamelen;
 	size_t maxcopy;
@@ -288,8 +287,8 @@ void wpa_ctrl_cleanup(void)
 	}
 	namep = pathname + dirnamelen;
 	maxcopy = PATH_MAX - dirnamelen;
-	while (readdir_r(dir, &entry, &result) == 0 && result != NULL) {
-		if (os_strlcpy(namep, entry.d_name, maxcopy) < maxcopy)
+	while ((result = readdir(dir)) != NULL) {
+		if (os_strlcpy(namep, result->d_name, maxcopy) < maxcopy)
 			unlink(pathname);
 	}
 	closedir(dir);
@@ -558,7 +557,8 @@ retry_send:
 			res = recv(ctrl->s, reply, *reply_len, 0);
 			if (res < 0)
 				return res;
-			if (res > 0 && reply[0] == '<') {
+			if ((res > 0 && reply[0] == '<') ||
+			    (res > 6 && strncmp(reply, "IFNAME=", 7) == 0)) {
 				/* This is an unsolicited message from
 				 * wpa_supplicant, not the reply to the
 				 * request. Use msg_cb to report this to the

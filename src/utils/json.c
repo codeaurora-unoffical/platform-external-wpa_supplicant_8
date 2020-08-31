@@ -51,7 +51,7 @@ void json_escape_string(char *txt, size_t maxlen, const char *data, size_t len)
 				*txt++ = data[i];
 			} else {
 				txt += os_snprintf(txt, end - txt, "\\u%04x",
-						   data[i]);
+						   (unsigned char) data[i]);
 			}
 			break;
 		}
@@ -103,6 +103,11 @@ static char * json_parse_string(const char **json_pos, const char *end)
 			return str;
 		case '\\':
 			pos++;
+			if (pos >= end) {
+				wpa_printf(MSG_DEBUG,
+					   "JSON: Truncated \\ escape");
+				goto fail;
+			}
 			switch (*pos) {
 			case '"':
 			case '\\':
@@ -165,6 +170,8 @@ static int json_parse_number(const char **json_pos, const char *end,
 			break;
 		}
 	}
+	if (pos == end)
+		pos--;
 	if (pos < *json_pos)
 		return -1;
 	len = pos - *json_pos + 1;
@@ -230,6 +237,8 @@ struct json_token * json_parse(const char *data, size_t data_len)
 				token = json_alloc_token(&tokens);
 				if (!token)
 					goto fail;
+				if (!root)
+					root = token;
 			} else if (curr_token->state == JSON_WAITING_VALUE) {
 				token = curr_token;
 			} else if (curr_token->parent &&
@@ -291,11 +300,23 @@ struct json_token * json_parse(const char *data, size_t data_len)
 				goto fail;
 			if (!curr_token) {
 				token = json_alloc_token(&tokens);
-				if (!token)
+				if (!token) {
+					os_free(str);
 					goto fail;
+				}
 				token->type = JSON_STRING;
 				token->string = str;
 				token->state = JSON_COMPLETED;
+			} else if (curr_token->parent &&
+				   curr_token->parent->type == JSON_ARRAY &&
+				   curr_token->parent->state == JSON_STARTED &&
+				   curr_token->state == JSON_EMPTY) {
+				curr_token->string = str;
+				curr_token->state = JSON_COMPLETED;
+				curr_token->type = JSON_STRING;
+				wpa_printf(MSG_MSGDUMP,
+					   "JSON: String value: '%s'",
+					   curr_token->string);
 			} else if (curr_token->state == JSON_EMPTY) {
 				curr_token->type = JSON_VALUE;
 				curr_token->name = str;
@@ -358,6 +379,12 @@ struct json_token * json_parse(const char *data, size_t data_len)
 				wpa_printf(MSG_MSGDUMP,
 					   "JSON: Literal name: '%s' = %c",
 					   curr_token->name, *pos);
+			} else if (curr_token->parent &&
+				   curr_token->parent->type == JSON_ARRAY &&
+				   curr_token->parent->state == JSON_STARTED &&
+				   curr_token->state == JSON_EMPTY) {
+				wpa_printf(MSG_MSGDUMP,
+					   "JSON: Literal name: %c", *pos);
 			} else {
 				wpa_printf(MSG_DEBUG,
 					   "JSON: Invalid state for a literal name");
@@ -409,6 +436,16 @@ struct json_token * json_parse(const char *data, size_t data_len)
 				wpa_printf(MSG_MSGDUMP,
 					   "JSON: Number value: '%s' = '%d'",
 					   curr_token->name,
+					   curr_token->number);
+			} else if (curr_token->parent &&
+				   curr_token->parent->type == JSON_ARRAY &&
+				   curr_token->parent->state == JSON_STARTED &&
+				   curr_token->state == JSON_EMPTY) {
+				curr_token->number = num;
+				curr_token->state = JSON_COMPLETED;
+				curr_token->type = JSON_NUMBER;
+				wpa_printf(MSG_MSGDUMP,
+					   "JSON: Number value: %d",
 					   curr_token->number);
 			} else {
 				wpa_printf(MSG_DEBUG,
@@ -479,8 +516,8 @@ struct wpabuf * json_get_member_base64url(struct json_token *json,
 	token = json_get_member(json, name);
 	if (!token || token->type != JSON_STRING)
 		return NULL;
-	buf = base64_url_decode((const unsigned char *) token->string,
-				os_strlen(token->string), &buflen);
+	buf = base64_url_decode(token->string, os_strlen(token->string),
+				&buflen);
 	if (!buf)
 		return NULL;
 	ret = wpabuf_alloc_ext_data(buf, buflen);
@@ -538,4 +575,80 @@ void json_print_tree(struct json_token *root, char *buf, size_t buflen)
 {
 	buf[0] = '\0';
 	json_print_token(root, 1, buf, buflen);
+}
+
+
+void json_add_int(struct wpabuf *json, const char *name, int val)
+{
+	wpabuf_printf(json, "\"%s\":%d", name, val);
+}
+
+
+void json_add_string(struct wpabuf *json, const char *name, const char *val)
+{
+	wpabuf_printf(json, "\"%s\":\"%s\"", name, val);
+}
+
+
+int json_add_string_escape(struct wpabuf *json, const char *name,
+			   const void *val, size_t len)
+{
+	char *tmp;
+	size_t tmp_len = 6 * len + 1;
+
+	tmp = os_malloc(tmp_len);
+	if (!tmp)
+		return -1;
+	json_escape_string(tmp, tmp_len, val, len);
+	json_add_string(json, name, tmp);
+	bin_clear_free(tmp, tmp_len);
+	return 0;
+}
+
+
+int json_add_base64url(struct wpabuf *json, const char *name, const void *val,
+		       size_t len)
+{
+	char *b64;
+
+	b64 = base64_url_encode(val, len, NULL);
+	if (!b64)
+		return -1;
+	json_add_string(json, name, b64);
+	os_free(b64);
+	return 0;
+}
+
+
+void json_start_object(struct wpabuf *json, const char *name)
+{
+	if (name)
+		wpabuf_printf(json, "\"%s\":", name);
+	wpabuf_put_u8(json, '{');
+}
+
+
+void json_end_object(struct wpabuf *json)
+{
+	wpabuf_put_u8(json, '}');
+}
+
+
+void json_start_array(struct wpabuf *json, const char *name)
+{
+	if (name)
+		wpabuf_printf(json, "\"%s\":", name);
+	wpabuf_put_u8(json, '[');
+}
+
+
+void json_end_array(struct wpabuf *json)
+{
+	wpabuf_put_u8(json, ']');
+}
+
+
+void json_value_sep(struct wpabuf *json)
+{
+	wpabuf_put_u8(json, ',');
 }
