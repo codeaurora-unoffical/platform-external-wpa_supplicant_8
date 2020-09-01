@@ -31,6 +31,12 @@ namespace hardware {
 namespace wifi {
 namespace hostapd {
 namespace V1_2 {
+
+struct VendorParams {
+	std::string bridgeIfaceName;
+	std::string oweTransIfaceName;
+};
+
 namespace implementation {
 using namespace android::hardware::wifi::hostapd::V1_0;
 
@@ -89,7 +95,7 @@ private:
 	V1_2::HostapdStatus setDebugParamsInternal(DebugLevel level);
 	V1_2::HostapdStatus addSingleAccessPoint(
 	    const IfaceParams& IfaceParams, const NetworkParams& nw_params,
-	    std::string br_name);
+	    const VendorParams& vendor_params);
 	V1_2::HostapdStatus addConcurrentAccessPoints(
 	    const IfaceParams& IfaceParams, const NetworkParams& nw_params);
 	// Raw pointer to the global structure maintained by the core.
