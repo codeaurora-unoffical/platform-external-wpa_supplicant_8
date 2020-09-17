@@ -730,6 +730,9 @@ static int p2p_group_info_text(const u8 *gi, size_t gi_len, char *buf,
 			return pos - buf;
 		pos += ret;
 
+		if (!wps_dev_type_bin2str(cli->pri_dev_type,devtype,sizeof(devtype)))
+			return 0;
+
 		ret = os_snprintf(pos, end - pos,
 				  " dev_capab=0x%x config_methods=0x%x "
 				  "dev_type=%s",
@@ -740,6 +743,9 @@ static int p2p_group_info_text(const u8 *gi, size_t gi_len, char *buf,
 		if (os_snprintf_error(end - pos, ret))
 			return pos - buf;
 		pos += ret;
+
+		if (!wps_dev_type_bin2str(cli->sec_dev_types,devtype, sizeof(devtype)))
+			return 0;
 
 		for (s = 0; s < cli->num_sec_dev_types; s++) {
 			ret = os_snprintf(pos, end - pos, " dev_type=%s",
