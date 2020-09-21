@@ -1,7 +1,7 @@
 TESTS=test-base64 test-md4 test-milenage \
 	test-rsa-sig-ver \
 	test-sha1 \
-	test-sha256 test-aes test-asn1 test-x509 test-x509v3 test-list test-rc4
+	test-sha256 test-aes test-asn1 test-x509v3 test-list test-rc4
 
 all: $(TESTS)
 
@@ -32,7 +32,6 @@ CFLAGS += -DTEST_FUZZ
 endif
 
 CFLAGS += -DCONFIG_IEEE80211R_AP
-CFLAGS += -DCONFIG_IEEE80211W
 CFLAGS += -DCONFIG_IEEE80211R
 CFLAGS += -DCONFIG_TDLS
 
@@ -147,9 +146,6 @@ test-sha256: test-sha256.o $(LIBS)
 	$(LDO) $(LDFLAGS) -o $@ $^ $(LLIBS)
 
 test-tls: test-tls.o $(LIBS)
-	$(LDO) $(LDFLAGS) -o $@ $< $(LLIBS)
-
-test-x509: test-x509.o $(LIBS)
 	$(LDO) $(LDFLAGS) -o $@ $< $(LLIBS)
 
 test-x509v3: test-x509v3.o $(LIBS)

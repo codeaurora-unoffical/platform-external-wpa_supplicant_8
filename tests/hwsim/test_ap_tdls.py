@@ -14,9 +14,10 @@ import hwsim_utils
 from hostapd import HostapdGlobal
 from hostapd import Hostapd
 import hostapd
-from utils import HwsimSkip, skip_with_fips
+from utils import *
 from wlantest import Wlantest
 from test_ap_vht import vht_supported
+from test_wep import check_wep_capa
 
 def start_ap_wpa2_psk(ap):
     params = hostapd.wpa2_params(ssid="test-wpa2-psk", passphrase="12345678")
@@ -30,6 +31,8 @@ def connectivity(dev, hapd):
 def connect_2sta(dev, ssid, hapd):
     dev[0].connect(ssid, psk="12345678", scan_freq="2412")
     dev[1].connect(ssid, psk="12345678", scan_freq="2412")
+    hapd.wait_sta()
+    hapd.wait_sta()
     connectivity(dev, hapd)
 
 def connect_2sta_wpa2_psk(dev, hapd):
@@ -43,6 +46,8 @@ def connect_2sta_wpa_psk_mixed(dev, hapd):
                    scan_freq="2412")
     dev[1].connect("test-wpa-mixed-psk", psk="12345678", proto="WPA2",
                    scan_freq="2412")
+    hapd.wait_sta()
+    hapd.wait_sta()
     connectivity(dev, hapd)
 
 def connect_2sta_wep(dev, hapd):
@@ -50,11 +55,15 @@ def connect_2sta_wep(dev, hapd):
                    scan_freq="2412")
     dev[1].connect("test-wep", key_mgmt="NONE", wep_key0='"hello"',
                    scan_freq="2412")
+    hapd.wait_sta()
+    hapd.wait_sta()
     connectivity(dev, hapd)
 
 def connect_2sta_open(dev, hapd, scan_freq="2412"):
     dev[0].connect("test-open", key_mgmt="NONE", scan_freq=scan_freq)
     dev[1].connect("test-open", key_mgmt="NONE", scan_freq=scan_freq)
+    hapd.wait_sta()
+    hapd.wait_sta()
     connectivity(dev, hapd)
 
 def wlantest_setup(hapd):
@@ -282,6 +291,8 @@ def test_ap_wpa2_tdls_double_tpk_m2(dev, apdev):
 def test_ap_wpa_tdls(dev, apdev):
     """WPA-PSK AP and two stations using TDLS"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
+    skip_without_tkip(dev[1])
     hapd = hostapd.add_ap(apdev[0],
                           hostapd.wpa_params(ssid="test-wpa-psk",
                                              passphrase="12345678"))
@@ -294,6 +305,7 @@ def test_ap_wpa_tdls(dev, apdev):
 def test_ap_wpa_mixed_tdls(dev, apdev):
     """WPA+WPA2-PSK AP and two stations using TDLS"""
     skip_with_fips(dev[0])
+    skip_without_tkip(dev[0])
     hapd = hostapd.add_ap(apdev[0],
                           hostapd.wpa_mixed_params(ssid="test-wpa-mixed-psk",
                                                    passphrase="12345678"))
@@ -305,6 +317,8 @@ def test_ap_wpa_mixed_tdls(dev, apdev):
 
 def test_ap_wep_tdls(dev, apdev):
     """WEP AP and two stations using TDLS"""
+    check_wep_capa(dev[0])
+    check_wep_capa(dev[1])
     hapd = hostapd.add_ap(apdev[0],
                           {"ssid": "test-wep", "wep_key0": '"hello"'})
     wlantest_setup(hapd)

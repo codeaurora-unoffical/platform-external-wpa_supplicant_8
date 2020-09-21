@@ -81,8 +81,8 @@ def test_discovery(dev):
     if addr1 not in ev0:
         raise Exception("Dev1 not in provision discovery event")
 
-    dev[0].p2p_stop_find
-    dev[1].p2p_stop_find
+    dev[0].p2p_stop_find()
+    dev[1].p2p_stop_find()
 
     if "FAIL" not in dev[0].p2p_find(dev_id="foo"):
         raise Exception("P2P_FIND with invalid dev_id accepted")
@@ -653,6 +653,22 @@ def test_discovery_long_listen(dev):
 
     dev[1].p2p_stop_find()
     wpas.p2p_stop_find()
+
+def test_discovery_long_listen2(dev):
+    """Long P2P_LISTEN longer than remain-on-channel time"""
+    with HWSimRadio(use_p2p_device=True) as (radio, iface):
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(iface)
+        addr = wpas.p2p_dev_addr()
+        wpas.request("P2P_LISTEN 15")
+
+        # Wait for remain maximum remain-on-channel time to pass
+        time.sleep(7)
+
+        if not dev[0].discover_peer(addr):
+            raise Exception("Device discovery timed out")
+        dev[0].p2p_stop_find()
+        wpas.p2p_stop_find()
 
 def pd_test(dev, addr):
     if not dev.discover_peer(addr, freq=2412):

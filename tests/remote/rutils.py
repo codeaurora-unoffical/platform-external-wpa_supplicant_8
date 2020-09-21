@@ -138,6 +138,12 @@ def run_wpasupplicant(host, setup_params):
     if status != 0:
         raise Exception("Could not run wpa_supplicant: " + buf)
 
+def kill_wpasupplicant(host, setup_params):
+    host.execute(['killall', setup_params['wpa_supplicant']])
+
+def kill_hostapd(host, setup_params):
+    host.execute(['killall', setup_params['hostapd']])
+
 def get_ap_params(channel="1", bw="HT20", country="US", security="open", ht_capab=None, vht_capab=None):
     ssid = "test_" + channel + "_" + security + "_" + bw
 
@@ -233,6 +239,8 @@ def get_ipv6(client, ifname=None):
 
     for line in lines:
         res = line.find("Scope:Link")
+        if res == -1:
+            res = line.find("<link>")
         if res != -1:
             break
 
@@ -242,6 +250,8 @@ def get_ipv6(client, ifname=None):
             addr_mask = words[2]
             addr = addr_mask.split("/")
             return addr[0]
+        if words[0] == "inet6":
+            return words[1]
 
     return "unknown"
 
@@ -275,7 +285,7 @@ def get_mac_addr(host, iface=None):
     for word in words:
         if found == 1:
             return word
-        if word == "HWaddr":
+        if word == "HWaddr" or word == "ether":
             found = 1
     raise Exception("Could not find HWaddr")
 
@@ -500,7 +510,7 @@ def iperf_wait(server, client, server_thread, client_thread, timeout=None, iperf
 
     server.wait_execute_complete(server_thread, 5)
     if server_thread.isAlive():
-        raise Execption("iperf server thread still alive")
+        raise Exception("iperf server thread still alive")
 
     return
 

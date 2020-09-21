@@ -7,9 +7,13 @@
  */
 
 #include "utils/includes.h"
+#ifdef CONFIG_SQLITE
+#include <sqlite3.h>
+#endif /* CONFIG_SQLITE */
 
 #include "utils/common.h"
 #include "utils/eloop.h"
+#include "utils/crc32.h"
 #include "common/ieee802_11_defs.h"
 #include "common/wpa_ctrl.h"
 #include "common/hw_features_common.h"
@@ -25,7 +29,6 @@
 #include "accounting.h"
 #include "ap_list.h"
 #include "beacon.h"
-#include "iapp.h"
 #include "ieee802_1x.h"
 #include "ieee802_11_auth.h"
 #include "vlan_init.h"
@@ -55,8 +58,10 @@
 
 
 static int hostapd_flush_old_stations(struct hostapd_data *hapd, u16 reason);
+#ifdef CONFIG_WEP
 static int hostapd_setup_encryption(char *iface, struct hostapd_data *hapd);
 static int hostapd_broadcast_wep_clear(struct hostapd_data *hapd);
+#endif /* CONFIG_WEP */
 static int setup_interface2(struct hostapd_iface *iface);
 static void channel_list_update_timeout(void *eloop_ctx, void *timeout_ctx);
 static void hostapd_interface_setup_failure_handler(void *eloop_ctx,
@@ -86,7 +91,9 @@ void hostapd_reconfig_encryption(struct hostapd_data *hapd)
 		return;
 
 	hostapd_set_privacy(hapd, 0);
+#ifdef CONFIG_WEP
 	hostapd_setup_encryption(hapd->conf->iface, hapd);
+#endif /* CONFIG_WEP */
 }
 
 
@@ -139,7 +146,9 @@ static void hostapd_reload_bss(struct hostapd_data *hapd)
 		wpa_deinit(hapd->wpa_auth);
 		hapd->wpa_auth = NULL;
 		hostapd_set_privacy(hapd, 0);
+#ifdef CONFIG_WEP
 		hostapd_setup_encryption(hapd->conf->iface, hapd);
+#endif /* CONFIG_WEP */
 		hostapd_set_generic_elem(hapd, (u8 *) "", 0);
 	}
 
@@ -167,7 +176,9 @@ static void hostapd_clear_old(struct hostapd_iface *iface)
 	for (j = 0; j < iface->num_bss; j++) {
 		hostapd_flush_old_stations(iface->bss[j],
 					   WLAN_REASON_PREV_AUTH_NOT_VALID);
+#ifdef CONFIG_WEP
 		hostapd_broadcast_wep_clear(iface->bss[j]);
+#endif /* CONFIG_WEP */
 
 #ifndef CONFIG_NO_RADIUS
 		/* TODO: update dynamic data based on changed configuration
@@ -281,6 +292,8 @@ int hostapd_reload_config(struct hostapd_iface *iface)
 }
 
 
+#ifdef CONFIG_WEP
+
 static void hostapd_broadcast_key_clear_iface(struct hostapd_data *hapd,
 					      const char *ifname)
 {
@@ -289,26 +302,24 @@ static void hostapd_broadcast_key_clear_iface(struct hostapd_data *hapd,
 	if (!ifname || !hapd->drv_priv)
 		return;
 	for (i = 0; i < NUM_WEP_KEYS; i++) {
-		if (hostapd_drv_set_key(ifname, hapd, WPA_ALG_NONE, NULL, i,
-					0, NULL, 0, NULL, 0)) {
+		if (hostapd_drv_set_key(ifname, hapd, WPA_ALG_NONE, NULL, i, 0,
+					0, NULL, 0, NULL, 0, KEY_FLAG_GROUP)) {
 			wpa_printf(MSG_DEBUG, "Failed to clear default "
 				   "encryption keys (ifname=%s keyidx=%d)",
 				   ifname, i);
 		}
 	}
-#ifdef CONFIG_IEEE80211W
 	if (hapd->conf->ieee80211w) {
 		for (i = NUM_WEP_KEYS; i < NUM_WEP_KEYS + 2; i++) {
 			if (hostapd_drv_set_key(ifname, hapd, WPA_ALG_NONE,
-						NULL, i, 0, NULL,
-						0, NULL, 0)) {
+						NULL, i, 0, 0, NULL,
+						0, NULL, 0, KEY_FLAG_GROUP)) {
 				wpa_printf(MSG_DEBUG, "Failed to clear "
 					   "default mgmt encryption keys "
 					   "(ifname=%s keyidx=%d)", ifname, i);
 			}
 		}
 	}
-#endif /* CONFIG_IEEE80211W */
 }
 
 
@@ -325,17 +336,20 @@ static int hostapd_broadcast_wep_set(struct hostapd_data *hapd)
 	struct hostapd_ssid *ssid = &hapd->conf->ssid;
 
 	idx = ssid->wep.idx;
-	if (ssid->wep.default_len &&
+	if (ssid->wep.default_len && ssid->wep.key[idx] &&
 	    hostapd_drv_set_key(hapd->conf->iface,
-				hapd, WPA_ALG_WEP, broadcast_ether_addr, idx,
+				hapd, WPA_ALG_WEP, broadcast_ether_addr, idx, 0,
 				1, NULL, 0, ssid->wep.key[idx],
-				ssid->wep.len[idx])) {
+				ssid->wep.len[idx],
+				KEY_FLAG_GROUP_RX_TX_DEFAULT)) {
 		wpa_printf(MSG_WARNING, "Could not set WEP encryption.");
 		errors++;
 	}
 
 	return errors;
 }
+
+#endif /* CONFIG_WEP */
 
 
 static void hostapd_free_hapd_data(struct hostapd_data *hapd)
@@ -360,8 +374,6 @@ static void hostapd_free_hapd_data(struct hostapd_data *hapd)
 	hapd->beacon_set_done = 0;
 
 	wpa_printf(MSG_DEBUG, "%s(%s)", __func__, hapd->conf->iface);
-	iapp_deinit(hapd->iapp);
-	hapd->iapp = NULL;
 	accounting_deinit(hapd);
 	hostapd_deinit_wpa(hapd);
 	vlan_deinit(hapd);
@@ -481,11 +493,9 @@ static void sta_track_deinit(struct hostapd_iface *iface)
 static void hostapd_cleanup_iface_partial(struct hostapd_iface *iface)
 {
 	wpa_printf(MSG_DEBUG, "%s(%p)", __func__, iface);
-#ifdef CONFIG_IEEE80211N
 #ifdef NEED_AP_MLME
 	hostapd_stop_setup_timers(iface);
 #endif /* NEED_AP_MLME */
-#endif /* CONFIG_IEEE80211N */
 	if (iface->current_mode)
 		acs_cleanup(iface);
 	hostapd_free_hw_features(iface->hw_features, iface->num_hw_features);
@@ -526,6 +536,8 @@ static void hostapd_cleanup_iface(struct hostapd_iface *iface)
 }
 
 
+#ifdef CONFIG_WEP
+
 static void hostapd_clear_wep(struct hostapd_data *hapd)
 {
 	if (hapd->drv_priv && !hapd->iface->driver_ap_teardown && hapd->conf) {
@@ -554,10 +566,13 @@ static int hostapd_setup_encryption(char *iface, struct hostapd_data *hapd)
 
 	for (i = 0; i < 4; i++) {
 		if (hapd->conf->ssid.wep.key[i] &&
-		    hostapd_drv_set_key(iface, hapd, WPA_ALG_WEP, NULL, i,
+		    hostapd_drv_set_key(iface, hapd, WPA_ALG_WEP, NULL, i, 0,
 					i == hapd->conf->ssid.wep.idx, NULL, 0,
 					hapd->conf->ssid.wep.key[i],
-					hapd->conf->ssid.wep.len[i])) {
+					hapd->conf->ssid.wep.len[i],
+					i == hapd->conf->ssid.wep.idx ?
+					KEY_FLAG_GROUP_RX_TX_DEFAULT :
+					KEY_FLAG_GROUP_RX_TX)) {
 			wpa_printf(MSG_WARNING, "Could not set WEP "
 				   "encryption.");
 			return -1;
@@ -569,6 +584,8 @@ static int hostapd_setup_encryption(char *iface, struct hostapd_data *hapd)
 
 	return 0;
 }
+
+#endif /* CONFIG_WEP */
 
 
 static int hostapd_flush_old_stations(struct hostapd_data *hapd, u16 reason)
@@ -605,7 +622,9 @@ static void hostapd_bss_deinit_no_free(struct hostapd_data *hapd)
 {
 	hostapd_free_stas(hapd);
 	hostapd_flush_old_stations(hapd, WLAN_REASON_DEAUTH_LEAVING);
+#ifdef CONFIG_WEP
 	hostapd_clear_wep(hapd);
+#endif /* CONFIG_WEP */
 }
 
 
@@ -1025,6 +1044,43 @@ hostapd_das_coa(void *ctx, struct radius_das_attrs *attr)
 #define hostapd_das_coa NULL
 #endif /* CONFIG_HS20 */
 
+
+#ifdef CONFIG_SQLITE
+
+static int db_table_exists(sqlite3 *db, const char *name)
+{
+	char cmd[128];
+
+	os_snprintf(cmd, sizeof(cmd), "SELECT 1 FROM %s;", name);
+	return sqlite3_exec(db, cmd, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+
+static int db_table_create_radius_attributes(sqlite3 *db)
+{
+	char *err = NULL;
+	const char *sql =
+		"CREATE TABLE radius_attributes("
+		" id INTEGER PRIMARY KEY,"
+		" sta TEXT,"
+		" reqtype TEXT,"
+		" attr TEXT"
+		");"
+		"CREATE INDEX idx_sta_reqtype ON radius_attributes(sta,reqtype);";
+
+	wpa_printf(MSG_DEBUG,
+		   "Adding database table for RADIUS attribute information");
+	if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+		wpa_printf(MSG_ERROR, "SQLite error: %s", err);
+		sqlite3_free(err);
+		return -1;
+	}
+
+	return 0;
+}
+
+#endif /* CONFIG_SQLITE */
+
 #endif /* CONFIG_NO_RADIUS */
 
 
@@ -1123,9 +1179,11 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 					   WLAN_REASON_PREV_AUTH_NOT_VALID);
 	hostapd_set_privacy(hapd, 0);
 
+#ifdef CONFIG_WEP
 	hostapd_broadcast_wep_clear(hapd);
 	if (hostapd_setup_encryption(conf->iface, hapd))
 		return -1;
+#endif /* CONFIG_WEP */
 
 	/*
 	 * Fetch the SSID from the system and use it or,
@@ -1155,8 +1213,14 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 		os_memcpy(conf->ssid.ssid, ssid, conf->ssid.ssid_len);
 	}
 
+	/*
+	 * Short SSID calculation is identical to FCS and it is defined in
+	 * IEEE P802.11-REVmd/D3.0, 9.4.2.170.3 (Calculating the Short-SSID).
+	 */
+	conf->ssid.short_ssid = crc32(conf->ssid.ssid, conf->ssid.ssid_len);
+
 	if (!hostapd_drv_none(hapd)) {
-		wpa_printf(MSG_ERROR, "Using interface %s with hwaddr " MACSTR
+		wpa_printf(MSG_DEBUG, "Using interface %s with hwaddr " MACSTR
 			   " and ssid \"%s\"",
 			   conf->iface, MAC2STR(hapd->own_addr),
 			   wpa_ssid_txt(conf->ssid.ssid, conf->ssid.ssid_len));
@@ -1178,6 +1242,24 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 	if (wpa_debug_level <= MSG_MSGDUMP)
 		conf->radius->msg_dumps = 1;
 #ifndef CONFIG_NO_RADIUS
+
+#ifdef CONFIG_SQLITE
+	if (conf->radius_req_attr_sqlite) {
+		if (sqlite3_open(conf->radius_req_attr_sqlite,
+				 &hapd->rad_attr_db)) {
+			wpa_printf(MSG_ERROR, "Could not open SQLite file '%s'",
+				   conf->radius_req_attr_sqlite);
+			return -1;
+		}
+
+		wpa_printf(MSG_DEBUG, "Opening RADIUS attribute database: %s",
+			   conf->radius_req_attr_sqlite);
+		if (!db_table_exists(hapd->rad_attr_db, "radius_attributes") &&
+		    db_table_create_radius_attributes(hapd->rad_attr_db) < 0)
+			return -1;
+	}
+#endif /* CONFIG_SQLITE */
+
 	hapd->radius = radius_client_init(hapd, conf->radius);
 	if (hapd->radius == NULL) {
 		wpa_printf(MSG_ERROR, "RADIUS client initialization failed.");
@@ -1237,13 +1319,6 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 
 	if (accounting_init(hapd)) {
 		wpa_printf(MSG_ERROR, "Accounting initialization failed.");
-		return -1;
-	}
-
-	if (conf->ieee802_11f &&
-	    (hapd->iapp = iapp_init(hapd, conf->iapp_iface)) == NULL) {
-		wpa_printf(MSG_ERROR, "IEEE 802.11F (IAPP) initialization "
-			   "failed.");
 		return -1;
 	}
 
@@ -1526,6 +1601,51 @@ static int setup_interface(struct hostapd_iface *iface)
 }
 
 
+static int configured_fixed_chan_to_freq(struct hostapd_iface *iface)
+{
+	int freq, i, j;
+
+	if (!iface->conf->channel)
+		return 0;
+	if (iface->conf->op_class) {
+		freq = ieee80211_chan_to_freq(NULL, iface->conf->op_class,
+					      iface->conf->channel);
+		if (freq < 0) {
+			wpa_printf(MSG_INFO,
+				   "Could not convert op_class %u channel %u to operating frequency",
+				   iface->conf->op_class, iface->conf->channel);
+			return -1;
+		}
+		iface->freq = freq;
+		return 0;
+	}
+
+	/* Old configurations using only 2.4/5/60 GHz bands may not specify the
+	 * op_class parameter. Select a matching channel from the configured
+	 * mode using the channel parameter for these cases.
+	 */
+	for (j = 0; j < iface->num_hw_features; j++) {
+		struct hostapd_hw_modes *mode = &iface->hw_features[j];
+
+		if (iface->conf->hw_mode != HOSTAPD_MODE_IEEE80211ANY &&
+		    iface->conf->hw_mode != mode->mode)
+			continue;
+		for (i = 0; i < mode->num_channels; i++) {
+			struct hostapd_channel_data *chan = &mode->channels[i];
+
+			if (chan->chan == iface->conf->channel &&
+			    !is_6ghz_freq(chan->freq)) {
+				iface->freq = chan->freq;
+				return 0;
+			}
+		}
+	}
+
+	wpa_printf(MSG_INFO, "Could not determine operating frequency");
+	return -1;
+}
+
+
 static int setup_interface2(struct hostapd_iface *iface)
 {
 	iface->wait_channel_update = 0;
@@ -1534,7 +1654,20 @@ static int setup_interface2(struct hostapd_iface *iface)
 		/* Not all drivers support this yet, so continue without hw
 		 * feature data. */
 	} else {
-		int ret = hostapd_select_hw_mode(iface);
+		int ret;
+
+		ret = configured_fixed_chan_to_freq(iface);
+		if (ret < 0)
+			goto fail;
+
+		if (iface->conf->op_class) {
+			int ch_width;
+
+			ch_width = op_class_to_ch_width(iface->conf->op_class);
+			hostapd_set_oper_chwidth(iface->conf, ch_width);
+		}
+
+		ret = hostapd_select_hw_mode(iface);
 		if (ret < 0) {
 			wpa_printf(MSG_ERROR, "Could not select hw_mode and "
 				   "channel. (%d)", ret);
@@ -1544,6 +1677,9 @@ static int setup_interface2(struct hostapd_iface *iface)
 			wpa_printf(MSG_DEBUG, "Interface initialization will be completed in a callback (ACS)");
 			return 0;
 		}
+		ret = hostapd_check_edmg_capab(iface);
+		if (ret < 0)
+			goto fail;
 		ret = hostapd_check_ht_capab(iface);
 		if (ret < 0)
 			goto fail;
@@ -1815,12 +1951,11 @@ static int hostapd_setup_interface_complete_sync(struct hostapd_iface *iface,
 		goto fail;
 
 	wpa_printf(MSG_DEBUG, "Completing interface initialization");
-	if (iface->conf->channel) {
+	if (iface->freq) {
 #ifdef NEED_AP_MLME
 		int res;
 #endif /* NEED_AP_MLME */
 
-		iface->freq = hostapd_hw_get_freq(hapd, iface->conf->channel);
 		wpa_printf(MSG_DEBUG, "Mode: %s  Channel: %d  "
 			   "Frequency: %d MHz",
 			   hostapd_hw_mode_txt(iface->conf->hw_mode),
@@ -1868,6 +2003,8 @@ static int hostapd_setup_interface_complete_sync(struct hostapd_iface *iface,
 		if (!delay_apply_cfg &&
 		    hostapd_set_freq(hapd, hapd->iconf->hw_mode, iface->freq,
 				     hapd->iconf->channel,
+				     hapd->iconf->enable_edmg,
+				     hapd->iconf->edmg_channel,
 				     hapd->iconf->ieee80211n,
 				     hapd->iconf->ieee80211ac,
 				     hapd->iconf->ieee80211ax,
@@ -2194,6 +2331,12 @@ static void hostapd_bss_deinit(struct hostapd_data *hapd)
 		   hapd->conf ? hapd->conf->iface : "N/A");
 	hostapd_bss_deinit_no_free(hapd);
 	wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
+#ifdef CONFIG_SQLITE
+	if (hapd->rad_attr_db) {
+		sqlite3_close(hapd->rad_attr_db);
+		hapd->rad_attr_db = NULL;
+	}
+#endif /* CONFIG_SQLITE */
 	hostapd_cleanup(hapd);
 }
 
@@ -2224,12 +2367,10 @@ void hostapd_interface_deinit(struct hostapd_iface *iface)
 		hostapd_bss_deinit(iface->bss[j]);
 	}
 
-#ifdef CONFIG_IEEE80211N
 #ifdef NEED_AP_MLME
 	hostapd_stop_setup_timers(iface);
 	eloop_cancel_timeout(ap_ht2040_timeout, iface, NULL);
 #endif /* NEED_AP_MLME */
-#endif /* CONFIG_IEEE80211N */
 }
 
 
@@ -2994,10 +3135,6 @@ void hostapd_new_assoc_sta(struct hostapd_data *hapd, struct sta_info *sta,
 	hostapd_prune_associations(hapd, sta->addr);
 	ap_sta_clear_disconnect_timeouts(hapd, sta);
 
-	/* IEEE 802.11F (IAPP) */
-	if (hapd->conf->ieee802_11f)
-		iapp_new_station(hapd->iapp, sta);
-
 #ifdef CONFIG_P2P
 	if (sta->p2p_ie == NULL && !sta->no_p2p_set) {
 		sta->no_p2p_set = 1;
@@ -3234,14 +3371,16 @@ static int hostapd_change_config_freq(struct hostapd_data *hapd,
 	if (old_params &&
 	    hostapd_set_freq_params(old_params, conf->hw_mode,
 				    hostapd_hw_get_freq(hapd, conf->channel),
-				    conf->channel, conf->ieee80211n,
+				    conf->channel, conf->enable_edmg,
+				    conf->edmg_channel, conf->ieee80211n,
 				    conf->ieee80211ac, conf->ieee80211ax,
 				    conf->secondary_channel,
 				    hostapd_get_oper_chwidth(conf),
 				    hostapd_get_oper_centr_freq_seg0_idx(conf),
 				    hostapd_get_oper_centr_freq_seg1_idx(conf),
 				    conf->vht_capab,
-				    mode ? &mode->he_capab : NULL))
+				    mode ? &mode->he_capab[IEEE80211_MODE_AP] :
+				    NULL))
 		return -1;
 
 	switch (params->bandwidth) {

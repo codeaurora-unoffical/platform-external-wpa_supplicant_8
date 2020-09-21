@@ -12,7 +12,8 @@ import re
 import subprocess
 
 import hwsim_utils
-from utils import alloc_fail, wait_fail_trigger
+from utils import *
+from test_wep import check_wep_capa
 
 def connect_ibss_cmd(dev, id, freq=2412):
     dev.dump_monitor()
@@ -189,6 +190,9 @@ def test_ibss_rsn_group_rekey(dev):
 
 def test_ibss_wpa_none(dev):
     """IBSS WPA-None"""
+    skip_without_tkip(dev[0])
+    skip_without_tkip(dev[1])
+    skip_without_tkip(dev[2])
     ssid = "ibss-wpa-none"
 
     logger.info("Start IBSS on the first STA")
@@ -257,6 +261,8 @@ def test_ibss_wpa_none(dev):
 
 def test_ibss_wpa_none_ccmp(dev):
     """IBSS WPA-None/CCMP"""
+    skip_without_tkip(dev[0])
+    skip_without_tkip(dev[1])
     ssid = "ibss-wpa-none"
 
     logger.info("Start IBSS on the first STA")
@@ -377,6 +383,8 @@ def test_ibss_open_retry(dev):
 
 def test_ibss_rsn_tkip(dev):
     """IBSS RSN with TKIP as the cipher"""
+    skip_without_tkip(dev[0])
+    skip_without_tkip(dev[1])
     ssid = "ibss-rsn-tkip"
 
     id = add_ibss_rsn_tkip(dev[0], ssid)
@@ -395,6 +403,9 @@ def test_ibss_rsn_tkip(dev):
 
 def test_ibss_wep(dev):
     """IBSS with WEP"""
+    check_wep_capa(dev[0])
+    check_wep_capa(dev[1])
+
     ssid = "ibss-wep"
 
     id = add_ibss(dev[0], ssid, key_mgmt="NONE", wep_key0='"hello"')

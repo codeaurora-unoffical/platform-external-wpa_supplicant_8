@@ -17,7 +17,7 @@ import hostapd
 from tshark import run_tshark
 from wpasupplicant import WpaSupplicant
 import hwsim_utils
-from utils import HwsimSkip, alloc_fail
+from utils import *
 from test_erp import check_erp_capa, start_erp_as
 from test_ap_hs20 import ip_checksum
 
@@ -471,7 +471,7 @@ def test_fils_sk_erp_followed_by_pmksa_caching(dev, apdev, params):
 
     pmksa = dev[0].get_pmksa(bssid)
     if pmksa is None:
-	    raise Exception("No PMKSA cache entry created")
+        raise Exception("No PMKSA cache entry created")
 
     dev[0].request("DISCONNECT")
     dev[0].wait_disconnected()
@@ -493,9 +493,9 @@ def test_fils_sk_erp_followed_by_pmksa_caching(dev, apdev, params):
 
     pmksa2 = dev[0].get_pmksa(bssid)
     if pmksa2 is None:
-	    raise Exception("No PMKSA cache entry found")
+        raise Exception("No PMKSA cache entry found")
     if pmksa['pmkid'] != pmksa2['pmkid']:
-	    raise Exception("Unexpected PMKID change")
+        raise Exception("Unexpected PMKID change")
 
 def test_fils_sk_erp_another_ssid(dev, apdev, params):
     """FILS SK using ERP and roam to another SSID"""
@@ -1640,6 +1640,7 @@ def test_fils_sk_auth_mismatch(dev, apdev, params):
     dev[0].request("DISCONNECT")
     dev[0].wait_disconnected()
 
+    hapd.dump_monitor()
     dev[0].dump_monitor()
     dev[0].select_network(id, freq=2412)
     ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
@@ -1650,10 +1651,11 @@ def test_fils_sk_auth_mismatch(dev, apdev, params):
     if "CTRL-EVENT-EAP-STARTED" not in ev:
         raise Exception("No EAP exchange seen")
     dev[0].wait_connected()
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev[0], hapd)
 
 def setup_fils_rekey(dev, apdev, params, wpa_ptk_rekey=0, wpa_group_rekey=0,
-                     pmksa_caching=True):
+                     pmksa_caching=True, ext_key_id=False):
     check_fils_capa(dev[0])
     check_erp_capa(dev[0])
 
@@ -1671,6 +1673,8 @@ def setup_fils_rekey(dev, apdev, params, wpa_ptk_rekey=0, wpa_group_rekey=0,
         params['wpa_group_rekey'] = str(wpa_group_rekey)
     if not pmksa_caching:
             params['disable_pmksa_caching'] = '1'
+    if ext_key_id:
+        params['extended_key_id'] = '1'
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
@@ -1904,6 +1908,7 @@ def run_fils_and_ft_setup(dev, apdev, params, key_mgmt):
                         eap="PSK", identity="psk.user@example.com",
                         password_hex="0123456789abcdef0123456789abcdef",
                         erp="1", scan_freq="2412")
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev[0], hapd)
 
     dev[0].request("DISCONNECT")
@@ -1950,6 +1955,7 @@ def run_fils_and_ft_setup(dev, apdev, params, key_mgmt):
         raise Exception("Authentication failed")
     if "EVENT-ASSOC-REJECT" in ev:
         raise Exception("Association failed")
+    hapd.wait_sta()
     hwsim_utils.test_connectivity(dev[0], hapd)
 
     er.disable()
@@ -2183,6 +2189,66 @@ def run_fils_sk_erp_radius_ext(dev, apdev, params):
         raise Exception("Association failed")
     hwsim_utils.test_connectivity(dev[0], hapd)
 
+def test_fils_sk_erp_radius_roam(dev, apdev):
+    """FILS SK/ERP and roaming with different AKM"""
+    as_hapd = hostapd.Hostapd("as")
+    try:
+        as_hapd.disable()
+        as_hapd.set("eap_server_erp", "1")
+        as_hapd.set("erp_domain", "example.com")
+        as_hapd.enable()
+        run_fils_sk_erp_radius_roam(dev, apdev)
+    finally:
+        as_hapd.disable()
+        as_hapd.set("eap_server_erp", "0")
+        as_hapd.set("erp_domain", "")
+        as_hapd.enable()
+
+def run_fils_sk_erp_radius_roam(dev, apdev):
+    check_fils_capa(dev[0])
+    check_erp_capa(dev[0])
+
+    bssid = apdev[0]['bssid']
+    params = hostapd.wpa2_eap_params(ssid="fils")
+    params['wpa_key_mgmt'] = "FILS-SHA256"
+    params['erp_domain'] = 'example.com'
+    params['fils_realm'] = 'example.com'
+    params['disable_pmksa_caching'] = '1'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[0].request("ERP_FLUSH")
+    id = dev[0].connect("fils", key_mgmt="FILS-SHA256 FILS-SHA384",
+                        eap="PWD", identity="erp-pwd@example.com",
+                        password="secret password",
+                        erp="1", scan_freq="2412")
+
+    bssid2 = apdev[1]['bssid']
+    params = hostapd.wpa2_eap_params(ssid="fils")
+    params['wpa_key_mgmt'] = "FILS-SHA384"
+    params['erp_domain'] = 'example.com'
+    params['fils_realm'] = 'example.com'
+    params['disable_pmksa_caching'] = '1'
+    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+
+    dev[0].scan_for_bss(bssid2, freq=2412)
+
+    dev[0].dump_monitor()
+    if "OK" not in dev[0].request("ROAM " + bssid2):
+        raise Exception("ROAM failed")
+
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-STARTED",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("Connection using PMKSA caching timed out")
+    if "CTRL-EVENT-EAP-STARTED" in ev:
+        raise Exception("Unexpected EAP exchange")
+    if bssid2 not in ev:
+        raise Exception("Failed to connect to the second AP")
+
+    hapd2.wait_sta()
+    hwsim_utils.test_connectivity(dev[0], hapd2)
+
 def test_fils_sk_erp_roam_diff_akm(dev, apdev, params):
     """FILS SK using ERP and SHA256/SHA384 change in roam"""
     check_fils_capa(dev[0])
@@ -2238,3 +2304,29 @@ def test_fils_sk_erp_roam_diff_akm(dev, apdev, params):
         raise Exception("Failed to connect to the second AP")
 
     hwsim_utils.test_connectivity(dev[0], hapd2)
+
+def test_fils_auth_ptk_rekey_ap_ext_key_id(dev, apdev, params):
+    """PTK rekeying after FILS authentication triggered by AP (Ext Key ID)"""
+    check_ext_key_id_capa(dev[0])
+    try:
+        dev[0].set("extended_key_id", "1")
+        hapd = setup_fils_rekey(dev, apdev, params, wpa_ptk_rekey=2,
+                                ext_key_id=True)
+        check_ext_key_id_capa(hapd)
+        idx = int(dev[0].request("GET last_tk_key_idx"))
+        if idx != 0:
+            raise Exception("Unexpected Key ID before TK rekey: %d" % idx)
+        ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=3)
+        if ev is None:
+            raise Exception("PTK rekey timed out")
+        idx = int(dev[0].request("GET last_tk_key_idx"))
+        if idx != 1:
+            raise Exception("Unexpected Key ID after TK rekey: %d" % idx)
+        hwsim_utils.test_connectivity(dev[0], hapd)
+
+        ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=1)
+        if ev is not None:
+            raise Exception("Rekeying failed - disconnected")
+        hwsim_utils.test_connectivity(dev[0], hapd)
+    finally:
+        dev[0].set("extended_key_id", "0")
