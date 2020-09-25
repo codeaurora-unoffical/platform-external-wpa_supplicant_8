@@ -25,9 +25,6 @@
 
 #define EAP_MAX_AUTH_ROUNDS 50
 
-static void eap_user_free(struct eap_user *user);
-
-
 /* EAP state machines are described in RFC 4137 */
 
 static int eap_sm_calculateTimeout(struct eap_sm *sm, int retransCount,
@@ -96,7 +93,8 @@ static struct wpabuf * eap_sm_buildInitiateReauthStart(struct eap_sm *sm,
 		plen += 2 + domain_len;
 	}
 
-	msg = eap_msg_alloc(EAP_VENDOR_IETF, EAP_ERP_TYPE_REAUTH_START, plen,
+	msg = eap_msg_alloc(EAP_VENDOR_IETF,
+			    (EapType) EAP_ERP_TYPE_REAUTH_START, plen,
 			    EAP_CODE_INITIATE, id);
 	if (msg == NULL)
 		return NULL;
@@ -325,6 +323,9 @@ SM_STATE(EAP, RETRANSMIT)
 		if (eap_copy_buf(&sm->eap_if.eapReqData, sm->lastReqData) == 0)
 			sm->eap_if.eapReq = TRUE;
 	}
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_RETRANSMIT MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -414,7 +415,7 @@ static void eap_server_erp_init(struct eap_sm *sm)
 	u8 *emsk = NULL;
 	size_t emsk_len = 0;
 	u8 EMSKname[EAP_EMSK_NAME_LEN];
-	u8 len[2];
+	u8 len[2], ctx[3];
 	const char *domain;
 	size_t domain_len, nai_buf_len;
 	struct eap_server_erp_key *erp = NULL;
@@ -451,7 +452,7 @@ static void eap_server_erp_init(struct eap_sm *sm)
 
 	wpa_hexdump_key(MSG_DEBUG, "EAP: EMSK", emsk, emsk_len);
 
-	WPA_PUT_BE16(len, 8);
+	WPA_PUT_BE16(len, EAP_EMSK_NAME_LEN);
 	if (hmac_sha256_kdf(sm->eap_if.eapSessionId, sm->eap_if.eapSessionIdLen,
 			    "EMSK", len, sizeof(len),
 			    EMSKname, EAP_EMSK_NAME_LEN) < 0) {
@@ -475,9 +476,11 @@ static void eap_server_erp_init(struct eap_sm *sm)
 	erp->rRK_len = emsk_len;
 	wpa_hexdump_key(MSG_DEBUG, "EAP: ERP rRK", erp->rRK, erp->rRK_len);
 
+	ctx[0] = EAP_ERP_CS_HMAC_SHA256_128;
+	WPA_PUT_BE16(&ctx[1], erp->rRK_len);
 	if (hmac_sha256_kdf(erp->rRK, erp->rRK_len,
-			    "EAP Re-authentication Integrity Key@ietf.org",
-			    len, sizeof(len), erp->rIK, erp->rRK_len) < 0) {
+			    "Re-authentication Integrity Key@ietf.org",
+			    ctx, sizeof(ctx), erp->rIK, erp->rRK_len) < 0) {
 		wpa_printf(MSG_DEBUG, "EAP: Could not derive rIK for ERP");
 		goto fail;
 	}
@@ -631,6 +634,9 @@ SM_STATE(EAP, TIMEOUT_FAILURE)
 	SM_ENTRY(EAP, TIMEOUT_FAILURE);
 
 	sm->eap_if.eapTimeout = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_TIMEOUT_FAILURE MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -714,8 +720,8 @@ static void erp_send_finish_reauth(struct eap_sm *sm,
 	plen = 1 + 2 + 2 + os_strlen(nai);
 	if (hash_len)
 		plen += 1 + hash_len;
-	msg = eap_msg_alloc(EAP_VENDOR_IETF, EAP_ERP_TYPE_REAUTH, plen,
-			    EAP_CODE_FINISH, id);
+	msg = eap_msg_alloc(EAP_VENDOR_IETF, (EapType) EAP_ERP_TYPE_REAUTH,
+			    plen, EAP_CODE_FINISH, id);
 	if (msg == NULL)
 		return;
 	wpabuf_put_u8(msg, flags);
@@ -799,7 +805,7 @@ SM_STATE(EAP, INITIATE_RECEIVED)
 
 	sm->rxInitiate = FALSE;
 
-	pos = eap_hdr_validate(EAP_VENDOR_IETF, EAP_ERP_TYPE_REAUTH,
+	pos = eap_hdr_validate(EAP_VENDOR_IETF, (EapType) EAP_ERP_TYPE_REAUTH,
 			       sm->eap_if.eapRespData, &len);
 	if (pos == NULL) {
 		wpa_printf(MSG_INFO, "EAP-Initiate: Invalid frame");
@@ -1008,6 +1014,9 @@ SM_STATE(EAP, RETRANSMIT2)
 		if (eap_copy_buf(&sm->eap_if.eapReqData, sm->lastReqData) == 0)
 			sm->eap_if.eapReq = TRUE;
 	}
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_RETRANSMIT2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1098,6 +1107,9 @@ SM_STATE(EAP, TIMEOUT_FAILURE2)
 	SM_ENTRY(EAP, TIMEOUT_FAILURE2);
 
 	sm->eap_if.eapTimeout = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_TIMEOUT_FAILURE2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1107,6 +1119,9 @@ SM_STATE(EAP, FAILURE2)
 
 	eap_copy_buf(&sm->eap_if.eapReqData, sm->eap_if.aaaEapReqData);
 	sm->eap_if.eapFail = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_FAILURE2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1133,6 +1148,9 @@ SM_STATE(EAP, SUCCESS2)
 	 * started properly.
 	 */
 	sm->start_reauth = TRUE;
+
+	wpa_msg(sm->msg_ctx, MSG_INFO, WPA_EVENT_EAP_SUCCESS2 MACSTR,
+		MAC2STR(sm->peer_addr));
 }
 
 
@@ -1246,6 +1264,17 @@ SM_STEP(EAP)
 			break;
 		}
 		SM_ENTER(EAP, SEND_REQUEST);
+		if (sm->eap_if.eapNoReq && !sm->eap_if.eapReq) {
+			/*
+			 * This transition is not mentioned in RFC 4137, but it
+			 * is needed to handle cleanly a case where EAP method
+			 * buildReq fails.
+			 */
+			wpa_printf(MSG_DEBUG,
+				   "EAP: Method did not return a request");
+			SM_ENTER(EAP, FAILURE);
+			break;
+		}
 		break;
 	case EAP_METHOD_RESPONSE:
 		/*
@@ -1782,12 +1811,14 @@ int eap_server_sm_step(struct eap_sm *sm)
 }
 
 
-static void eap_user_free(struct eap_user *user)
+void eap_user_free(struct eap_user *user)
 {
 	if (user == NULL)
 		return;
 	bin_clear_free(user->password, user->password_len);
 	user->password = NULL;
+	bin_clear_free(user->salt, user->salt_len);
+	user->salt = NULL;
 	os_free(user);
 }
 
@@ -1853,6 +1884,8 @@ struct eap_sm * eap_server_sm_init(void *eapol_ctx,
 	sm->server_id = conf->server_id;
 	sm->server_id_len = conf->server_id_len;
 	sm->erp = conf->erp;
+	sm->tls_session_lifetime = conf->tls_session_lifetime;
+	sm->tls_flags = conf->tls_flags;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	sm->tls_test_flags = conf->tls_test_flags;
@@ -1884,6 +1917,7 @@ void eap_server_sm_deinit(struct eap_sm *sm)
 	wpabuf_free(sm->lastReqData);
 	wpabuf_free(sm->eap_if.eapRespData);
 	os_free(sm->identity);
+	os_free(sm->serial_num);
 	os_free(sm->pac_opaque_encr_key);
 	os_free(sm->eap_fast_a_id);
 	os_free(sm->eap_fast_a_id_info);
@@ -1952,6 +1986,81 @@ const u8 * eap_get_identity(struct eap_sm *sm, size_t *len)
 {
 	*len = sm->identity_len;
 	return sm->identity;
+}
+
+
+/**
+ * eap_get_serial_num - Get the serial number of user certificate
+ * @sm: Pointer to EAP state machine allocated with eap_server_sm_init()
+ * Returns: Pointer to the serial number or %NULL if not available
+ */
+const char * eap_get_serial_num(struct eap_sm *sm)
+{
+	return sm->serial_num;
+}
+
+
+/**
+ * eap_get_method - Get the used EAP method
+ * @sm: Pointer to EAP state machine allocated with eap_server_sm_init()
+ * Returns: Pointer to the method name or %NULL if not available
+ */
+const char * eap_get_method(struct eap_sm *sm)
+{
+	if (!sm || !sm->m)
+		return NULL;
+	return sm->m->name;
+}
+
+
+/**
+ * eap_get_imsi - Get IMSI of the user
+ * @sm: Pointer to EAP state machine allocated with eap_server_sm_init()
+ * Returns: Pointer to IMSI or %NULL if not available
+ */
+const char * eap_get_imsi(struct eap_sm *sm)
+{
+	if (!sm || sm->imsi[0] == '\0')
+		return NULL;
+	return sm->imsi;
+}
+
+
+void eap_erp_update_identity(struct eap_sm *sm, const u8 *eap, size_t len)
+{
+#ifdef CONFIG_ERP
+	const struct eap_hdr *hdr;
+	const u8 *pos, *end;
+	struct erp_tlvs parse;
+
+	if (len < sizeof(*hdr) + 1)
+		return;
+	hdr = (const struct eap_hdr *) eap;
+	end = eap + len;
+	pos = (const u8 *) (hdr + 1);
+	if (hdr->code != EAP_CODE_INITIATE || *pos != EAP_ERP_TYPE_REAUTH)
+		return;
+	pos++;
+	if (pos + 3 > end)
+		return;
+
+	/* Skip Flags and SEQ */
+	pos += 3;
+
+	if (erp_parse_tlvs(pos, end, &parse, 1) < 0 || !parse.keyname)
+		return;
+	wpa_hexdump_ascii(MSG_DEBUG,
+			  "EAP: Update identity based on EAP-Initiate/Re-auth keyName-NAI",
+			  parse.keyname, parse.keyname_len);
+	os_free(sm->identity);
+	sm->identity = os_malloc(parse.keyname_len);
+	if (sm->identity) {
+		os_memcpy(sm->identity, parse.keyname, parse.keyname_len);
+		sm->identity_len = parse.keyname_len;
+	} else {
+		sm->identity_len = 0;
+	}
+#endif /* CONFIG_ERP */
 }
 
 

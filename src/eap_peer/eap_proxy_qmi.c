@@ -716,20 +716,6 @@ int eap_auth_end_eap_session(qmi_client_type qmi_auth_svc_client_ptr)
 	return 0;
 }
 
-static void eap_proxy_schedule_thread(void *eloop_ctx, void *timeout_ctx)
-{
-        struct eap_proxy_sm *eap_proxy = eloop_ctx;
-        pthread_attr_t attr;
-        int ret = -1;
-
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        ret = pthread_create(&eap_proxy->thread_id, &attr, eap_proxy_post_init, eap_proxy);
-        if(ret < 0)
-               wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
-}
-
-
 struct eap_proxy_sm *
 eap_proxy_init(void *eapol_ctx, struct eapol_callbacks *eapol_cb,
 	       void *msg_ctx)
@@ -738,6 +724,8 @@ eap_proxy_init(void *eapol_ctx, struct eapol_callbacks *eapol_cb,
 	int qmiRetCode;
 	struct eap_proxy_sm *eap_proxy;
 	qmi_idl_service_object_type    qmi_client_service_obj;
+	pthread_attr_t attr;
+	int ret = -1;
 
 	eap_proxy =  os_malloc(sizeof(struct eap_proxy_sm));
 	if (NULL == eap_proxy) {
@@ -761,10 +749,21 @@ eap_proxy_init(void *eapol_ctx, struct eapol_callbacks *eapol_cb,
 	/* delay the qmi client initialization after the eloop_run starts,
 	* in order to avoid the case of daemonize enabled, which exits the
 	* parent process that created the qmi client context.
+	* NOTE: Spawn a new thread to allow eap_proxy initialization.
 	*/
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	ret = pthread_create(&eap_proxy->thread_id, &attr, eap_proxy_post_init, eap_proxy);
+	if(ret < 0) {
+		wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
+		goto fail;
+	}
 
-	eloop_register_timeout(0, 0, eap_proxy_schedule_thread, eap_proxy, NULL);
 	return eap_proxy;
+fail:
+	os_free(eap_proxy);
+	eap_proxy = NULL;
+	return NULL;
 }
 
 
@@ -895,8 +894,8 @@ static void handle_qmi_eap_reply(
 		void *userData, qmi_client_error_type sysErrCode)
 {
 	struct eap_proxy_sm *eap_proxy = (struct eap_proxy_sm *)userData;
+	auth_send_eap_packet_ext_resp_msg_v01* rspDataExt = (auth_send_eap_packet_ext_resp_msg_v01*)resp_c_struct;
 	auth_send_eap_packet_resp_msg_v01* rspData = (auth_send_eap_packet_resp_msg_v01*)resp_c_struct;
-
 	u8 *resp_data;
 	u32 length;
 
@@ -919,7 +918,7 @@ static void handle_qmi_eap_reply(
 			return;
 		}
 
-		if (NULL == rspData) {
+		if (NULL == resp_c_struct) {
 			wpa_printf(MSG_ERROR, "eap_proxy: Response data is NULL\n");
 			eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
 			return;
@@ -933,8 +932,9 @@ static void handle_qmi_eap_reply(
 		}
 
 		/* ensure the reply packet exists  */
-		if (rspData->eap_response_pkt_len <= 0 ||
-		    rspData->eap_response_pkt_len > QMI_AUTH_EAP_RESP_PACKET_EXT_MAX_V01) {
+		if (QMI_AUTH_SEND_EAP_PACKET_REQ_V01 == msg_id &&
+		    (rspData->eap_response_pkt_len > QMI_AUTH_EAP_RESP_PACKET_MAX_V01 ||
+		    rspData->eap_response_pkt_len <= 0 )){
 			wpa_printf(MSG_ERROR, "eap_proxy: Reply packet is of"
 				"invalid length %d error %d result %d\n",
 				rspData->eap_response_pkt_len, rspData->resp.error, rspData->resp.result);
@@ -942,11 +942,21 @@ static void handle_qmi_eap_reply(
 			return;
 		}
 
-		length = rspData->eap_response_pkt_len;
+		if (QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 == msg_id &&
+		    (rspDataExt->eap_response_ext_pkt_len > QMI_AUTH_EAP_RESP_PACKET_EXT_MAX_V01 ||
+		    rspDataExt->eap_response_ext_pkt_len <= 0 )) {
+			wpa_printf(MSG_ERROR, "eap_proxy: Reply packet is of"
+				"invalid length %d error %d result %d\n",
+				rspDataExt->eap_response_ext_pkt_len, rspDataExt->resp.error, rspDataExt->resp.result);
+			eap_proxy->qmi_state = QMI_STATE_RESP_TIME_OUT;
+			return;
+		}
+
+		length = QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 == msg_id ? rspDataExt->eap_response_ext_pkt_len : rspData->eap_response_pkt_len;
 		eap_proxy->qmi_resp_data.eap_send_pkt_resp.length = length;
 		/* allocate a buffer to store the response data; size is EAP resp len field */
 		eap_proxy->qmi_resp_data.eap_send_pkt_resp.resp_data =
-			os_malloc(rspData->eap_response_pkt_len);
+			os_malloc(length);
 
 		resp_data =
 			(u8 *)eap_proxy->qmi_resp_data.eap_send_pkt_resp.resp_data;
@@ -960,8 +970,12 @@ static void handle_qmi_eap_reply(
 		}
 
 		/* copy the response data to the allocated buffer */
-		os_memcpy(resp_data,
-				rspData->eap_response_pkt, length);
+		if (QMI_AUTH_SEND_EAP_PACKET_EXT_REQ_V01 == msg_id)
+			os_memcpy(resp_data,
+					rspDataExt->eap_response_ext_pkt, length);
+		else
+			os_memcpy(resp_data,
+					rspData->eap_response_pkt, length);
 		eap_proxy->qmi_state = QMI_STATE_RESP_RECEIVED;
 		wpa_printf(MSG_ERROR, "eap_proxy: **HANDLE_QMI_EAP_REPLY CALLBACK ENDDED **");
 
@@ -2042,4 +2056,17 @@ int eap_proxy_allowed_method(struct eap_peer_config *config, int vendor,
 	return 0;
 }
 
+u8 *eap_proxy_get_eap_session_id(struct eap_proxy_sm *sm, size_t *len)
+{
+	return NULL;
+}
+
+u8 *eap_proxy_get_emsk(struct eap_proxy_sm *sm, size_t *len)
+{
+	return NULL;
+}
+
+void eap_proxy_sm_abort(struct eap_proxy_sm *sm)
+{
+}
 #endif  /* CONFIG_EAP_PROXY */

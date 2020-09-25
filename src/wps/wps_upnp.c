@@ -320,14 +320,9 @@ static void subscr_addr_add_url(struct subscription *s, const char *url,
 	int rerr;
 	size_t host_len, path_len;
 
-	/* URL MUST begin with HTTP scheme. In addition, limit the length of
-	 * the URL to 700 characters which is around the limit that was
-	 * implicitly enforced for more than 10 years due to a bug in
-	 * generating the event messages. */
-	if (url_len < 7 || os_strncasecmp(url, "http://", 7) || url_len > 700) {
-		wpa_printf(MSG_DEBUG, "WPS UPnP: Reject an unacceptable URL");
+	/* url MUST begin with http: */
+	if (url_len < 7 || os_strncasecmp(url, "http://", 7))
 		goto fail;
-	}
 	url += 7;
 	url_len -= 7;
 
@@ -604,7 +599,7 @@ static struct wpabuf * build_fake_wsc_ack(void)
 	wpabuf_put_be16(msg, ATTR_REGISTRAR_NONCE);
 	wpabuf_put_be16(msg, WPS_NONCE_LEN);
 	wpabuf_put(msg, WPS_NONCE_LEN);
-	if (wps_build_wfa_ext(msg, 0, NULL, 0)) {
+	if (wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
 		wpabuf_free(msg);
 		return NULL;
 	}
@@ -700,6 +695,7 @@ struct subscription * subscription_start(struct upnp_wps_device_sm *sm,
 	struct subscription *s;
 	time_t now = time(NULL);
 	time_t expire = now + UPNP_SUBSCRIBE_SEC;
+	char str[80];
 
 	/* Get rid of expired subscriptions so we have room */
 	subscription_list_age(sm, now);
@@ -748,8 +744,10 @@ struct subscription * subscription_start(struct upnp_wps_device_sm *sm,
 		subscription_destroy(s);
 		return NULL;
 	}
-	wpa_printf(MSG_DEBUG, "WPS UPnP: Subscription %p started with %s",
-		   s, callback_urls);
+	uuid_bin2str(s->uuid, str, sizeof(str));
+	wpa_printf(MSG_DEBUG,
+		   "WPS UPnP: Subscription %p (SID %s) started with %s",
+		   s, str, callback_urls);
 	/* Schedule sending this */
 	event_send_all_later(sm);
 	return s;
@@ -1084,6 +1082,7 @@ upnp_wps_get_iface(struct upnp_wps_device_sm *sm, void *priv)
 void upnp_wps_device_deinit(struct upnp_wps_device_sm *sm, void *priv)
 {
 	struct upnp_wps_device_interface *iface;
+	struct upnp_wps_peer *peer;
 
 	if (!sm)
 		return;
@@ -1104,8 +1103,13 @@ void upnp_wps_device_deinit(struct upnp_wps_device_sm *sm, void *priv)
 					    iface->wps->registrar);
 	dl_list_del(&iface->list);
 
-	if (iface->peer.wps)
-		wps_deinit(iface->peer.wps);
+	while ((peer = dl_list_first(&iface->peers, struct upnp_wps_peer,
+				     list))) {
+		if (peer->wps)
+			wps_deinit(peer->wps);
+		dl_list_del(&peer->list);
+		os_free(peer);
+	}
 	os_free(iface->ctx->ap_pin);
 	os_free(iface->ctx);
 	os_free(iface);
@@ -1143,6 +1147,7 @@ upnp_wps_device_init(struct upnp_wps_device_ctx *ctx, struct wps_context *wps,
 	}
 	wpa_printf(MSG_DEBUG, "WPS UPnP: Init interface instance %p", iface);
 
+	dl_list_init(&iface->peers);
 	iface->ctx = ctx;
 	iface->wps = wps;
 	iface->priv = priv;
