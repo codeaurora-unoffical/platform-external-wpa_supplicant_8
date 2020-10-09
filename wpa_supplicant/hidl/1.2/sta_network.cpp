@@ -2152,9 +2152,6 @@ int StaNetwork::setByteArrayKeyFieldAndResetState(
  */
 void StaNetwork::setFastTransitionKeyMgmt(uint32_t &key_mgmt_mask)
 {
-	if (key_mgmt_mask & WPA_KEY_MGMT_SAE) {
-		key_mgmt_mask |= WPA_KEY_MGMT_FT_SAE;
-
 	struct wpa_supplicant *wpa_s = retrieveIfacePtr();
 	struct wpa_driver_capa capa;
 
@@ -2168,10 +2165,6 @@ void StaNetwork::setFastTransitionKeyMgmt(uint32_t &key_mgmt_mask)
 
 	if (key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X) {
 		key_mgmt_mask |= WPA_KEY_MGMT_FT_IEEE8021X;
-	}
-
-	if (key_mgmt_mask & WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
-		key_mgmt_mask |= WPA_KEY_MGMT_FT_IEEE8021X_SHA384;
 	}
 
 	if ((key_mgmt_mask & WPA_KEY_MGMT_SAE) &&
@@ -2206,10 +2199,6 @@ void StaNetwork::setFastTransitionKeyMgmt(uint32_t &key_mgmt_mask)
  */
 void StaNetwork::resetFastTransitionKeyMgmt(uint32_t &key_mgmt_mask)
 {
-	if (key_mgmt_mask & WPA_KEY_MGMT_SAE) {
-		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_SAE;
-	}
-
 	if (key_mgmt_mask & WPA_KEY_MGMT_PSK) {
 		key_mgmt_mask &= ~WPA_KEY_MGMT_FT_PSK;
 	}
