@@ -749,18 +749,6 @@ int HidlManager::notifyStateChange(struct wpa_supplicant *wpa_s)
                  !dl_list_empty(&wpa_s->fils_hlp_req) &&
                  (wpa_s->wpa_state == WPA_COMPLETED)) ? true : false;
 
-#ifdef SUPPLICANT_VENDOR_HIDL
-        if (checkForVendorStaIfaceCallback(wpa_s->ifname) == true) {
-	// Invoke the |onVendorStateChanged| method on all registered callbacks.
-	    callWithEachVendorStaIfaceCallback(
-		wpa_s->ifname, std::bind(
-			       &ISupplicantVendorStaIfaceCallback::onVendorStateChanged,
-			       std::placeholders::_1,
-			       static_cast<ISupplicantStaIfaceCallback::State>(
-				  wpa_s->wpa_state),
-			       bssid, hidl_network_id, hidl_ssid, fils_hlp_sent));
-	} else {
-#endif
 	    callWithEachStaIfaceCallback(
 	        wpa_s->ifname, std::bind(
 			       &ISupplicantStaIfaceCallback::onStateChanged,
@@ -768,9 +756,6 @@ int HidlManager::notifyStateChange(struct wpa_supplicant *wpa_s)
 			       static_cast<ISupplicantStaIfaceCallback::State>(
 			           wpa_s->wpa_state),
 			       bssid, hidl_network_id, hidl_ssid));
-#ifdef SUPPLICANT_VENDOR_HIDL
-	}
-#endif
 	return 0;
 }
 
