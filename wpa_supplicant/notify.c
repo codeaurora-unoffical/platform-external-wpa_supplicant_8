@@ -1144,7 +1144,9 @@ void wpas_notify_dpp_config_received(struct wpa_supplicant *wpa_s,
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_config_received(wpa_s, ssid);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1154,7 +1156,9 @@ void wpas_notify_dpp_config_sent(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_config_sent(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1165,7 +1169,9 @@ void wpas_notify_dpp_auth_success(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_auth_success(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1175,7 +1181,9 @@ void wpas_notify_dpp_resp_pending(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_resp_pending(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1186,7 +1194,9 @@ void wpas_notify_dpp_not_compatible(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_not_compatible(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1196,7 +1206,9 @@ void wpas_notify_dpp_missing_auth(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_missing_auth(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1206,7 +1218,9 @@ void wpas_notify_dpp_configuration_failure(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_configuration_failure(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1216,7 +1230,9 @@ void wpas_notify_dpp_timeout(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_timeout(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1226,7 +1242,9 @@ void wpas_notify_dpp_auth_failure(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_auth_failure(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1236,7 +1254,9 @@ void wpas_notify_dpp_failure(struct wpa_supplicant *wpa_s)
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_fail(wpa_s);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
 
@@ -1252,8 +1272,10 @@ void wpas_notify_dpp_conf(void *msg_ctx, u8 type, u8* ssid,
 	if (!wpa_s)
 		return;
 
+#ifdef CONFIG_HIDL
 	wpas_hidl_notify_dpp_conf(wpa_s, type, ssid, ssid_len, connector, c_sign,
 				  net_access, net_access_expiry, passphrase,
 				  psk_set, psk);
+#endif /* CONFIG_HIDL */
 #endif /* CONFIG_DPP */
 }
