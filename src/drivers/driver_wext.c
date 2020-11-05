@@ -868,14 +868,16 @@ static int wext_hostap_ifname(struct wpa_driver_wext_data *drv,
 			      const char *ifname)
 {
 	char buf[200], *res;
-	int type;
+	int type, ret;
 	FILE *f;
 
 	if (strcmp(ifname, ".") == 0 || strcmp(ifname, "..") == 0)
 		return -1;
 
-	snprintf(buf, sizeof(buf), "/sys/class/net/%s/device/net/%s/type",
-		 drv->ifname, ifname);
+	ret = snprintf(buf, sizeof(buf), "/sys/class/net/%s/device/net/%s/type",
+		       drv->ifname, ifname);
+	if (os_snprintf_error(sizeof(buf), ret))
+		return -1;
 
 	f = fopen(buf, "r");
 	if (!f)
@@ -922,7 +924,7 @@ static int wext_add_hostap(struct wpa_driver_wext_data *drv)
 
 static void wext_check_hostap(struct wpa_driver_wext_data *drv)
 {
-	char buf[200], *pos;
+	char path[200], buf[200], *pos;
 	ssize_t res;
 
 	/*
@@ -937,9 +939,9 @@ static void wext_check_hostap(struct wpa_driver_wext_data *drv)
 	 */
 
 	/* First, try to see if driver information is available from sysfs */
-	snprintf(buf, sizeof(buf), "/sys/class/net/%s/device/driver",
+	snprintf(path, sizeof(path), "/sys/class/net/%s/device/driver",
 		 drv->ifname);
-	res = readlink(buf, buf, sizeof(buf) - 1);
+	res = readlink(path, buf, sizeof(buf) - 1);
 	if (res > 0) {
 		buf[res] = '\0';
 		pos = strrchr(buf, '/');
@@ -1645,7 +1647,8 @@ static int wpa_driver_wext_get_range(void *priv)
 		if (range->enc_capa & IW_ENC_CAPA_CIPHER_CCMP)
 			drv->capa.enc |= WPA_DRIVER_CAPA_ENC_CCMP;
 		if (range->enc_capa & IW_ENC_CAPA_4WAY_HANDSHAKE)
-			drv->capa.flags |= WPA_DRIVER_FLAGS_4WAY_HANDSHAKE;
+			drv->capa.flags |= WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK |
+				WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_8021X;
 		drv->capa.auth = WPA_DRIVER_AUTH_OPEN |
 			WPA_DRIVER_AUTH_SHARED |
 			WPA_DRIVER_AUTH_LEAP;
@@ -1676,7 +1679,7 @@ static int wpa_driver_wext_set_psk(struct wpa_driver_wext_data *drv,
 
 	wpa_printf(MSG_DEBUG, "%s", __FUNCTION__);
 
-	if (!(drv->capa.flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE))
+	if (!(drv->capa.flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_8021X))
 		return 0;
 
 	if (!psk)
@@ -1764,11 +1767,9 @@ static int wpa_driver_wext_set_key_ext(void *priv, enum wpa_alg alg,
 	case WPA_ALG_PMK:
 		ext->alg = IW_ENCODE_ALG_PMK;
 		break;
-#ifdef CONFIG_IEEE80211W
 	case WPA_ALG_IGTK:
 		ext->alg = IW_ENCODE_ALG_AES_CMAC;
 		break;
-#endif /* CONFIG_IEEE80211W */
 	default:
 		wpa_printf(MSG_DEBUG, "%s: Unknown algorithm %d",
 			   __FUNCTION__, alg);
@@ -1802,37 +1803,26 @@ static int wpa_driver_wext_set_key_ext(void *priv, enum wpa_alg alg,
 /**
  * wpa_driver_wext_set_key - Configure encryption key
  * @priv: Pointer to private wext data from wpa_driver_wext_init()
- * @priv: Private driver interface data
- * @alg: Encryption algorithm (%WPA_ALG_NONE, %WPA_ALG_WEP,
- *	%WPA_ALG_TKIP, %WPA_ALG_CCMP); %WPA_ALG_NONE clears the key.
- * @addr: Address of the peer STA or ff:ff:ff:ff:ff:ff for
- *	broadcast/default keys
- * @key_idx: key index (0..3), usually 0 for unicast keys
- * @set_tx: Configure this key as the default Tx key (only used when
- *	driver does not support separate unicast/individual key
- * @seq: Sequence number/packet number, seq_len octets, the next
- *	packet number to be used for in replay protection; configured
- *	for Rx keys (in most cases, this is only used with broadcast
- *	keys and set to zero for unicast keys)
- * @seq_len: Length of the seq, depends on the algorithm:
- *	TKIP: 6 octets, CCMP: 6 octets
- * @key: Key buffer; TKIP: 16-byte temporal key, 8-byte Tx Mic key,
- *	8-byte Rx Mic Key
- * @key_len: Length of the key buffer in octets (WEP: 5 or 13,
- *	TKIP: 32, CCMP: 16)
+ * @params: Key parameters
  * Returns: 0 on success, -1 on failure
  *
  * This function uses SIOCSIWENCODEEXT by default, but tries to use
  * SIOCSIWENCODE if the extended ioctl fails when configuring a WEP key.
  */
-int wpa_driver_wext_set_key(const char *ifname, void *priv, enum wpa_alg alg,
-			    const u8 *addr, int key_idx,
-			    int set_tx, const u8 *seq, size_t seq_len,
-			    const u8 *key, size_t key_len)
+static int wpa_driver_wext_set_key(void *priv,
+				   struct wpa_driver_set_key_params *params)
 {
 	struct wpa_driver_wext_data *drv = priv;
 	struct iwreq iwr;
 	int ret = 0;
+	enum wpa_alg alg = params->alg;
+	const u8 *addr = params->addr;
+	int key_idx = params->key_idx;
+	int set_tx = params->set_tx;
+	const u8 *seq = params->seq;
+	size_t seq_len = params->seq_len;
+	const u8 *key = params->key;
+	size_t key_len = params->key_len;
 
 	wpa_printf(MSG_DEBUG, "%s: alg=%d key_idx=%d set_tx=%d seq_len=%lu "
 		   "key_len=%lu",
@@ -1912,7 +1902,7 @@ static int wpa_driver_wext_set_drop_unencrypted(void *priv,
 
 
 static int wpa_driver_wext_mlme(struct wpa_driver_wext_data *drv,
-				const u8 *addr, int cmd, int reason_code)
+				const u8 *addr, int cmd, u16 reason_code)
 {
 	struct iwreq iwr;
 	struct iw_mlme mlme;
@@ -1995,7 +1985,7 @@ static void wpa_driver_wext_disconnect(struct wpa_driver_wext_data *drv)
 
 
 static int wpa_driver_wext_deauthenticate(void *priv, const u8 *addr,
-					  int reason_code)
+					  u16 reason_code)
 {
 	struct wpa_driver_wext_data *drv = priv;
 	int ret;
@@ -2198,7 +2188,6 @@ int wpa_driver_wext_associate(void *priv,
 					   IW_AUTH_RX_UNENCRYPTED_EAPOL,
 					   allow_unencrypted_eapol) < 0)
 		ret = -1;
-#ifdef CONFIG_IEEE80211W
 	switch (params->mgmt_frame_protection) {
 	case NO_MGMT_FRAME_PROTECTION:
 		value = IW_AUTH_MFP_DISABLED;
@@ -2212,7 +2201,6 @@ int wpa_driver_wext_associate(void *priv,
 	};
 	if (wpa_driver_wext_set_auth_param(drv, IW_AUTH_MFP, value) < 0)
 		ret = -1;
-#endif /* CONFIG_IEEE80211W */
 	if (params->freq.freq &&
 	    wpa_driver_wext_set_freq(drv, params->freq.freq) < 0)
 		ret = -1;
@@ -2428,8 +2416,8 @@ static int wpa_driver_wext_signal_poll(void *priv, struct wpa_signal_info *si)
 	struct iwreq iwr;
 
 	os_memset(si, 0, sizeof(*si));
-	si->current_signal = -9999;
-	si->current_noise = 9999;
+	si->current_signal = -WPA_INVALID_NOISE;
+	si->current_noise = WPA_INVALID_NOISE;
 	si->chanwidth = CHAN_WIDTH_UNKNOWN;
 
 	os_memset(&iwr, 0, sizeof(iwr));

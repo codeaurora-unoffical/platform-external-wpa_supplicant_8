@@ -897,7 +897,7 @@ static struct wpabuf * wps_er_soap_hdr(const struct wpabuf *msg,
 				       const struct sockaddr_in *dst,
 				       char **len_ptr, char **body_ptr)
 {
-	unsigned char *encoded;
+	char *encoded;
 	size_t encoded_len;
 	struct wpabuf *buf;
 
@@ -939,7 +939,7 @@ static struct wpabuf * wps_er_soap_hdr(const struct wpabuf *msg,
 	wpabuf_put_str(buf, "\">\n");
 	if (encoded) {
 		wpabuf_printf(buf, "<%s>%s</%s>\n",
-			      arg_name, (char *) encoded, arg_name);
+			      arg_name, encoded, arg_name);
 		os_free(encoded);
 	}
 
@@ -1530,7 +1530,7 @@ void wps_er_set_sel_reg(struct wps_er *er, int sel_reg, u16 dev_passwd_id,
 	    wps_er_build_selected_registrar(msg, sel_reg) ||
 	    wps_er_build_dev_password_id(msg, dev_passwd_id) ||
 	    wps_er_build_sel_reg_config_methods(msg, sel_reg_config_methods) ||
-	    wps_build_wfa_ext(msg, 0, auth_macs, count) ||
+	    wps_build_wfa_ext(msg, 0, auth_macs, count, 0) ||
 	    wps_er_build_uuid_r(msg, er->wps->uuid)) {
 		wpabuf_free(msg);
 		return;
@@ -2048,7 +2048,7 @@ struct wpabuf * wps_er_config_token_from_cred(struct wps_context *wps,
 	data.wps = wps;
 	data.use_cred = cred;
 	if (wps_build_cred(&data, ret) ||
-	    wps_build_wfa_ext(ret, 0, NULL, 0)) {
+	    wps_build_wfa_ext(ret, 0, NULL, 0, 0)) {
 		wpabuf_free(ret);
 		return NULL;
 	}

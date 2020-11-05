@@ -36,7 +36,7 @@
 /**
  * P2P_MAX_REG_CLASS_CHANNELS - Maximum number of channels per regulatory class
  */
-#define P2P_MAX_REG_CLASS_CHANNELS 20
+#define P2P_MAX_REG_CLASS_CHANNELS 60
 
 /**
  * struct p2p_channels - List of supported channels
@@ -99,9 +99,16 @@ struct p2p_go_neg_results {
 
 	int vht;
 
+	int edmg;
+
 	u8 max_oper_chwidth;
 
 	unsigned int vht_center_freq2;
+
+	/**
+	 * he - Indicates if IEEE 802.11ax HE is enabled
+	 */
+	int he;
 
 	/**
 	 * ssid - SSID of the group
@@ -660,6 +667,8 @@ struct p2p_config {
 	 * @buf: Frame body (starting from Category field)
 	 * @len: Length of buf in octets
 	 * @wait_time: How many msec to wait for a response frame
+	 * @scheduled: Return value indicating whether the transmissions was
+	 *	scheduled to happen once the radio is available
 	 * Returns: 0 on success, -1 on failure
 	 *
 	 * The Action frame may not be transmitted immediately and the status
@@ -670,7 +679,7 @@ struct p2p_config {
 	 */
 	int (*send_action)(void *ctx, unsigned int freq, const u8 *dst,
 			   const u8 *src, const u8 *bssid, const u8 *buf,
-			   size_t len, unsigned int wait_time);
+			   size_t len, unsigned int wait_time, int *scheduled);
 
 	/**
 	 * send_action_done - Notify that Action frame sequence was completed

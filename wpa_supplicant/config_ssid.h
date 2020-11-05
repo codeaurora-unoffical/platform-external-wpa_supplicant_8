@@ -33,16 +33,28 @@
 #define DEFAULT_DISABLE_HT40 0
 #define DEFAULT_DISABLE_SGI 0
 #define DEFAULT_DISABLE_LDPC 0
+#define DEFAULT_TX_STBC -1 /* no change */
+#define DEFAULT_RX_STBC -1 /* no change */
 #define DEFAULT_DISABLE_MAX_AMSDU -1 /* no change */
 #define DEFAULT_AMPDU_FACTOR -1 /* no change */
 #define DEFAULT_AMPDU_DENSITY -1 /* no change */
 #define DEFAULT_USER_SELECTED_SIM 1
+#define DEFAULT_MAX_OPER_CHWIDTH -1
 
 struct psk_list_entry {
 	struct dl_list list;
 	u8 addr[ETH_ALEN];
 	u8 psk[32];
 	u8 p2p;
+};
+
+enum wpas_mode {
+	WPAS_MODE_INFRA = 0,
+	WPAS_MODE_IBSS = 1,
+	WPAS_MODE_AP = 2,
+	WPAS_MODE_P2P_GO = 3,
+	WPAS_MODE_P2P_GROUP_FORMATION = 4,
+	WPAS_MODE_MESH = 5,
 };
 
 /**
@@ -200,6 +212,8 @@ struct wpa_ssid {
 	 * not included, the default SAE password is used instead.
 	 */
 	char *sae_password_id;
+
+	struct sae_pt *pt;
 
 	/**
 	 * ext_psk - PSK/passphrase name in external storage
@@ -391,14 +405,7 @@ struct wpa_ssid {
 	 * CCMP, but not both), and psk must also be set (either directly or
 	 * using ASCII passphrase).
 	 */
-	enum wpas_mode {
-		WPAS_MODE_INFRA = 0,
-		WPAS_MODE_IBSS = 1,
-		WPAS_MODE_AP = 2,
-		WPAS_MODE_P2P_GO = 3,
-		WPAS_MODE_P2P_GROUP_FORMATION = 4,
-		WPAS_MODE_MESH = 5,
-	} mode;
+	enum wpas_mode mode;
 
 	/**
 	 * pbss - Whether to use PBSS. Relevant to DMG networks only.
@@ -441,7 +448,6 @@ struct wpa_ssid {
 	 */
 	char *id_str;
 
-#ifdef CONFIG_IEEE80211W
 	/**
 	 * ieee80211w - Whether management frame protection is enabled
 	 *
@@ -455,7 +461,17 @@ struct wpa_ssid {
 	 * followed).
 	 */
 	enum mfp_options ieee80211w;
-#endif /* CONFIG_IEEE80211W */
+
+#ifdef CONFIG_OCV
+	/**
+	 * ocv - Enable/disable operating channel validation
+	 *
+	 * If this parameter is set to 1, stations will exchange OCI element
+	 * to cryptographically verify the operating channel. Setting this
+	 * parameter to 0 disables this option. Default value: 0.
+	 */
+	int ocv;
+#endif /* CONFIG_OCV */
 
 	/**
 	 * frequency - Channel frequency in megahertz (MHz) for IBSS
@@ -468,6 +484,23 @@ struct wpa_ssid {
 	 * will be used instead of this configured value.
 	 */
 	int frequency;
+
+	/**
+	 * enable_edmg - Enable EDMG feature in STA/AP mode
+	 *
+	 * This flag is used for enabling the EDMG capability in STA/AP mode.
+	 */
+	int enable_edmg;
+
+	/**
+	 * edmg_channel - EDMG channel number
+	 *
+	 * This value is used to configure the EDMG channel bonding feature.
+	 * In AP mode it defines the EDMG channel to start the AP on.
+	 * in STA mode it defines the EDMG channel to use for connection
+	 * (if supported by AP).
+	 */
+	u8 edmg_channel;
 
 	/**
 	 * fixed_freq - Use fixed frequency for IBSS
@@ -505,7 +538,9 @@ struct wpa_ssid {
 
 	int vht;
 
-	u8 max_oper_chwidth;
+	int he;
+
+	int max_oper_chwidth;
 
 	unsigned int vht_center_freq1;
 	unsigned int vht_center_freq2;
@@ -682,6 +717,22 @@ struct wpa_ssid {
 	 * By default (empty string): Use whatever the OS has configured.
 	 */
 	char *ht_mcs;
+
+	/**
+	 * tx_stbc - Indicate STBC support for TX streams
+	 *
+	 * Value: -1..1, by default (-1): use whatever the OS or card has
+	 * configured. See IEEE Std 802.11-2016, 9.4.2.56.2.
+	 */
+	int tx_stbc;
+
+	/**
+	 * rx_stbc - Indicate STBC support for RX streams
+	 *
+	 * Value: -1..3, by default (-1): use whatever the OS or card has
+	 * configured. See IEEE Std 802.11-2016, 9.4.2.56.2.
+	 */
+	int rx_stbc;
 #endif /* CONFIG_HT_OVERRIDES */
 
 #ifdef CONFIG_VHT_OVERRIDES
@@ -774,6 +825,33 @@ struct wpa_ssid {
 	int macsec_integ_only;
 
 	/**
+	 * macsec_replay_protect - Enable MACsec replay protection
+	 *
+	 * This setting applies only when MACsec is in use, i.e.,
+	 *  - macsec_policy is enabled
+	 *  - the key server has decided to enable MACsec
+	 *
+	 * 0: Replay protection disabled (default)
+	 * 1: Replay protection enabled
+	 */
+	int macsec_replay_protect;
+
+	/**
+	 * macsec_replay_window - MACsec replay protection window
+	 *
+	 * A window in which replay is tolerated, to allow receipt of frames
+	 * that have been misordered by the network.
+	 *
+	 * This setting applies only when MACsec replay protection active, i.e.,
+	 *  - macsec_replay_protect is enabled
+	 *  - the key server has decided to enable MACsec
+	 *
+	 * 0: No replay window, strict check (default)
+	 * 1..2^32-1: number of packets that could be misordered
+	 */
+	u32 macsec_replay_window;
+
+	/**
 	 * macsec_port - MACsec port (in SCI)
 	 *
 	 * Port component of the SCI.
@@ -792,14 +870,16 @@ struct wpa_ssid {
 	/**
 	 * mka_ckn - MKA pre-shared CKN
 	 */
-#define MACSEC_CKN_LEN 32
-	u8 mka_ckn[MACSEC_CKN_LEN];
+#define MACSEC_CKN_MAX_LEN 32
+	size_t mka_ckn_len;
+	u8 mka_ckn[MACSEC_CKN_MAX_LEN];
 
 	/**
 	 * mka_cak - MKA pre-shared CAK
 	 */
-#define MACSEC_CAK_LEN 16
-	u8 mka_cak[MACSEC_CAK_LEN];
+#define MACSEC_CAK_MAX_LEN 32
+	size_t mka_cak_len;
+	u8 mka_cak[MACSEC_CAK_MAX_LEN];
 
 #define MKA_PSK_SET_CKN BIT(0)
 #define MKA_PSK_SET_CAK BIT(1)
@@ -812,6 +892,19 @@ struct wpa_ssid {
 
 #ifdef CONFIG_HS20
 	int update_identifier;
+
+	/**
+	 * roaming_consortium_selection - Roaming Consortium Selection
+	 *
+	 * The matching Roaming Consortium OI that was used to generate this
+	 * network profile.
+	 */
+	u8 *roaming_consortium_selection;
+
+	/**
+	 * roaming_consortium_selection_len - roaming_consortium_selection len
+	 */
+	size_t roaming_consortium_selection_len;
 #endif /* CONFIG_HS20 */
 
 	unsigned int wps_run;
@@ -916,6 +1009,19 @@ struct wpa_ssid {
 	int owe_only;
 
 	/**
+	 * owe_ptk_workaround - OWE PTK derivation workaround
+	 *
+	 * Initial OWE implementation used SHA256 when deriving the PTK for all
+	 * OWE groups. This was supposed to change to SHA384 for group 20 and
+	 * SHA512 for group 21. This parameter can be used to enable older
+	 * behavior mainly for testing purposes. There is no impact to group 19
+	 * behavior, but if enabled, this will make group 20 and 21 cases use
+	 * SHA256-based PTK derivation which will not work with the updated
+	 * OWE implementation on the AP side.
+	 */
+	int owe_ptk_workaround;
+
+	/**
 	 * owe_transition_bss_select_count - OWE transition BSS select count
 	 *
 	 * This is an internally used variable (i.e., not used in external
@@ -924,6 +1030,23 @@ struct wpa_ssid {
 	 * the selection attempts for OWE BSS exceed the configured threshold.
 	 */
 	int owe_transition_bss_select_count;
+
+	/**
+	 * multi_ap_backhaul_sta - Multi-AP backhaul STA
+	 * 0 = normal (non-Multi-AP) station
+	 * 1 = Multi-AP backhaul station
+	 */
+	int multi_ap_backhaul_sta;
+
+	/**
+	 * ft_eap_pmksa_caching - Whether FT-EAP PMKSA caching is allowed
+	 * 0 = do not try to use PMKSA caching with FT-EAP
+	 * 1 = try to use PMKSA caching with FT-EAP
+	 *
+	 * This controls whether to try to use PMKSA caching with FT-EAP for the
+	 * FT initial mobility domain association.
+	 */
+	int ft_eap_pmksa_caching;
 };
 
 #endif /* CONFIG_SSID_H */

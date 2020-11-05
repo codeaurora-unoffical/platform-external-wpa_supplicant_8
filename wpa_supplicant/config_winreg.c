@@ -1,6 +1,6 @@
 /*
  * WPA Supplicant / Configuration backend: Windows registry
- * Copyright (c) 2003-2008, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2003-2019, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -255,6 +255,8 @@ static int wpa_config_read_global(struct wpa_config *config, HKEY hk)
 		errors++;
 	wpa_config_read_reg_dword(hk, TEXT("wps_cred_processing"),
 				  &config->wps_cred_processing);
+	wpa_config_read_reg_dword(hk, TEXT("wps_cred_add_sae"),
+				  &config->wps_cred_add_sae);
 #endif /* CONFIG_WPS */
 #ifdef CONFIG_P2P
 	config->p2p_ssid_postfix = wpa_config_read_reg_string(
@@ -604,6 +606,8 @@ static int wpa_config_write_global(struct wpa_config *config, HKEY hk)
 	}
 	wpa_config_write_reg_dword(hk, TEXT("wps_cred_processing"),
 				   config->wps_cred_processing, 0);
+	wpa_config_write_reg_dword(hk, TEXT("wps_cred_add_sae"),
+				   config->wps_cred_add_sae, 0);
 #endif /* CONFIG_WPS */
 #ifdef CONFIG_P2P
 	wpa_config_write_reg_string(hk, "p2p_ssid_postfix",
@@ -864,9 +868,9 @@ static int wpa_config_write_network(HKEY hk, struct wpa_ssid *ssid, int id)
 
 #define STR(t) write_str(netw, #t, ssid)
 #define INT(t) write_int(netw, #t, ssid->t, 0)
-#define INTe(t) write_int(netw, #t, ssid->eap.t, 0)
+#define INTe(t, m) write_int(netw, #t, ssid->eap.m, 0)
 #define INT_DEF(t, def) write_int(netw, #t, ssid->t, def)
-#define INT_DEFe(t, def) write_int(netw, #t, ssid->eap.t, def)
+#define INT_DEFe(t, m, def) write_int(netw, #t, ssid->eap.m, def)
 
 	STR(ssid);
 	INT(scan_ssid);
@@ -892,6 +896,7 @@ static int wpa_config_write_network(HKEY hk, struct wpa_ssid *ssid, int id)
 	STR(private_key_passwd);
 	STR(dh_file);
 	STR(subject_match);
+	STR(check_cert_subject);
 	STR(altsubject_match);
 	STR(ca_cert2);
 	STR(ca_path2);
@@ -900,6 +905,7 @@ static int wpa_config_write_network(HKEY hk, struct wpa_ssid *ssid, int id)
 	STR(private_key2_passwd);
 	STR(dh_file2);
 	STR(subject_match2);
+	STR(check_cert_subject2);
 	STR(altsubject_match2);
 	STR(phase1);
 	STR(phase2);
@@ -914,8 +920,8 @@ static int wpa_config_write_network(HKEY hk, struct wpa_ssid *ssid, int id)
 	STR(engine2_id);
 	STR(cert2_id);
 	STR(ca_cert2_id);
-	INTe(engine);
-	INTe(engine2);
+	INTe(engine, cert.engine);
+	INTe(engine2, phase2_cert.engine);
 	INT_DEF(eapol_flags, DEFAULT_EAPOL_FLAGS);
 #endif /* IEEE8021X_EAPOL */
 	for (i = 0; i < 4; i++)
@@ -925,21 +931,20 @@ static int wpa_config_write_network(HKEY hk, struct wpa_ssid *ssid, int id)
 #ifdef IEEE8021X_EAPOL
 	INT_DEF(eap_workaround, DEFAULT_EAP_WORKAROUND);
 	STR(pac_file);
-	INT_DEFe(fragment_size, DEFAULT_FRAGMENT_SIZE);
+	INT_DEFe(fragment_size, fragment_size, DEFAULT_FRAGMENT_SIZE);
 #endif /* IEEE8021X_EAPOL */
 	INT(mode);
 	write_int(netw, "proactive_key_caching", ssid->proactive_key_caching,
 		  -1);
 	INT(disabled);
-#ifdef CONFIG_IEEE80211W
 	write_int(netw, "ieee80211w", ssid->ieee80211w,
 		  MGMT_FRAME_PROTECTION_DEFAULT);
-#endif /* CONFIG_IEEE80211W */
 	STR(id_str);
 #ifdef CONFIG_HS20
 	INT(update_identifier);
 #endif /* CONFIG_HS20 */
 	INT(group_rekey);
+	INT(ft_eap_pmksa_caching);
 
 #undef STR
 #undef INT
