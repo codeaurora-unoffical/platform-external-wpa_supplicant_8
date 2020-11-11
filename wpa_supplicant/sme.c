@@ -1575,6 +1575,7 @@ void sme_event_auth(struct wpa_supplicant *wpa_s, union wpa_event_data *data)
 				" reason=%d locally_generated=1",
 				MAC2STR(wpa_s->pending_bssid),
 				WLAN_REASON_DEAUTH_LEAVING);
+			place_marker(WPA_EVENT_DISCONNECTED);
 			wpas_connection_failed(wpa_s, wpa_s->pending_bssid);
 			wpa_supplicant_mark_disassoc(wpa_s);
 			return;
@@ -1599,6 +1600,7 @@ void sme_event_auth(struct wpa_supplicant *wpa_s, union wpa_event_data *data)
 				" reason=%d locally_generated=1",
 				MAC2STR(wpa_s->pending_bssid),
 				WLAN_REASON_DEAUTH_LEAVING);
+			place_marker(WPA_EVENT_DISCONNECTED);
 			wpas_connection_failed(wpa_s, wpa_s->pending_bssid);
 			wpa_supplicant_mark_disassoc(wpa_s);
 			return;
@@ -1613,6 +1615,7 @@ void sme_event_auth(struct wpa_supplicant *wpa_s, union wpa_event_data *data)
 				" reason=%d locally_generated=1",
 				MAC2STR(wpa_s->pending_bssid),
 				WLAN_REASON_DEAUTH_LEAVING);
+			place_marker(WPA_EVENT_DISCONNECTED);
 			wpas_connection_failed(wpa_s, wpa_s->pending_bssid);
 			wpa_supplicant_mark_disassoc(wpa_s);
 			return;

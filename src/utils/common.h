@@ -594,4 +594,13 @@ void * __hide_aliasing_typecast(void *foo);
 #define WPA_MEM_DEFINED(ptr, len) do { } while (0)
 #endif /* CONFIG_VALGRIND */
 
+#ifdef CONFIG_MARKER
+void place_marker(char const *name);
+#else
+static inline
+void place_marker(char const *name)
+{
+}
+#endif
+
 #endif /* COMMON_H */

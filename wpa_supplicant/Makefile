@@ -95,6 +95,10 @@ CONFIG_NO_RANDOM_POOL=
 CONFIG_OPENSSL_CMAC=y
 endif
 
+ifdef CONFIG_MARKER
+CFLAGS += -DCONFIG_MARKER
+endif
+
 OBJS = config.o
 OBJS += notify.o
 OBJS += bss.o

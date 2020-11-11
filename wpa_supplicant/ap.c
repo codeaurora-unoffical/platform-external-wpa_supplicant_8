@@ -975,6 +975,7 @@ void wpa_supplicant_ap_deinit(struct wpa_supplicant *wpa_s)
 	wpa_msg(wpa_s, MSG_INFO, WPA_EVENT_DISCONNECTED "bssid=" MACSTR
 		" reason=%d locally_generated=1",
 		MAC2STR(wpa_s->own_addr), WLAN_REASON_DEAUTH_LEAVING);
+	place_marker(WPA_EVENT_DISCONNECTED);
 }
 
 

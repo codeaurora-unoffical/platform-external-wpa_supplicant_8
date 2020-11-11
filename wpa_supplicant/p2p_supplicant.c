@@ -920,6 +920,7 @@ static int wpas_p2p_group_delete(struct wpa_supplicant *wpa_s,
 		wpa_msg_global(wpa_s->p2pdev, MSG_INFO,
 			       P2P_EVENT_GROUP_REMOVED "%s %s%s",
 			       wpa_s->ifname, gtype, reason);
+		place_marker(P2P_EVENT_GROUP_REMOVED);
 	}
 
 	if (eloop_cancel_timeout(wpas_p2p_group_freq_conflict, wpa_s, NULL) > 0)
@@ -1301,6 +1302,7 @@ static void wpas_p2p_group_started(struct wpa_supplicant *wpa_s,
 		   wpa_s->ifname, go ? "GO" : "client", ssid_txt, freq,
 		   MAC2STR(go_dev_addr), persistent ? " [PERSISTENT]" : "",
 		   extra);
+	place_marker(P2P_EVENT_GROUP_STARTED);
 }
 
 

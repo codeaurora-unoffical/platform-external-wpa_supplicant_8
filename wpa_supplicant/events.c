@@ -3236,6 +3236,7 @@ static void wpa_supplicant_event_disassoc(struct wpa_supplicant *wpa_s,
 			" reason=%d%s",
 			MAC2STR(bssid), reason_code,
 			locally_generated ? " locally_generated=1" : "");
+		place_marker(WPA_EVENT_DISCONNECTED);
 	}
 }
 
