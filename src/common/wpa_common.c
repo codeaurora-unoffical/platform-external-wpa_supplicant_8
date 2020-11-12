@@ -356,6 +356,15 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 	u8 tmp[WPA_KCK_MAX_LEN + WPA_KEK_MAX_LEN + WPA_TK_MAX_LEN];
 	size_t ptk_len;
 
+#ifdef CONFIG_OWE
+	int owe_ptk_workaround = 0;
+
+	if (akmp == (WPA_KEY_MGMT_OWE | WPA_KEY_MGMT_PSK_SHA256)) {
+		owe_ptk_workaround = 1;
+		akmp = WPA_KEY_MGMT_OWE;
+	}
+#endif /* CONFIG_OWE */
+
 	if (pmk_len == 0) {
 		wpa_printf(MSG_ERROR, "WPA: No PMK set for PTK derivation");
 		return -1;
@@ -413,7 +422,8 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 			       tmp, ptk_len) < 0)
 			return -1;
 #ifdef CONFIG_OWE
-	} else if (akmp == WPA_KEY_MGMT_OWE && pmk_len == 32) {
+	} else if (akmp == WPA_KEY_MGMT_OWE && (pmk_len == 32 ||
+						owe_ptk_workaround)) {
 		wpa_printf(MSG_DEBUG, "WPA: PTK derivation using PRF(SHA256)");
 		if (sha256_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
