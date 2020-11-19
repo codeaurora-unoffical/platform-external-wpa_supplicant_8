@@ -326,6 +326,7 @@ void wpa_supplicant_mark_disassoc(struct wpa_supplicant *wpa_s)
 	wpas_rrm_reset(wpa_s);
 	wpa_s->wnmsleep_used = 0;
 	wnm_clear_coloc_intf_reporting(wpa_s);
+	wpa_s->disable_mbo_oce = 0;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	wpa_s->last_tk_alg = WPA_ALG_NONE;
@@ -629,17 +630,6 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 					"   skip RSN IE - no mgmt frame protection enabled but AP requires it");
 			break;
 		}
-#ifdef CONFIG_MBO
-		if (!(ie.capabilities & WPA_CAPABILITY_MFPC) &&
-		    wpas_mbo_get_bss_attr(bss, MBO_ATTR_ID_AP_CAPA_IND) &&
-		    wpas_get_ssid_pmf(wpa_s, ssid) !=
-		    NO_MGMT_FRAME_PROTECTION) {
-			if (debug_print)
-				wpa_dbg(wpa_s, MSG_DEBUG,
-					"   skip RSN IE - no mgmt frame protection enabled on MBO AP");
-			break;
-		}
-#endif /* CONFIG_MBO */
 
 		if (debug_print)
 			wpa_dbg(wpa_s, MSG_DEBUG,

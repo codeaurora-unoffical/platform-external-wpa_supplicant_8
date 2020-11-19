@@ -1709,7 +1709,8 @@ static void wpas_ext_capab_byte(struct wpa_supplicant *wpa_s, u8 *pos, int idx)
 	case 2: /* Bits 16-23 */
 #ifdef CONFIG_WNM
 		*pos |= 0x02; /* Bit 17 - WNM-Sleep Mode */
-		*pos |= 0x08; /* Bit 19 - BSS Transition */
+		if (!wpa_s->disable_mbo_oce)
+			*pos |= 0x08; /* Bit 19 - BSS Transition */
 #endif /* CONFIG_WNM */
 		break;
 	case 3: /* Bits 24-31 */
@@ -2061,6 +2062,10 @@ void wpa_supplicant_associate(struct wpa_supplicant *wpa_s,
 		wpa_tdls_ap_ies(wpa_s->wpa, (const u8 *) (bss + 1),
 				bss->ie_len);
 #endif /* CONFIG_TDLS */
+
+#ifdef CONFIG_MBO
+	wpas_mbo_check_pmf(wpa_s, bss, ssid);
+#endif /* CONFIG_MBO */
 
 	if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) &&
 	    ssid->mode == IEEE80211_MODE_INFRA) {
@@ -2807,7 +2812,7 @@ static u8 * wpas_populate_assoc_ies(
 
 #ifdef CONFIG_MBO
 	mbo_ie = bss ? wpa_bss_get_vendor_ie(bss, MBO_IE_VENDOR_TYPE) : NULL;
-	if (mbo_ie) {
+	if (!wpa_s->disable_mbo_oce && mbo_ie) {
 		int len;
 
 		len = wpas_mbo_ie(wpa_s, wpa_ie + wpa_ie_len,
@@ -5943,7 +5948,7 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 	hs20_init(wpa_s);
 #endif /* CONFIG_HS20 */
 #ifdef CONFIG_MBO
-	if (wpa_s->conf->oce) {
+	if (!wpa_s->disable_mbo_oce && wpa_s->conf->oce) {
 		if ((wpa_s->conf->oce & OCE_STA) &&
 		    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_OCE_STA))
 			wpa_s->enable_oce = OCE_STA;
