@@ -955,10 +955,19 @@ static void eap_proxy_post_init(struct eap_proxy_sm *eap_proxy)
         int index;
         Boolean flag = FALSE;
         int ret = 0;
-        wpa_uim_struct_type *wpa_uim = eap_proxy->wpa_uim;
+        wpa_uim_struct_type *wpa_uim;
 #ifdef CONFIG_EAP_PROXY_MDM_DETECT
         struct dev_info mdm_detect_info;
+#endif
 
+	if (!valid_eap_proxy(eap_proxy)) {
+		wpa_printf(MSG_ERROR, "eap_proxy: invalid eap proxy for post init");
+		return;
+	}
+
+	wpa_uim = eap_proxy->wpa_uim;
+
+#ifdef CONFIG_EAP_PROXY_MDM_DETECT
         /* Call ESOC API to get the number of modems.
          * If the number of modems is not zero, only then proceed
          * with the eap_proxy intialization.
@@ -1142,6 +1151,26 @@ int eap_auth_end_eap_session(qmi_client_type qmi_auth_svc_client_ptr)
         return 0;
 }
 
+static void eap_proxy_schedule_thread(void *eloop_ctx, void *timeout_ctx)
+{
+        struct eap_proxy_sm *eap_proxy = eloop_ctx;
+        int ret = -1;
+
+	if (!valid_eap_proxy(eap_proxy)) {
+		wpa_printf(MSG_ERROR, "eap_proxy: invalid eap proxy for schedule thread");
+		return;
+	}
+
+        // Make note of new thread creation, so that we can take care of joining.
+        eap_proxy->qmi_thread_joined = FALSE;
+
+        ret = pthread_create(&eap_proxy->thread_id, NULL, eap_proxy_post_init, eap_proxy);
+        if(ret < 0) {
+               wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
+	       eap_proxy->initialized = FALSE;
+        }
+}
+
 struct eap_proxy_sm *
 eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
                void *msg_ctx)
@@ -1168,22 +1197,10 @@ eap_proxy_init(void *eapol_ctx, const struct eapol_callbacks *eapol_cb,
         /* delay the qmi client initialization after the eloop_run starts,
         * in order to avoid the case of daemonize enabled, which exits the
         * parent process that created the qmi client context.
-        * NOTE: Spawn a new thread to allow eap_proxy initialization.
         */
 
-        // Make note of new thread creation, so that we can take care of joining.
-        eap_proxy->qmi_thread_joined = FALSE;
-
-        ret = pthread_create(&eap_proxy->thread_id, NULL, eap_proxy_post_init, eap_proxy);
-        if(ret < 0) {
-               wpa_printf(MSG_ERROR, "eap_proxy: starting thread is failed %d\n", ret);
-               goto fail;
-        }
-
+        eloop_register_timeout(0, 0, eap_proxy_schedule_thread, eap_proxy, NULL);
         return eap_proxy;
-fail:
-        eap_proxy->initialized = FALSE;
-        return NULL;
 }
 
 
