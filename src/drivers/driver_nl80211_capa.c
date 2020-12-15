@@ -989,6 +989,9 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 				case QCA_NL80211_VENDOR_SUBCMD_ADD_STA_NODE:
 					drv->add_sta_node_vendor_cmd_avail = 1;
 					break;
+				case QCA_NL80211_VENDOR_SUBCMD_GET_STA_INFO:
+					drv->get_sta_info_vendor_cmd_avail = 1;
+					break;
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 				}
 			}
@@ -1266,6 +1269,10 @@ static void qca_nl80211_get_features(struct wpa_driver_nl80211_data *drv)
 		drv->capa.flags |= WPA_DRIVER_FLAGS_OCE_AP;
 	if (check_feature(QCA_WLAN_VENDOR_FEATURE_OCE_STA_CFON, &info))
 		drv->capa.flags |= WPA_DRIVER_FLAGS_OCE_STA_CFON;
+	if (check_feature(QCA_WLAN_VENDOR_FEATURE_ADAPTIVE_11R, &info)) {
+		wpa_printf(MSG_INFO, "Driver support of Enabled Adaptive 11r");
+		drv->capa.flags2 |= WPA_DRIVER_FLAGS_ADAPTIVE_11R;
+	}
 	os_free(info.flags);
 }
 
