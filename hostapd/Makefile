@@ -151,6 +151,10 @@ ifdef CONFIG_ELOOP_KQUEUE
 CFLAGS += -DCONFIG_ELOOP_KQUEUE
 endif
 
+ifdef CONFIG_MARKER
+CFLAGS += -DCONFIG_MARKER
+endif
+
 OBJS += ../src/utils/common.o
 OBJS_c += ../src/utils/common.o
 OBJS += ../src/utils/wpa_debug.o

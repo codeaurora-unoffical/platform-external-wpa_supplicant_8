@@ -1302,3 +1302,31 @@ void forced_memzero(void *ptr, size_t len)
 	if (len)
 		forced_memzero_val = ((u8 *) ptr)[0];
 }
+
+#ifdef CONFIG_MARKER
+void place_marker(char const *name)
+{
+	FILE *f;
+	int res;
+	char marker[128] = {0};
+
+	res = os_snprintf(marker, sizeof(marker),
+			  "108 WPA-SUPP/HOSTAPD %s", name);
+	wpa_printf(MSG_DEBUG, "%s:%s,len=%d,res=%d\n",
+		   __func__, marker, os_strlen(marker), res);
+	f = fopen("/sys/kernel/debug/bootkpi/kpi_values", "wb");
+	if (!f) {
+		wpa_printf(MSG_INFO, "Failed to open"
+			   "/sys/kernel/debug/bootkpi/kpi_values");
+		return;
+	}
+	if (fwrite(marker, 1, os_strlen(marker), f) !=
+	    os_strlen(marker)) {
+		wpa_printf(MSG_INFO, "Failed to write %s", marker);
+		fclose(f);
+		return;
+	}
+	fclose(f);
+}
+#endif
+

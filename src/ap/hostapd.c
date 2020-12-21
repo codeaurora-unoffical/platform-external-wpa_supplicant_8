@@ -1697,6 +1697,7 @@ static int setup_interface2(struct hostapd_iface *iface)
 fail:
 	hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 	wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
+	place_marker(AP_EVENT_DISABLED);
 	if (iface->interfaces && iface->interfaces->terminate_on_error)
 		eloop_terminate();
 	return -1;
@@ -2125,6 +2126,7 @@ dfs_offload:
 	hostapd_owe_update_trans(iface);
 	airtime_policy_update_init(iface);
 	wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, AP_EVENT_ENABLED);
+	place_marker(AP_EVENT_ENABLED);
 	if (hapd->setup_complete_cb)
 		hapd->setup_complete_cb(hapd->setup_complete_cb_ctx);
 
@@ -2142,6 +2144,7 @@ fail:
 	wpa_printf(MSG_ERROR, "Interface initialization failed");
 	hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 	wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
+	place_marker(AP_EVENT_DISABLED);
 #ifdef CONFIG_FST
 	if (iface->fst) {
 		fst_detach(iface->fst);
@@ -2188,6 +2191,7 @@ int hostapd_setup_interface_complete(struct hostapd_iface *iface, int err)
 		hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 		iface->need_to_start_in_sync = 0;
 		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
+		place_marker(AP_EVENT_DISABLED);
 		if (interfaces && interfaces->terminate_on_error)
 			eloop_terminate();
 		return -1;
@@ -2331,6 +2335,7 @@ static void hostapd_bss_deinit(struct hostapd_data *hapd)
 		   hapd->conf ? hapd->conf->iface : "N/A");
 	hostapd_bss_deinit_no_free(hapd);
 	wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
+	place_marker(AP_EVENT_DISABLED);
 #ifdef CONFIG_SQLITE
 	if (hapd->rad_attr_db) {
 		sqlite3_close(hapd->rad_attr_db);
@@ -2721,6 +2726,7 @@ int hostapd_disable_iface(struct hostapd_iface *hapd_iface)
 	}
 
 	wpa_msg(hapd_iface->bss[0]->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
+	place_marker(AP_EVENT_DISABLED);
 	driver = hapd_iface->bss[0]->driver;
 	drv_priv = hapd_iface->bss[0]->drv_priv;
 

@@ -764,6 +764,7 @@ int main(int argc, char *argv[])
 	    num_bss_configs == 0)
 		usage();
 
+	place_marker("SAP TRY TO START");
 	wpa_msg_register_ifname_cb(hostapd_msg_ifname_cb);
 
 	if (log_file)
@@ -893,6 +894,7 @@ int main(int argc, char *argv[])
 	ret = 0;
 
  out:
+	place_marker("SAP START FAILURE");
 	hostapd_global_ctrl_iface_deinit(&interfaces);
 	/* Deinitialize all interfaces */
 	for (i = 0; i < interfaces.count; i++) {
