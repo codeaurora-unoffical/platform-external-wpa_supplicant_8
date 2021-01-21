@@ -4232,6 +4232,7 @@ void wpa_supplicant_select_network(struct wpa_supplicant *wpa_s,
 	} else {
 		wpa_s->connect_without_scan = NULL;
 	}
+	wpa_supplicant_update_scan_results(wpa_s);
 
 	wpa_s->disconnected = 0;
 	wpa_s->reassociate = 1;
@@ -4958,6 +4959,7 @@ wpa_supplicant_alloc(struct wpa_supplicant *parent)
 	wpa_s->parent = parent ? parent : wpa_s;
 	wpa_s->p2pdev = wpa_s->parent;
 	wpa_s->sched_scanning = 0;
+	wpa_s->setband_mask = WPA_SETBAND_AUTO;
 
 	dl_list_init(&wpa_s->bss_tmp_disallowed);
 	dl_list_init(&wpa_s->fils_hlp_req);
