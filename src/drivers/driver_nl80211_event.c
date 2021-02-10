@@ -2428,6 +2428,12 @@ static void nl80211_vendor_event(struct wpa_driver_nl80211_data *drv,
 		return;
 	}
 
+#ifdef ANDROID
+#ifdef ANDROID_LIB_EVENT
+       wpa_driver_nl80211_driver_event(drv, vendor_id, subcmd, data, len);
+#endif /* ANDROID_LIB_EVENT */
+#endif /* ANDROID */
+
 	switch (vendor_id) {
 	case OUI_QCA:
 		nl80211_vendor_event_qca(drv, subcmd, data, len);
@@ -2765,11 +2771,8 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 
 	if (drv->ap_scan_as_station != NL80211_IFTYPE_UNSPECIFIED &&
 	    (cmd == NL80211_CMD_NEW_SCAN_RESULTS ||
-	     cmd == NL80211_CMD_SCAN_ABORTED)) {
-		wpa_driver_nl80211_set_mode(drv->first_bss,
-					    drv->ap_scan_as_station);
-		drv->ap_scan_as_station = NL80211_IFTYPE_UNSPECIFIED;
-	}
+	     cmd == NL80211_CMD_SCAN_ABORTED))
+		nl80211_restore_ap_mode(bss);
 
 	switch (cmd) {
 	case NL80211_CMD_TRIGGER_SCAN:
