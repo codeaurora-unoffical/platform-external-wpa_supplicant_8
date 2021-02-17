@@ -18,14 +18,6 @@ endif
 
 include $(LOCAL_PATH)/android.config
 
-ifeq ($(call is-board-platform-in-list,msm8998),true)
-  $(warning "Disabling SAE and OWE in wpa_supplicant for $(TARGET_BOARD_PLATFORM)")
-  CONFIG_OWE=n
-  CONFIG_SAE=n
-  # Enabling mesh support enables SAE, so make sure mesh supoort is disabled
-  CONFIG_MESH=n
-endif
-
 ifeq ($(call is-board-platform-in-list,msm8909 msm8937 msm8953 msm8996 msm8998 sdm660 sdm710 sdm845 $(MSMSTEPPE) $(TRINKET) msmnile lito atoll bengal kona),true)
   $(warning "Disabling OCV support in hostapd for $(TARGET_BOARD_PLATFORM)")
   CONFIG_OCV=n
@@ -85,6 +77,10 @@ L_CFLAGS += -DANDROID_P2P
 
 ifeq ($(BOARD_WPA_SUPPLICANT_PRIVATE_LIB),)
 L_CFLAGS += -DANDROID_LIB_STUB
+endif
+
+ifneq ($(BOARD_WPA_SUPPLICANT_PRIVATE_LIB_EVENT),)
+L_CFLAGS += -DANDROID_LIB_EVENT
 endif
 
 # Disable roaming in wpa_supplicant
@@ -302,6 +298,12 @@ endif
 ifeq ($(CONFIG_DPP),y)
 L_CFLAGS += -DCONFIG_DPP
 OBJS += src/common/dpp.c
+OBJS += src/common/dpp_auth.c
+OBJS += src/common/dpp_backup.c
+OBJS += src/common/dpp_crypto.c
+OBJS += src/common/dpp_pkex.c
+OBJS += src/common/dpp_reconfig.c
+OBJS += src/common/dpp_tcp.c
 OBJS += dpp_supplicant.c
 NEED_AES_SIV=y
 NEED_HMAC_SHA256_KDF=y
