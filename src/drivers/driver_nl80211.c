@@ -579,6 +579,32 @@ struct nl_msg * nl80211_drv_msg(struct wpa_driver_nl80211_data *drv, int flags,
 	return nl80211_ifindex_msg(drv, drv->ifindex, flags, cmd);
 }
 
+static struct nl_msg *
+nl80211_ifindex_msg_size(struct wpa_driver_nl80211_data *drv, int ifindex,
+			 int flags, uint8_t cmd, size_t size)
+{
+	struct nl_msg *msg;
+
+	msg = nlmsg_alloc_size(size);
+	if (!msg)
+		return NULL;
+
+	if (!nl80211_cmd(drv, msg, flags, cmd) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex)) {
+		nlmsg_free(msg);
+		return NULL;
+	}
+
+	return msg;
+}
+
+
+struct nl_msg * nl80211_drv_msg_size(struct wpa_driver_nl80211_data *drv,
+				     int flags, uint8_t cmd, size_t size)
+{
+	return nl80211_ifindex_msg_size(drv, drv->ifindex, flags, cmd, size);
+}
+
 
 struct nl_msg * nl80211_bss_msg(struct i802_bss *bss, int flags, uint8_t cmd)
 {
@@ -3813,6 +3839,7 @@ static int wpa_driver_nl80211_set_acl(void *priv,
 	struct nl_msg *acl;
 	unsigned int i;
 	int ret;
+	size_t acl_nla_sz, acl_nlmsg_sz, nla_sz, nlmsg_sz;
 
 	if (!(drv->capa.max_acl_mac_addrs))
 		return -ENOTSUP;
@@ -3823,9 +3850,12 @@ static int wpa_driver_nl80211_set_acl(void *priv,
 	wpa_printf(MSG_DEBUG, "nl80211: Set %s ACL (num_mac_acl=%u)",
 		   params->acl_policy ? "Accept" : "Deny", params->num_mac_acl);
 
-	acl = nlmsg_alloc();
+	acl_nla_sz = nla_total_size(ETH_ALEN) * params->num_mac_acl;
+	acl_nlmsg_sz = nlmsg_total_size(acl_nla_sz);
+	acl = nlmsg_alloc_size(acl_nlmsg_sz);
 	if (!acl)
 		return -ENOMEM;
+
 	for (i = 0; i < params->num_mac_acl; i++) {
 		if (nla_put(acl, i + 1, ETH_ALEN, params->mac_acl[i].addr)) {
 			nlmsg_free(acl);
@@ -3833,7 +3863,18 @@ static int wpa_driver_nl80211_set_acl(void *priv,
 		}
 	}
 
-	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_SET_MAC_ACL)) ||
+	/*
+	 * genetlink message header (Length of user header is 0) +
+	 * u32 attr: NL80211_ATTR_IFINDEX +
+	 * u32 attr: NL80211_ATTR_ACL_POLICY +
+	 * nested acl attr
+	 */
+	nla_sz = GENL_HDRLEN +
+		nla_total_size(4) * 2 +
+		nla_total_size(acl_nla_sz);
+	nlmsg_sz = nlmsg_total_size(nla_sz);
+	if (!(msg = nl80211_drv_msg_size(drv, 0, NL80211_CMD_SET_MAC_ACL,
+					 nlmsg_sz)) ||
 	    nla_put_u32(msg, NL80211_ATTR_ACL_POLICY, params->acl_policy ?
 			NL80211_ACL_POLICY_DENY_UNLESS_LISTED :
 			NL80211_ACL_POLICY_ACCEPT_UNLESS_LISTED) ||
